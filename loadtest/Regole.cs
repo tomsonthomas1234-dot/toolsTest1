@@ -1016,6 +1016,7 @@ static class Regole
         s.Admin($"tp {CX.ToString(Inv)} {CZ.ToString(Inv)}");
         s.Admin($"build Workbench {(CX + 2f).ToString(Inv)} {CZ.ToString(Inv)}");
         s.Admin($"build Workbench {(CX - 2f).ToString(Inv)} {CZ.ToString(Inv)}");
+        s.Attendi(() => false, 0.8);
 
         if (!s.Attendi(() => s.Mondo.Values.Count(e => e.Type == EntityType.Workbench &&
                                                        Dist(e.X, e.Z, CX, CZ) < 6f) >= 2, 15))
@@ -1034,10 +1035,39 @@ static class Regole
 
         // I banchi devono sparire: una combinazione che non consuma gli
         // ingredienti sarebbe un modo di fabbricare tavoli dal nulla.
-        if (nato && banchiRimasti == 0)
-        { Console.WriteLine("  OK: il tavolo c'e' e i banchi sono stati consumati"); return true; }
-        if (!nato)              Console.WriteLine("  FALLITA: la combinazione non ha prodotto niente");
-        if (banchiRimasti > 0)  Console.WriteLine("  FALLITA: i banchi non sono stati consumati");
+        if (!(nato && banchiRimasti == 0))
+        {
+            if (!nato)             Console.WriteLine("  FALLITA: la combinazione non ha prodotto niente");
+            if (banchiRimasti > 0) Console.WriteLine("  FALLITA: i banchi non sono stati consumati");
+            return false;
+        }
+        Console.WriteLine("  il tavolo c'e' e i banchi sono stati consumati");
+
+        // --- quattro orti fanno una fattoria, e la fattoria e' un'altra cosa
+        const float FX = 260f, FZ = 200f;
+        s.Admin($"tp {FX.ToString(Inv)} {FZ.ToString(Inv)}");
+        for (int i = 0; i < 4; i++)
+            s.Admin($"build FarmPlot {(FX + i * 2f).ToString(Inv)} {FZ.ToString(Inv)}");
+        s.Attendi(() => false, 1.2);
+
+        if (!s.Attendi(() => s.Mondo.Values.Count(e => e.Type == EntityType.FarmPlot &&
+                                                       Dist(e.X, e.Z, FX, FZ) < 10f) >= 4, 15))
+        { Console.WriteLine("  FALLITA: i quattro orti non sono comparsi"); return false; }
+
+        s.Combina(EntityType.Farm, FX, FZ);
+
+        EntityState fattoria = null;
+        bool fatta = s.Attendi(() => (fattoria = s.PiuVicina(EntityType.Farm, FX, FZ)) != null &&
+                                     Dist(fattoria.X, fattoria.Z, FX, FZ) < 16f, 20);
+        int ortiRimasti = s.Mondo.Values.Count(e => e.Type == EntityType.FarmPlot &&
+                                                    Dist(e.X, e.Z, FX, FZ) < 10f);
+
+        Console.WriteLine($"  quattro orti → fattoria: {(fatta ? "creata" : "NON creata")}, orti rimasti {ortiRimasti}");
+
+        if (fatta && ortiRimasti == 0)
+        { Console.WriteLine("  OK: entrambe le combinazioni funzionano"); return true; }
+        if (!fatta)            Console.WriteLine("  FALLITA: la fattoria non e' stata creata");
+        if (ortiRimasti > 0)   Console.WriteLine("  FALLITA: gli orti non sono stati consumati");
         return false;
     }
 
