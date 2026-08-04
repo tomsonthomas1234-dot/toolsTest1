@@ -118,6 +118,7 @@ if (modoRegole)
         ("catalogo ricette",        () => Regole.CatalogoRicette(tokens[1], host, port)),
         ("mangiare cura",           () => Regole.MangiareCura(tokens[1], host, port)),
         ("bauli",                   () => Regole.Bauli(tokens[1], host, port)),
+        ("agricoltura",             () => Regole.Agricoltura(tokens[1], host, port)),
         ("persistenza al rientro",  () => Regole.PersistenzaAlRientro(tokens[3], host, port)),
     };
 

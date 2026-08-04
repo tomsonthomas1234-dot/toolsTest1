@@ -39,6 +39,15 @@ sealed class Sonda : IDisposable
     public ConsumeResultMsg UltimoConsumo;
     public ChestContentsMsg UltimoBaule;
 
+    public void Raccogli(ulong bersaglio) =>
+        Manda(NetMsgType.Command, new CommandMsg
+        {
+            CommandId = 7,
+            Type      = CommandType.Gather,
+            Payload   = MessagePack.MessagePackSerializer.Serialize(
+                            new GatherCommand { TargetEntityId = bersaglio }),
+        });
+
     public void ApriBaule(ulong id)
     {
         UltimoBaule = null;
@@ -857,7 +866,69 @@ static class Regole
         return false;
     }
 
-    // ---- 10. persistenza del giocatore ----------------------------------------
+    // ---- 10. l'orto si semina e si esaurisce ----------------------------------
+    //
+    // Il seme era un vicolo cieco: due punti del codice lo davano, zero lo
+    // usavano. Un oggetto che si accumula e non serve a niente non e un premio.
+
+    public static bool Agricoltura(string token, string host, int port)
+    {
+        Console.WriteLine("--- orto: si semina, rende, e si esaurisce");
+
+        using var s = new Sonda(token, host, port);
+        if (!s.AttendiPronta()) { Console.WriteLine("  FALLITA: la sonda non e' entrata in gioco"); return false; }
+        if (!s.Attendi(() => s.Ricette.Length > 0, 10))
+        { Console.WriteLine("  FALLITA: catalogo non arrivato"); return false; }
+
+        const float OX = -60f, OZ = -320f;
+        s.Admin("setfaction 2");
+        s.Admin($"tp {OX.ToString(Inv)} {OZ.ToString(Inv)}");
+        s.Admin("clearinv");
+        s.Admin($"build FarmPlot {OX.ToString(Inv)} {OZ.ToString(Inv)}");
+
+        EntityState orto = null;
+        if (!s.Attendi(() => (orto = s.PiuVicina(EntityType.FarmPlot, OX, OZ)) != null &&
+                             Dist(orto.X, orto.Z, OX, OZ) < 4f, 12))
+        { Console.WriteLine("  FALLITA: l'orto non e' comparso"); return false; }
+
+        // Un orto piantato d'ufficio non passa dalla ricetta, quindi nasce senza
+        // semine: e' esattamente il caso "a riposo" che vogliamo provare.
+        int semineIniziali = (int)orto.Extra2;
+        Console.WriteLine($"  orto creato: semine {semineIniziali}");
+
+        s.Admin("give Crop 4");
+        if (!s.Attendi(() => s.Quanti(ItemType.Crop) == 4, 10))
+        { Console.WriteLine("  FALLITA: non ho ottenuto i raccolti da seminare"); return false; }
+
+        // Semina: il gather su un orto a riposo semina invece di raccogliere.
+        s.Raccogli(orto.EntityId);
+
+        bool seminato = s.Attendi(() =>
+        {
+            var o = s.PiuVicina(EntityType.FarmPlot, OX, OZ);
+            return o != null && (int)o.Extra2 >= 4;
+        }, 15);
+
+        var dopo = s.PiuVicina(EntityType.FarmPlot, OX, OZ);
+        int semineDopo = dopo != null ? (int)dopo.Extra2 : -1;
+        int raccoltiRimasti = s.Quanti(ItemType.Crop);
+
+        Console.WriteLine($"  dopo la semina: semine {semineDopo}, raccolti in zaino {raccoltiRimasti}");
+
+        bool semineSalite = semineDopo >= 4;
+        bool raccoltiSpesi = raccoltiRimasti == 0;
+
+        if (seminato && semineSalite && raccoltiSpesi)
+        {
+            Console.WriteLine("  OK: i raccolti sono finiti sottoterra e il campo e' seminato");
+            return true;
+        }
+        if (!semineSalite)  Console.WriteLine("  FALLITA: le semine non sono aumentate");
+        if (!raccoltiSpesi) Console.WriteLine("  FALLITA: i raccolti non sono stati consumati");
+        return false;
+    }
+
+    // ---- 11. persistenza del giocatore ----------------------------------------
     //
     // Qui i difetti si sono gia' visti in partita, piu' volte: si costruiva e la
     // costruzione restava, ma l'inventario spariva. E' anche il caso peggiore da
