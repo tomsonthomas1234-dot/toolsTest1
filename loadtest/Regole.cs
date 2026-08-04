@@ -36,6 +36,19 @@ sealed class Sonda : IDisposable
         return -1;
     }
 
+    public ConsumeResultMsg UltimoConsumo;
+
+    public void Mangia(ItemType cosa)
+    {
+        UltimoConsumo = null;
+        Manda(NetMsgType.Command, new CommandMsg
+        {
+            CommandId = 5,
+            Type      = CommandType.Consume,
+            Payload   = MessagePack.MessagePackSerializer.Serialize(new ConsumeCommand { Type = cosa }),
+        });
+    }
+
     public void ChiediRicetta(int indice, float px, float pz)
     {
         UltimoCraft = null;
@@ -102,6 +115,11 @@ sealed class Sonda : IDisposable
                     case NetMsgType.CraftResult:
                         UltimoCraft ??= MessagePack.MessagePackSerializer
                                             .Deserialize<CraftResultMsg>(env.Payload);
+                        break;
+
+                    case NetMsgType.ConsumeResult:
+                        UltimoConsumo = MessagePack.MessagePackSerializer
+                                            .Deserialize<ConsumeResultMsg>(env.Payload);
                         break;
 
                     case NetMsgType.RecipeList:
@@ -675,7 +693,66 @@ static class Regole
         return false;
     }
 
-    // ---- 8. persistenza del giocatore -----------------------------------------
+    // ---- 8. mangiare cura ------------------------------------------------------
+
+    public static bool MangiareCura(string token, string host, int port)
+    {
+        Console.WriteLine("--- cibo: mangiare restituisce vita, e da sazi si rifiuta");
+
+        using var s = new Sonda(token, host, port);
+        if (!s.AttendiPronta()) { Console.WriteLine("  FALLITA: la sonda non e' entrata in gioco"); return false; }
+
+        s.Admin("clearinv");
+        s.Admin("give Meat 5");
+        if (!s.Attendi(() => s.Quanti(ItemType.Meat) >= 2, 10))
+        {
+            Console.WriteLine("  FALLITA: non sono riuscito a procurare il cibo");
+            return false;
+        }
+
+        // Da integri il cibo non va sprecato: deve rifiutare.
+        s.Mangia(ItemType.Meat);
+        if (!s.Attendi(() => s.UltimoConsumo != null, 8))
+        {
+            Console.WriteLine("  FALLITA: nessuna risposta al primo tentativo");
+            return false;
+        }
+        var daIntegro = s.UltimoConsumo;
+        Console.WriteLine($"  da integro:  Success={daIntegro.Success}  \"{daIntegro.Message}\"");
+
+        // Ora ferito: si scende a 40 con un danno, poi si mangia.
+        s.Admin("sethp 40");
+        if (!s.Attendi(() => false, 1.5)) { }
+
+        int carnePrima = s.Quanti(ItemType.Meat);
+        s.Mangia(ItemType.Meat);
+        if (!s.Attendi(() => s.UltimoConsumo != null && s.UltimoConsumo != daIntegro, 8))
+        {
+            Console.WriteLine("  FALLITA: nessuna risposta al secondo tentativo");
+            return false;
+        }
+        var daFerito = s.UltimoConsumo;
+        s.Attendi(() => s.Quanti(ItemType.Meat) < carnePrima, 6);
+
+        Console.WriteLine($"  da ferito:   Success={daFerito.Success}  \"{daFerito.Message}\"  vita={daFerito.Hp}" +
+                          $"  carne {carnePrima} → {s.Quanti(ItemType.Meat)}");
+
+        bool rifiutaDaIntegro = !daIntegro.Success;
+        bool curaDaFerito     = daFerito.Success && daFerito.Hp == 65;   // 40 + 25 della carne
+        bool consumata        = s.Quanti(ItemType.Meat) == carnePrima - 1;
+
+        if (rifiutaDaIntegro && curaDaFerito && consumata)
+        {
+            Console.WriteLine("  OK: cura di quanto previsto e consuma una unita");
+            return true;
+        }
+        if (!rifiutaDaIntegro) Console.WriteLine("  FALLITA: ha sprecato cibo su chi era gia in forze");
+        if (!curaDaFerito)     Console.WriteLine("  FALLITA: la vita non e' salita di 25 come previsto");
+        if (!consumata)        Console.WriteLine("  FALLITA: il cibo non e' stato consumato");
+        return false;
+    }
+
+    // ---- 9. persistenza del giocatore -----------------------------------------
     //
     // Qui i difetti si sono gia' visti in partita, piu' volte: si costruiva e la
     // costruzione restava, ma l'inventario spariva. E' anche il caso peggiore da
