@@ -928,7 +928,63 @@ static class Regole
         return false;
     }
 
-    // ---- 11. persistenza del giocatore ----------------------------------------
+    // ---- 11. i depositi accettano solo cio che gli spetta ----------------------
+
+    public static bool Depositi(string token, string host, int port)
+    {
+        Console.WriteLine("--- depositi: nel granaio il cibo, nella torre l'acqua");
+
+        using var s = new Sonda(token, host, port);
+        if (!s.AttendiPronta()) { Console.WriteLine("  FALLITA: la sonda non e' entrata in gioco"); return false; }
+
+        const float DX = 140f, DZ = 340f;
+        s.Admin("setfaction 2");
+        s.Admin($"tp {DX.ToString(Inv)} {DZ.ToString(Inv)}");
+        s.Admin("clearinv");
+        s.Admin($"build Granary {DX.ToString(Inv)} {DZ.ToString(Inv)}");
+        s.Admin("give Meat 6");
+        s.Admin("give Stone 6");
+
+        EntityState granaio = null;
+        if (!s.Attendi(() => (granaio = s.PiuVicina(EntityType.Granary, DX, DZ)) != null &&
+                             Dist(granaio.X, granaio.Z, DX, DZ) < 4f &&
+                             s.Quanti(ItemType.Meat) == 6 && s.Quanti(ItemType.Stone) == 6, 15))
+        { Console.WriteLine("  FALLITA: preparazione non riuscita"); return false; }
+
+        // La pietra non e cibo: deve essere rifiutata, e con una spiegazione.
+        s.SpostaNelBaule(granaio.EntityId, ItemType.Stone, 6, 0, deposita: true);
+        if (!s.Attendi(() => s.UltimoBaule != null, 10))
+        { Console.WriteLine("  FALLITA: nessuna risposta al deposito sbagliato"); return false; }
+        var rifiuto = s.UltimoBaule;
+        Console.WriteLine($"  pietra nel granaio: \"{rifiuto.Message}\"  (pietre in zaino {s.Quanti(ItemType.Stone)})");
+
+        // La carne si.
+        s.SpostaNelBaule(granaio.EntityId, ItemType.Meat, 4, 0, deposita: true);
+        if (!s.Attendi(() => s.UltimoBaule != null && s.UltimoBaule.Items.Any(i => i.Type == ItemType.Meat), 10))
+        { Console.WriteLine("  FALLITA: la carne non e' entrata"); return false; }
+        var carneDentro = s.UltimoBaule.Items.First(i => i.Type == ItemType.Meat);
+        Console.WriteLine($"  carne nel granaio: {carneDentro.Count}  (in zaino {s.Quanti(ItemType.Meat)})");
+
+        // E si riprende.
+        s.SpostaNelBaule(granaio.EntityId, ItemType.Meat, 2, 0, deposita: false);
+        s.Attendi(() => s.Quanti(ItemType.Meat) >= 4, 10);
+        Console.WriteLine($"  dopo il prelievo di 2: in zaino {s.Quanti(ItemType.Meat)}");
+
+        bool pietraRespinta = s.Quanti(ItemType.Stone) == 6 &&
+                              !string.IsNullOrEmpty(rifiuto.Message);
+        bool carneEntrata   = carneDentro.Count == 4 && s.Quanti(ItemType.Meat) >= 4;
+
+        if (pietraRespinta && carneEntrata)
+        {
+            Console.WriteLine("  OK: accetta il cibo, respinge il resto, e restituisce");
+            return true;
+        }
+        if (!pietraRespinta) Console.WriteLine("  FALLITA: ha accettato la pietra nel granaio");
+        if (!carneEntrata)   Console.WriteLine("  FALLITA: la carne non ha fatto andata e ritorno");
+        return false;
+    }
+
+    // ---- 12. persistenza del giocatore ----------------------------------------
     //
     // Qui i difetti si sono gia' visti in partita, piu' volte: si costruiva e la
     // costruzione restava, ma l'inventario spariva. E' anche il caso peggiore da
