@@ -37,6 +37,30 @@ sealed class Sonda : IDisposable
     }
 
     public ConsumeResultMsg UltimoConsumo;
+    public ChestContentsMsg UltimoBaule;
+
+    public void ApriBaule(ulong id)
+    {
+        UltimoBaule = null;
+        MandaBaule(new ChestTransferCommand { ChestId = id, PeekOnly = true });
+    }
+
+    public void SpostaNelBaule(ulong id, ItemType tipo, int quanti, ulong istanza, bool deposita)
+    {
+        UltimoBaule = null;
+        MandaBaule(new ChestTransferCommand
+        {
+            ChestId = id, Type = tipo, Count = quanti, InstanceId = istanza, Deposit = deposita,
+        });
+    }
+
+    void MandaBaule(ChestTransferCommand cmd) =>
+        Manda(NetMsgType.Command, new CommandMsg
+        {
+            CommandId = 6,
+            Type      = CommandType.ChestTransfer,
+            Payload   = MessagePack.MessagePackSerializer.Serialize(cmd),
+        });
 
     public void Mangia(ItemType cosa)
     {
@@ -115,6 +139,11 @@ sealed class Sonda : IDisposable
                     case NetMsgType.CraftResult:
                         UltimoCraft ??= MessagePack.MessagePackSerializer
                                             .Deserialize<CraftResultMsg>(env.Payload);
+                        break;
+
+                    case NetMsgType.ChestContents:
+                        UltimoBaule = MessagePack.MessagePackSerializer
+                                          .Deserialize<ChestContentsMsg>(env.Payload);
                         break;
 
                     case NetMsgType.ConsumeResult:
@@ -752,7 +781,83 @@ static class Regole
         return false;
     }
 
-    // ---- 9. persistenza del giocatore -----------------------------------------
+    // ---- 9. bauli: l'esemplare resta lo stesso ---------------------------------
+    //
+    // Il baule e' il primo posto dove un attrezzo passa di mano, ed e' li' che
+    // rischia di tornare una riga qualunque d'inventario: dentro con la sua
+    // usura, fuori nuovo di zecca. Con un pezzo unico sarebbe peggio — smetterebbe
+    // di essere unico senza che nessuno se ne accorga.
+
+    public static bool Bauli(string token, string host, int port)
+    {
+        Console.WriteLine("--- bauli: un'ascia usata esce com'e' entrata");
+
+        using var s = new Sonda(token, host, port);
+        if (!s.AttendiPronta()) { Console.WriteLine("  FALLITA: la sonda non e' entrata in gioco"); return false; }
+
+        const float BX = 60f, BZ = -300f;
+        s.Admin("setfaction 2");
+        s.Admin($"tp {BX.ToString(Inv)} {BZ.ToString(Inv)}");
+        s.Admin("clearinv");
+        s.Admin($"build Chest {BX.ToString(Inv)} {BZ.ToString(Inv)}");
+        s.Admin("give Axe 1");
+        s.Admin("give Stone 8");
+
+        EntityState baule = null;
+        if (!s.Attendi(() => (baule = s.PiuVicina(EntityType.Chest, BX, BZ)) != null &&
+                             Dist(baule.X, baule.Z, BX, BZ) < 4f &&
+                             s.Istanze.Values.Any(i => i.Tipo == ItemType.Axe) &&
+                             s.Quanti(ItemType.Stone) == 8, 15))
+        {
+            Console.WriteLine("  FALLITA: preparazione non riuscita");
+            return false;
+        }
+
+        var ascia = s.Istanze.First(i => i.Value.Tipo == ItemType.Axe);
+        ulong idAscia = ascia.Key;
+        int usuraPrima = ascia.Value.Usura;
+        Console.WriteLine($"  ascia id={idAscia} usura {usuraPrima}");
+
+        // --- deposito dell'esemplare
+        s.SpostaNelBaule(baule.EntityId, ItemType.Axe, 1, idAscia, deposita: true);
+        if (!s.Attendi(() => s.UltimoBaule != null, 10))
+        { Console.WriteLine("  FALLITA: nessuna risposta al deposito"); return false; }
+
+        var dentro = s.UltimoBaule.Items.FirstOrDefault(i => i.InstanceId == idAscia);
+        bool uscitaDalloZaino = !s.Istanze.ContainsKey(idAscia);
+        Console.WriteLine($"  dopo il deposito: nel baule {(dentro != null ? $"id={dentro.InstanceId} usura {dentro.Durability}" : "NON c'e'")}" +
+                          $", nello zaino {(uscitaDalloZaino ? "non c'e' piu'" : "c'e' ancora")}");
+
+        // --- deposito di una pila
+        s.SpostaNelBaule(baule.EntityId, ItemType.Stone, 8, 0, deposita: true);
+        s.Attendi(() => s.UltimoBaule != null && s.UltimoBaule.Items.Any(i => i.Type == ItemType.Stone), 10);
+        var pietre = s.UltimoBaule?.Items.FirstOrDefault(i => i.Type == ItemType.Stone);
+
+        // --- ripresa dell'esemplare
+        s.SpostaNelBaule(baule.EntityId, ItemType.Axe, 1, idAscia, deposita: false);
+        if (!s.Attendi(() => s.Istanze.ContainsKey(idAscia), 10))
+        { Console.WriteLine("  FALLITA: l'ascia non e' tornata nello zaino"); return false; }
+
+        int usuraDopo = s.Istanze[idAscia].Usura;
+        Console.WriteLine($"  ripresa:  id={idAscia} usura {usuraDopo} (era {usuraPrima}); pietre nel baule: {pietre?.Count ?? 0}");
+
+        bool depositata  = dentro != null && dentro.Durability == usuraPrima;
+        bool stessaAscia = usuraDopo == usuraPrima;
+        bool pilaOk      = pietre != null && pietre.Count == 8;
+
+        if (depositata && uscitaDalloZaino && stessaAscia && pilaOk)
+        {
+            Console.WriteLine("  OK: stesso esemplare all'andata e al ritorno, e le pile si spostano intere");
+            return true;
+        }
+        if (!depositata)       Console.WriteLine("  FALLITA: l'ascia non e' entrata nel baule con la sua usura");
+        if (!uscitaDalloZaino) Console.WriteLine("  FALLITA: l'ascia risulta ancora nello zaino: duplicata");
+        if (!stessaAscia)      Console.WriteLine("  FALLITA: e' tornata un'ascia diversa");
+        if (!pilaOk)           Console.WriteLine("  FALLITA: la pila di pietre non si e' spostata intera");
+        return false;
+    }
+
+    // ---- 10. persistenza del giocatore ----------------------------------------
     //
     // Qui i difetti si sono gia' visti in partita, piu' volte: si costruiva e la
     // costruzione restava, ma l'inventario spariva. E' anche il caso peggiore da

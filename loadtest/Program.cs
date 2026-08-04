@@ -117,6 +117,7 @@ if (modoRegole)
         ("amministrazione chiusa",  () => Regole.AmministrazioneChiusa(tokens[2], host, port)),
         ("catalogo ricette",        () => Regole.CatalogoRicette(tokens[1], host, port)),
         ("mangiare cura",           () => Regole.MangiareCura(tokens[1], host, port)),
+        ("bauli",                   () => Regole.Bauli(tokens[1], host, port)),
         ("persistenza al rientro",  () => Regole.PersistenzaAlRientro(tokens[3], host, port)),
     };
 
