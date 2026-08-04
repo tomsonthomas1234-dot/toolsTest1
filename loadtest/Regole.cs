@@ -25,6 +25,34 @@ sealed class Sonda : IDisposable
     public CraftResultMsg UltimoCraft;
     public RepairResultMsg UltimaRiparazione;
 
+    /// Il catalogo ricevuto all'ingresso. La posizione nell'elenco e' anche
+    /// l'identificatore con cui si chiede di creare una ricetta precisa.
+    public RecipeInfo[] Ricette = Array.Empty<RecipeInfo>();
+
+    public int IndiceRicetta(string nome)
+    {
+        for (int i = 0; i < Ricette.Length; i++)
+            if (string.Equals(Ricette[i].ResultName, nome, StringComparison.OrdinalIgnoreCase)) return i;
+        return -1;
+    }
+
+    public void ChiediRicetta(int indice, float px, float pz)
+    {
+        UltimoCraft = null;
+        Manda(NetMsgType.Command, new CommandMsg
+        {
+            CommandId = 4,
+            Type      = CommandType.Craft,
+            Payload   = MessagePack.MessagePackSerializer.Serialize(new CraftCommand
+            {
+                RecipeIndex = indice,
+                Ingredients = Array.Empty<IngredientSlot>(),
+                PlacementX  = px,
+                PlacementZ  = pz,
+            }),
+        });
+    }
+
     /// Tutto cio' che il server ci ha mostrato, per id. Serve per ritrovare una
     /// struttura appena piantata: l'amministratore ne conosce le coordinate ma
     /// non l'identificativo, e i comandi che agiscono su una struttura vogliono
@@ -74,6 +102,11 @@ sealed class Sonda : IDisposable
                     case NetMsgType.CraftResult:
                         UltimoCraft ??= MessagePack.MessagePackSerializer
                                             .Deserialize<CraftResultMsg>(env.Payload);
+                        break;
+
+                    case NetMsgType.RecipeList:
+                        Ricette = MessagePack.MessagePackSerializer
+                                      .Deserialize<RecipeListMsg>(env.Payload).Recipes;
                         break;
 
                     case NetMsgType.RepairResult:
@@ -575,7 +608,74 @@ static class Regole
         return false;
     }
 
-    // ---- 7. persistenza del giocatore -----------------------------------------
+    // ---- 7. catalogo: si ottiene la ricetta che si e' chiesta -----------------
+    //
+    // E' la ragione per cui la scelta viaggia come indice e non come lista di
+    // ingredienti. Banco da lavoro, abbeveratoio e distributore d'acqua chiedono
+    // tutti Legno x3 e Pietra x2: dagli ingredienti sono indistinguibili, e
+    // scegliere dal catalogo resterebbe un terno al lotto.
+
+    public static bool CatalogoRicette(string token, string host, int port)
+    {
+        Console.WriteLine("--- catalogo: due ricette con gli stessi ingredienti restano distinte");
+
+        using var s = new Sonda(token, host, port);
+        if (!s.AttendiPronta()) { Console.WriteLine("  FALLITA: la sonda non e' entrata in gioco"); return false; }
+        if (!s.Attendi(() => s.Ricette.Length > 0, 10))
+        {
+            Console.WriteLine("  FALLITA: il catalogo non e' arrivato");
+            return false;
+        }
+
+        int iTrough = s.IndiceRicetta("Water Trough");
+        int iBench  = s.IndiceRicetta("Workbench");
+        if (iTrough < 0 || iBench < 0)
+        {
+            Console.WriteLine($"  FALLITA: ricette non trovate nel catalogo ({s.Ricette.Length} presenti)");
+            return false;
+        }
+
+        // Stessi ingredienti: e' proprio il caso che rende necessario l'indice.
+        string IngDi(int i) => string.Join("+", s.Ricette[i].Ingredients
+            .Select(g => $"{(g.Count <= 0 ? 1 : g.Count)}x{g.Type}"));
+        Console.WriteLine($"  Workbench     = {IngDi(iBench)}");
+        Console.WriteLine($"  Water Trough  = {IngDi(iTrough)}");
+
+        const float CX = -120f, CZ = 260f;
+        s.Admin("setfaction 3");
+        s.Admin($"tp {CX.ToString(Inv)} {CZ.ToString(Inv)}");
+        s.Admin("clearinv");
+        s.Admin("give Wood 20");
+        s.Admin("give Stone 20");
+        if (!s.Attendi(() => s.Quanti(ItemType.Wood) >= 3 && s.Quanti(ItemType.Stone) >= 2 &&
+                             Dist(s.X, s.Z, CX, CZ) < 2f, 12))
+        {
+            Console.WriteLine("  FALLITA: preparazione non riuscita");
+            return false;
+        }
+
+        // Si chiede l'abbeveratoio, non il banco.
+        s.ChiediRicetta(iTrough, CX + 2f, CZ);
+
+        EntityState nato = null;
+        bool comparso = s.Attendi(() =>
+            (nato = s.PiuVicina(EntityType.WaterTrough, CX, CZ)) != null &&
+            Dist(nato.X, nato.Z, CX, CZ) < 8f, 20);
+
+        var bancoIndesiderato = s.PiuVicina(EntityType.Workbench, CX, CZ);
+        bool bancoSpurio = bancoIndesiderato != null &&
+                           Dist(bancoIndesiderato.X, bancoIndesiderato.Z, CX, CZ) < 8f;
+
+        Console.WriteLine($"  chiesto Water Trough → comparso: {(comparso ? "Water Trough" : "niente")}" +
+                          (bancoSpurio ? ", ma c'e' anche un Workbench" : ""));
+
+        if (comparso && !bancoSpurio) { Console.WriteLine("  OK: e' arrivata la ricetta chiesta"); return true; }
+        if (!comparso)   Console.WriteLine("  FALLITA: l'abbeveratoio non e' comparso");
+        if (bancoSpurio) Console.WriteLine("  FALLITA: e' stato costruito un banco al posto suo");
+        return false;
+    }
+
+    // ---- 8. persistenza del giocatore -----------------------------------------
     //
     // Qui i difetti si sono gia' visti in partita, piu' volte: si costruiva e la
     // costruzione restava, ma l'inventario spariva. E' anche il caso peggiore da
