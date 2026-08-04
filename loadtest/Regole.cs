@@ -39,6 +39,15 @@ sealed class Sonda : IDisposable
     public ConsumeResultMsg UltimoConsumo;
     public ChestContentsMsg UltimoBaule;
 
+    public void Combina(EntityType risultato, float px, float pz) =>
+        Manda(NetMsgType.Command, new CommandMsg
+        {
+            CommandId = 8,
+            Type      = CommandType.CombineStructures,
+            Payload   = MessagePack.MessagePackSerializer.Serialize(new CombineCommand
+            { TargetBuilding = risultato, PlacementX = px, PlacementZ = pz }),
+        });
+
     public void Raccogli(ulong bersaglio) =>
         Manda(NetMsgType.Command, new CommandMsg
         {
@@ -136,8 +145,14 @@ sealed class Sonda : IDisposable
                         break;
 
                     case NetMsgType.WorldSnapshot:
+                        // Il fotogramma intero e' la verita': si ricostruisce da
+                        // capo invece di aggiungere soltanto. Senza, le entita'
+                        // sparite restavano nella vista della sonda per sempre —
+                        // e una prova che chiede "e' stato consumato?" avrebbe
+                        // risposto sempre di no.
                         Aggiorna(MessagePack.MessagePackSerializer
-                                     .Deserialize<WorldSnapshotMsg>(env.Payload).Entities);
+                                     .Deserialize<WorldSnapshotMsg>(env.Payload).Entities,
+                                 sostituisci: true);
                         break;
 
                     case NetMsgType.DeltaSnapshot:
@@ -198,9 +213,11 @@ sealed class Sonda : IDisposable
         _net.Connect(host, port, "precursori");
     }
 
-    void Aggiorna(EntityState[] entita)
+    void Aggiorna(EntityState[] entita, bool sostituisci = false)
     {
         lock (Mondo)
+        {
+            if (sostituisci) Mondo.Clear();
             foreach (var e in entita)
             {
                 Mondo[e.EntityId] = e;
@@ -208,6 +225,7 @@ sealed class Sonda : IDisposable
                 X = e.X; Y = e.Y; Z = e.Z;
                 Vista = true;
             }
+        }
     }
 
     /// <summary>L'entita di quel tipo piu vicina al punto, fra quelle viste.</summary>
@@ -984,7 +1002,46 @@ static class Regole
         return false;
     }
 
-    // ---- 12. persistenza del giocatore ----------------------------------------
+    // ---- 12. costruzioni per combinazione --------------------------------------
+
+    public static bool Combinazioni(string token, string host, int port)
+    {
+        Console.WriteLine("--- combinazioni: due banchi diventano un tavolo da costruzione");
+
+        using var s = new Sonda(token, host, port);
+        if (!s.AttendiPronta()) { Console.WriteLine("  FALLITA: la sonda non e' entrata in gioco"); return false; }
+
+        const float CX = 320f, CZ = 120f;
+        s.Admin("setfaction 2");
+        s.Admin($"tp {CX.ToString(Inv)} {CZ.ToString(Inv)}");
+        s.Admin($"build Workbench {(CX + 2f).ToString(Inv)} {CZ.ToString(Inv)}");
+        s.Admin($"build Workbench {(CX - 2f).ToString(Inv)} {CZ.ToString(Inv)}");
+
+        if (!s.Attendi(() => s.Mondo.Values.Count(e => e.Type == EntityType.Workbench &&
+                                                       Dist(e.X, e.Z, CX, CZ) < 6f) >= 2, 15))
+        { Console.WriteLine("  FALLITA: i due banchi non sono comparsi"); return false; }
+
+        Console.WriteLine("  due banchi in posizione");
+        s.Combina(EntityType.ConstructorTable, CX, CZ);
+
+        EntityState tavolo = null;
+        bool nato = s.Attendi(() => (tavolo = s.PiuVicina(EntityType.ConstructorTable, CX, CZ)) != null &&
+                                    Dist(tavolo.X, tavolo.Z, CX, CZ) < 16f, 20);
+
+        int banchiRimasti = s.Mondo.Values.Count(e => e.Type == EntityType.Workbench &&
+                                                      Dist(e.X, e.Z, CX, CZ) < 6f);
+        Console.WriteLine($"  esito: tavolo {(nato ? "creato" : "NON creato")}, banchi rimasti li' {banchiRimasti}");
+
+        // I banchi devono sparire: una combinazione che non consuma gli
+        // ingredienti sarebbe un modo di fabbricare tavoli dal nulla.
+        if (nato && banchiRimasti == 0)
+        { Console.WriteLine("  OK: il tavolo c'e' e i banchi sono stati consumati"); return true; }
+        if (!nato)              Console.WriteLine("  FALLITA: la combinazione non ha prodotto niente");
+        if (banchiRimasti > 0)  Console.WriteLine("  FALLITA: i banchi non sono stati consumati");
+        return false;
+    }
+
+    // ---- 13. persistenza del giocatore ----------------------------------------
     //
     // Qui i difetti si sono gia' visti in partita, piu' volte: si costruiva e la
     // costruzione restava, ma l'inventario spariva. E' anche il caso peggiore da
