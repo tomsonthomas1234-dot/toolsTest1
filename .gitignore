@@ -1,0 +1,11 @@
+# Prodotti di compilazione dei due progetti qui dentro.
+bin/
+obj/
+
+# Log delle esecuzioni: server, web API, banco di carico, prove sulle regole.
+# Cambiano a ogni giro e non dicono niente a chi legge la storia del repository.
+logs/
+
+# Messaggi di commit in lavorazione. ship.ps1 li scrive, li usa e li cancella:
+# esistono solo fra il momento in cui si prepara un commit e quello in cui parte.
+msg/
