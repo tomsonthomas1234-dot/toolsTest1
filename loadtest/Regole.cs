@@ -1134,7 +1134,60 @@ static class Regole
         return true;
     }
 
-    // ---- 14. persistenza del giocatore ----------------------------------------
+    // ---- 14. morire costa ------------------------------------------------------
+    //
+    // Fino a ieri si rinasceva con lo zaino intatto. In un gioco dove il PvP e'
+    // conquista era la scelta piu' forte del progetto, presa senza volerlo.
+
+    public static bool MorireCosta(string token, string host, int port)
+    {
+        Console.WriteLine("--- morte: si perde quello che si porta");
+
+        using var s = new Sonda(token, host, port);
+        if (!s.AttendiPronta()) { Console.WriteLine("  FALLITA: la sonda non e' entrata in gioco"); return false; }
+
+        const float MX = 300f, MZ = -300f;
+        s.Admin("setfaction 4");
+        s.Admin($"tp {MX.ToString(Inv)} {MZ.ToString(Inv)}");
+        s.Admin("clearinv");
+        s.Admin("give Wood 30");
+        s.Admin("give Stone 30");
+        s.Admin("give Axe 1");
+
+        if (!s.Attendi(() => s.Quanti(ItemType.Wood) == 30 && s.Quanti(ItemType.Stone) == 30 &&
+                             s.Istanze.Values.Any(i => i.Tipo == ItemType.Axe) &&
+                             Dist(s.X, s.Z, MX, MZ) < 3f, 15))
+        { Console.WriteLine("  FALLITA: preparazione non riuscita"); return false; }
+
+        Console.WriteLine($"  prima: legno {s.Quanti(ItemType.Wood)}, pietra {s.Quanti(ItemType.Stone)}, " +
+                          $"asce {s.Istanze.Values.Count(i => i.Tipo == ItemType.Axe)}");
+
+        s.Admin("kill");
+
+        bool svuotato = s.Attendi(() => s.Quanti(ItemType.Wood) == 0 &&
+                                        s.Quanti(ItemType.Stone) == 0 &&
+                                        !s.Istanze.Values.Any(i => i.Tipo == ItemType.Axe), 20);
+
+        Console.WriteLine($"  dopo:  legno {s.Quanti(ItemType.Wood)}, pietra {s.Quanti(ItemType.Stone)}, " +
+                          $"asce {s.Istanze.Values.Count(i => i.Tipo == ItemType.Axe)}");
+
+        // Parte della roba deve essere finita a terra, non essere sparita tutta:
+        // "non e' detto che caschi" non vuol dire "non casca mai".
+        int aTerra = s.Mondo.Values.Count(e => e.Type == EntityType.DroppedItem &&
+                                               Dist(e.X, e.Z, MX, MZ) < 12f);
+        Console.WriteLine($"  oggetti a terra vicino al punto di morte: {aTerra}");
+
+        if (!svuotato)
+        {
+            Console.WriteLine("  FALLITA: lo zaino non si e' svuotato morendo");
+            return false;
+        }
+        Console.WriteLine("  OK: morire svuota lo zaino" +
+                          (aTerra > 0 ? " e qualcosa resta a terra" : " (stavolta non e' caduto niente: e' possibile)"));
+        return true;
+    }
+
+    // ---- 15. persistenza del giocatore ----------------------------------------
     //
     // Qui i difetti si sono gia' visti in partita, piu' volte: si costruiva e la
     // costruzione restava, ma l'inventario spariva. E' anche il caso peggiore da
