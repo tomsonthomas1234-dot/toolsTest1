@@ -121,6 +121,7 @@ if (modoRegole)
         ("agricoltura",             () => Regole.Agricoltura(tokens[1], host, port)),
         ("depositi",                () => Regole.Depositi(tokens[1], host, port)),
         ("combinazioni",            () => Regole.Combinazioni(tokens[1], host, port)),
+        ("terra che si consuma",    () => Regole.TerraSiConsuma(tokens[1], host, port)),
         ("persistenza al rientro",  () => Regole.PersistenzaAlRientro(tokens[3], host, port)),
     };
 

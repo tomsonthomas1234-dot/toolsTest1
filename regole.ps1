@@ -64,6 +64,25 @@ function Ferma-SoloServer {
 }
 
 # ---- compilazione ----------------------------------------------------------
+#
+# Anche il server, non solo le prove.
+#
+# Il banco lo avvia con --no-build, quindi senza questo passaggio proverebbe il
+# codice dell'ultima compilazione invece di quello appena scritto. E' gia
+# costato due giri di indagine su un comando che "non funzionava" e che nel
+# binario in esecuzione semplicemente non esisteva.
+Write-Output "=== build server ==="
+Get-Process -Name "Precursori.GameServer","Precursori.WebApi" -ErrorAction SilentlyContinue |
+    ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }
+Start-Sleep -Milliseconds 900
+Push-Location "$root\bootstrap\02_gameserver\src\Precursori.GameServer"
+$srvOut = dotnet build -v minimal --nologo 2>&1
+$srvOk  = $LASTEXITCODE -eq 0
+Pop-Location
+$srvOut | Select-String -Pattern "error|Errori:|Compilazione" | Select-Object -First 4 |
+    ForEach-Object { "  " + $_.Line }
+if (-not $srvOk) { Write-Output "  SERVER NON COMPILATO: annullo."; exit 1 }
+
 Write-Output "=== build prove ==="
 Push-Location "$root\tools\loadtest"
 $buildOut = dotnet build -c Release -v minimal --nologo 2>&1

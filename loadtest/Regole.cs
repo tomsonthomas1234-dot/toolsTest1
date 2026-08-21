@@ -38,6 +38,17 @@ sealed class Sonda : IDisposable
 
     public ConsumeResultMsg UltimoConsumo;
     public ChestContentsMsg UltimoBaule;
+    public WorldVitalityMapMsg UltimaVitalita;
+
+    /// Somma della vitalita di tutti i chunk: basta per dire se e scesa.
+    public long VitalitaTotale()
+    {
+        var v = UltimaVitalita?.Vitality;
+        if (v == null) return -1;
+        long s = 0;
+        foreach (var b in v) s += b;
+        return s;
+    }
 
     public void Combina(EntityType risultato, float px, float pz) =>
         Manda(NetMsgType.Command, new CommandMsg
@@ -163,6 +174,11 @@ sealed class Sonda : IDisposable
                     case NetMsgType.CraftResult:
                         UltimoCraft ??= MessagePack.MessagePackSerializer
                                             .Deserialize<CraftResultMsg>(env.Payload);
+                        break;
+
+                    case NetMsgType.WorldVitalityMap:
+                        UltimaVitalita = MessagePack.MessagePackSerializer
+                                             .Deserialize<WorldVitalityMapMsg>(env.Payload);
                         break;
 
                     case NetMsgType.ChestContents:
@@ -1071,7 +1087,54 @@ static class Regole
         return false;
     }
 
-    // ---- 13. persistenza del giocatore ----------------------------------------
+    // ---- 13. la terra si consuma e se lo ricorda -------------------------------
+    //
+    // Portato dal ramo phase0-persistence. La cicatrice si vedeva ma non costava
+    // niente: il terreno cambiava forma e il mondo restava ricco come prima.
+
+    public static bool TerraSiConsuma(string token, string host, int port)
+    {
+        Console.WriteLine("--- terra: inaridirla la impoverisce, e il mondo se lo ricorda");
+
+        using var s = new Sonda(token, host, port);
+        if (!s.AttendiPronta()) { Console.WriteLine("  FALLITA: la sonda non e' entrata in gioco"); return false; }
+        if (!s.Attendi(() => s.UltimaVitalita != null, 12))
+        { Console.WriteLine("  FALLITA: la mappa di vitalita' non e' arrivata all'ingresso"); return false; }
+
+        long prima = s.VitalitaTotale();
+        int chunk = s.UltimaVitalita.Vitality.Length;
+        Console.WriteLine($"  all'ingresso: {chunk} chunk, vitalita' totale {prima}");
+
+        // Lo spawn della fazione 1: terra per definizione, dato che i giocatori
+        // ci compaiono. Un punto scelto a caso sarebbe quasi sempre oceano —
+        // 840 chunk su 1024 sono acqua — e l'oceano non si inaridisce, quindi la
+        // prova fallirebbe senza che ci sia niente di rotto.
+        const float TX = -400f, TZ = -400f;
+        s.Admin($"tp {TX.ToString(Inv)} {TZ.ToString(Inv)}");
+        if (!s.Attendi(() => Dist(s.X, s.Z, TX, TZ) < 3f, 8))
+        { Console.WriteLine("  FALLITA: non arrivata sul punto"); return false; }
+
+        s.Admin("blight 80 0.5");
+        bool scesa = s.Attendi(() => s.VitalitaTotale() < prima, 12);
+        long dopo = s.VitalitaTotale();
+
+        Console.WriteLine($"  dopo l'inaridimento: {dopo}  (differenza {dopo - prima})");
+
+        if (!scesa)
+        {
+            Console.WriteLine("  FALLITA: la vitalita' non e' scesa");
+            return false;
+        }
+        if (chunk != 1024)
+        {
+            Console.WriteLine($"  FALLITA: attesi 1024 chunk, ricevuti {chunk}");
+            return false;
+        }
+        Console.WriteLine("  OK: la terra si consuma e il mondo lo comunica");
+        return true;
+    }
+
+    // ---- 14. persistenza del giocatore ----------------------------------------
     //
     // Qui i difetti si sono gia' visti in partita, piu' volte: si costruiva e la
     // costruzione restava, ma l'inventario spariva. E' anche il caso peggiore da
