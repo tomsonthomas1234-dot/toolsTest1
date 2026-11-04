@@ -41,6 +41,7 @@ sealed class Sonda : IDisposable
     public WorldVitalityMapMsg UltimaVitalita;
     public MatchStateMsg UltimaPartita;
     public RitualResultMsg UltimoRituale;
+    public SanctuaryStateMsg UltimoSantuario;
 
     /// Gli eventi del mondo ricevuti, in ordine di arrivo.
     public readonly List<WorldEventMsg> Eventi = new();
@@ -287,6 +288,11 @@ sealed class Sonda : IDisposable
                     case NetMsgType.RitualResult:
                         UltimoRituale = MessagePack.MessagePackSerializer
                                             .Deserialize<RitualResultMsg>(env.Payload);
+                        break;
+
+                    case NetMsgType.SanctuaryState:
+                        UltimoSantuario = MessagePack.MessagePackSerializer
+                                              .Deserialize<SanctuaryStateMsg>(env.Payload);
                         break;
 
                     case NetMsgType.Chat:
@@ -1546,6 +1552,11 @@ static class Regole
         p.Cammina(0f, 0f, 0.3);
     }
 
+    static string DescriviSantuario(SanctuaryStateMsg s) => s == null ? "(niente)" :
+        $"centro ({s.CenterX:F1}, {s.CenterZ:F1}) raggio {s.Radius}, ingresso ({s.EntranceX:F1}, {s.EntranceZ:F1}), " +
+        $"{s.Gate}" + (s.Gate == SanctuaryGate.Open ? $" per {s.OpenSecondsLeft} s" : "") +
+        $", mappa {(s.ShowOnMap ? "si" : "no")}, id {s.CenterId}";
+
     /// Le posizioni fresche di tutte: una sonda che non gira la rete crede di
     /// essere dove l'ha lasciata l'ultima volta che ha guardato.
     static void Aggiorna(Sonda[] ps) { foreach (var p in ps) p.Attendi(() => false, 0.2); }
@@ -1597,7 +1608,27 @@ static class Regole
             Console.WriteLine($"  dopo lo spostamento nell'angolo 0: {dentroAngolo0} dentro");
             if (dentroAngolo0 != 0)
             { Console.WriteLine("  FALLITA: spostato il santuario, dentro resta qualcosa"); ok = false; }
+
+            // --- il santuario nel protocollo (A1a3c2c): arriva a chi entra nel
+            // mondo, segue lo spostamento, e sulla mappa si evidenzia solo in
+            // carestia.
+            if (ps.Any(p => p.UltimoSantuario == null))
+            { Console.WriteLine("  FALLITA: all'ingresso nel mondo il santuario non e' arrivato a tutti"); ok = false; }
+            bool spostato = capo.Attendi(() => capo.UltimoSantuario is { } s &&
+                Dist(s.CenterX, s.CenterZ, CentroXZ, CentroXZ) < 0.1f &&
+                Dist(s.EntranceX, s.EntranceZ, IngressoXZ, IngressoXZ) < 0.1f, 4);
+            var vs = capo.UltimoSantuario;
+            Console.WriteLine($"  il santuario visto dal client: {DescriviSantuario(vs)}");
+            if (!spostato) { Console.WriteLine("  FALLITA: il client non sa che il santuario e' nell'angolo 0"); ok = false; }
+            else if (vs.Radius != 8f || vs.CenterId != CentroDelMondo || vs.Gate != SanctuaryGate.Closed)
+            { Console.WriteLine("  FALLITA: raggio, centro del mondo o ingresso sbagliati"); ok = false; }
+            capo.Admin("setvitality 0.02");
+            bool mappaCarestia = capo.Attendi(() => capo.UltimoSantuario?.ShowOnMap == true, 4);
             capo.Admin("setvitality 0.2");
+            bool mappaFine = capo.Attendi(() => capo.UltimoSantuario?.ShowOnMap == false, 4);
+            Console.WriteLine($"  sulla mappa: in carestia {mappaCarestia}, finita la carestia {(mappaFine ? "spento" : "ancora acceso")}");
+            if (!mappaCarestia || !mappaFine)
+            { Console.WriteLine("  FALLITA: il santuario non si evidenzia sulla mappa solo in carestia"); ok = false; }
             if (!capo.Attendi(() => capo.UltimaVitalita != null && ChunkPiuArido(capo) < 60, 6))
             { Console.WriteLine("  FALLITA: la terra non e' scesa al 20%"); capo.Admin("setvitality 1"); return false; }
 
@@ -1629,6 +1660,9 @@ static class Regole
                 " (fuori: " + string.Join(", ", ps.Select((p, i) => (p, i)).Where(t => !Dentro(t.p))
                     .Select(t => $"{t.i} a {Dist(t.p.X, t.p.Z, CentroXZ, CentroXZ):F1} m")) + ")"));
             if (dentro != 11) { Console.WriteLine("  FALLITA: l'ingresso non si e' aperto per tutti"); ok = false; }
+            Console.WriteLine($"  aperto, visto dal client: {DescriviSantuario(capo.UltimoSantuario)}");
+            if (capo.UltimoSantuario is not { Gate: SanctuaryGate.Open, OpenSecondsLeft: >= 50 and <= 60 })
+            { Console.WriteLine("  FALLITA: il client non sa che l'ingresso e' aperto, o per quanto"); ok = false; }
 
             // --- offerte; il fuggiasco offre ed esce
             capo.Rituale(CentroDelMondo, CrystalType.Precursor);
@@ -1654,6 +1688,17 @@ static class Regole
             if (fuggiasco.Cristalli(CrystalType.Epic) != 1)
             { Console.WriteLine("  FALLITA: chi e' uscito prima ha perso il cristallo"); ok = false; }
 
+            // --- a riposo, e lo sa solo chi e' sull'isola centrale: lontano si
+            // conosce il posto ma non l'ingresso.
+            bool riposoVisto = capo.Attendi(() => capo.UltimoSantuario?.Gate == SanctuaryGate.Resting, 4);
+            fuggiasco.Admin("tp 300 -420");
+            bool lontano = fuggiasco.Attendi(() => fuggiasco.UltimoSantuario is { Gate: SanctuaryGate.Unknown } s &&
+                Dist(s.CenterX, s.CenterZ, CentroXZ, CentroXZ) < 0.1f, 6);
+            Console.WriteLine($"  dopo il rituale, visto da dentro: {DescriviSantuario(capo.UltimoSantuario)}; " +
+                              $"da fuori dall'isola: {DescriviSantuario(fuggiasco.UltimoSantuario)}");
+            if (!riposoVisto) { Console.WriteLine("  FALLITA: il client non sa che il santuario riposa"); ok = false; }
+            if (!lontano) { Console.WriteLine("  FALLITA: lontano dall'isola centrale si vede com'e' l'ingresso"); ok = false; }
+
             // --- riposo: con tutte le condizioni, resta chiuso
             foreach (var p in ps) p.Admin("tp 30 30");
             capo.Admin("give Crystal 1 Precursor");
@@ -1666,6 +1711,10 @@ static class Regole
 
             // --- sopra il 25%: i cristalli si perdono, la terra resta com'e'
             capo.Admin("santuario riposo");
+            // Chiuso, o gia' aperto: le dieci sonde sono ancora davanti
+            // all'ingresso coi cristalli, e finito il riposo si riapre subito.
+            if (!capo.Attendi(() => capo.UltimoSantuario?.Gate is SanctuaryGate.Closed or SanctuaryGate.Open, 4))
+            { Console.WriteLine($"  FALLITA: finito il riposo il client vede {DescriviSantuario(capo.UltimoSantuario)}"); ok = false; }
             capo.Admin("setvitality 1");
             capo.Attendi(() => ChunkPiuArido(capo) == 255, 6);
             foreach (var p in ps) p.Admin("tp 30 30");
