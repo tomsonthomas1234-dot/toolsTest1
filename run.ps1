@@ -52,30 +52,19 @@ Get-CimInstance Win32_Process -Filter "Name='Precursori.GameServer.exe' or Name=
     }
 Start-Sleep -Milliseconds 900
 
-# ---- avvio fuori dalla sessione di chi lancia ---------------------------------
-#
-# Non con Start-Process. Un processo avviato cosi' resta nel job di Windows
-# della shell che lo lancia: se la shell e' quella di un agente, quando il
-# comando viene fermato (o la sessione si chiude) Windows chiude il job e
-# uccide con lui il server vero. Provato il 4 novembre: un figlio di
-# Start-Process muore allo stop del comando, uno creato da WMI resta vivo.
-# Vedi tools/README.md.
-#
-# WMI non eredita le variabili d'ambiente di chi lancia: qui va bene, il
-# server vero si configura solo dai suoi file.
-function Avvia-Staccato([string]$dir, [string]$out, [string]$err) {
-    $finestra = New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly `
-        -Property @{ ShowWindow = [uint16]0 }
-    $r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
-        CommandLine               = "cmd.exe /c dotnet run --no-build > `"$out`" 2> `"$err`""
-        CurrentDirectory          = $dir
-        ProcessStartupInformation = $finestra
-    }
-    if ($r.ReturnValue -ne 0) { Write-Output "avvio non riuscito in $dir (codice WMI $($r.ReturnValue))" }
-}
+# Con Start-Process, come sempre. Il server vero lo accende Tommaso per
+# giocare; gli agenti non lo accendono e non lo lasciano acceso (decisione
+# del 4 novembre, notte): un processo avviato da un agente muore con lui, ed
+# e' giusto cosi'. Vedi tools/README.md.
+Start-Process -FilePath "dotnet" -ArgumentList "run","--no-build" `
+    -WorkingDirectory "$root\bootstrap\05_webapi\src\Precursori.WebApi" `
+    -RedirectStandardOutput "$log\webapi.log" -RedirectStandardError "$log\webapi.err.log" `
+    -WindowStyle Hidden
 
-Avvia-Staccato "$root\bootstrap\05_webapi\src\Precursori.WebApi" "$log\webapi.log" "$log\webapi.err.log"
-Avvia-Staccato "$root\bootstrap\02_gameserver\src\Precursori.GameServer" "$log\server.log" "$log\server.err.log"
+Start-Process -FilePath "dotnet" -ArgumentList "run","--no-build" `
+    -WorkingDirectory "$root\bootstrap\02_gameserver\src\Precursori.GameServer" `
+    -RedirectStandardOutput "$log\server.log" -RedirectStandardError "$log\server.err.log" `
+    -WindowStyle Hidden
 
 $deadline = (Get-Date).AddSeconds(90)
 while ((Get-Date) -lt $deadline -and

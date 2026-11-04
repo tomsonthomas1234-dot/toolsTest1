@@ -30,22 +30,17 @@ riga di comando, e `run.ps1` ferma solo quelli senza.
 Le prove, invece, fermano anche il server vero e non lo riaccendono: finito un
 giro, per tornare a giocare si lancia `run.ps1`.
 
-### Perché il server avviato da un agente si spegneva
+### Gli agenti e i server
 
-Gli agenti lanciano i comandi da una shell che sta dentro un *job* di Windows.
-Un processo avviato con `Start-Process` resta in quel job: quando il comando
-viene fermato, o la sessione dell'agente si chiude, Windows chiude il job e
-uccide anche il server, senza errori nei log. Provato il 4 novembre: un figlio
-di `Start-Process` è morto allo stop del comando che lo aveva lanciato, uno
-creato tramite WMI (`Win32_Process.Create`) è rimasto vivo. Se il comando
-finisce da solo, invece, il figlio sopravvive: per questo succedeva solo a volte.
+Il server vero lo accende Tommaso quando vuole giocare. Gli agenti non lo
+accendono e a fine giro non lasciano niente acceso: le prove (`regole.ps1`,
+`bench.ps1`) avviano i loro server e li spengono da sole quando finiscono.
 
-Per questo `run.ps1` avvia web API e server tramite WMI, con l'uscita rediretta
-nei soliti `logs/server.log` e `logs/webapi.log`. Un processo creato così non
-eredita le variabili d'ambiente di chi lancia: il server vero si configura solo
-dai suoi file, quindi va bene. Le prove continuano a usare `Start-Process`,
-perché devono passare variabili d'ambiente al server e devono morire con chi le
-lancia.
+Un processo avviato da un agente con `Start-Process` resta nel *job* di
+Windows della sua shell: quando il comando viene fermato, o la sessione
+dell'agente si chiude, Windows lo chiude. Per questo il server acceso da un
+agente "si spegneva da solo". Va bene così, ed è voluto (decisione del 4
+novembre, notte).
 
 ## Prove
 
