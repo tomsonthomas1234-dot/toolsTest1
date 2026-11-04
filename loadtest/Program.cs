@@ -42,7 +42,7 @@ string api  = args.Length > 4 ? args[4] : "http://127.0.0.1:5080";
 // account che serve anche ad altro.
 string prefisso = modoRegole || modoAdmin ? "sonda" : "carico";
 if (modoAdmin) { clients = 1; Console.WriteLine($"Modalita amministratore su {host}:{port}"); }
-else if (modoRegole) { clients = 4; if (metaPersistenza == null) Console.WriteLine($"Prova sulle regole su {host}:{port}"); }
+else if (modoRegole) { clients = 5; if (metaPersistenza == null) Console.WriteLine($"Prova sulle regole su {host}:{port}"); }
 else Console.WriteLine($"Prova di carico: {clients} client per {seconds}s su {host}:{port}");
 
 // ---- account -------------------------------------------------------------
@@ -98,7 +98,7 @@ if (modoAdmin)
 // ---- prova sulle regole --------------------------------------------------
 if (modoRegole)
 {
-    if (tokens.Count < 4) { Console.WriteLine("servono quattro token: prova annullata"); return 1; }
+    if (tokens.Count < 5) { Console.WriteLine("servono cinque token: prova annullata"); return 1; }
 
     if (metaPersistenza == "prepara")
         return Regole.PersistenzaPrepara(tokens[3], host, port) ? 0 : 1;
@@ -124,6 +124,7 @@ if (modoRegole)
         ("terra che si consuma",    () => Regole.TerraSiConsuma(tokens[1], host, port)),
         ("morire costa",            () => Regole.MorireCosta(tokens[1], host, port)),
         ("carestia",                () => Regole.Carestia(tokens[1], tokens[0], host, port)),
+        ("registro di gioco",       () => Regole.RegistroDiGioco(tokens[1], tokens[4], host, port)),
         ("persistenza al rientro",  () => Regole.PersistenzaAlRientro(tokens[3], host, port)),
     };
 

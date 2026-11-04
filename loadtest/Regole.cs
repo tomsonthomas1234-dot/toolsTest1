@@ -50,6 +50,27 @@ sealed class Sonda : IDisposable
         lock (Eventi) return Eventi.Exists(e => e.Kind == tipo);
     }
 
+    /// Il registro di gioco come lo vedrebbe il client: sostituito da ogni
+    /// WorldJournal, allungato da ogni WorldEvent.
+    public readonly List<WorldEventMsg> Registro = new();
+    public int RegistriRicevuti;
+
+    /// Il registro in una riga, "id:tipo" separati da virgole: si confronta e si
+    /// annota su file.
+    public string RegistroInRiga()
+    {
+        lock (Registro) return string.Join(",", Registro.Select(v => $"{v.EntryId}:{v.Kind}"));
+    }
+
+    public void CancellaVoce(uint id) =>
+        Manda(NetMsgType.Command, new CommandMsg
+        {
+            CommandId = 10,
+            Type      = CommandType.DeleteJournalEntry,
+            Payload   = MessagePack.MessagePackSerializer.Serialize(
+                            new DeleteJournalEntryCommand { EntryId = id }),
+        });
+
     public void Rituale(ulong sito, CrystalType grado)
     {
         UltimoRituale = null;
@@ -228,6 +249,16 @@ sealed class Sonda : IDisposable
                         var ev = MessagePack.MessagePackSerializer
                                      .Deserialize<WorldEventMsg>(env.Payload);
                         lock (Eventi) Eventi.Add(ev);
+                        lock (Registro) Registro.Add(ev);
+                        break;
+                    }
+
+                    case NetMsgType.WorldJournal:
+                    {
+                        var j = MessagePack.MessagePackSerializer
+                                    .Deserialize<WorldJournalMsg>(env.Payload);
+                        lock (Registro) { Registro.Clear(); Registro.AddRange(j.Entries); }
+                        RegistriRicevuti++;
                         break;
                     }
 
@@ -1314,7 +1345,93 @@ static class Regole
         return ok;
     }
 
-    // ---- 16. persistenza del giocatore ----------------------------------------
+    // ---- 16. registro di gioco -------------------------------------------------
+    //
+    // Deciso da Tommaso (backlog A1a2b): ogni giocatore ha lo storico degli stati
+    // del mondo che ha vissuto, salvato sul server. Al primo ingresso lo stato
+    // attuale; se il mondo cambia mentre e' via, al rientro UNA voce con lo stato
+    // di adesso; le voci restano finche' non le cancella lui.
+    //
+    // Il giocatore del registro e' sonda0004, che nessun'altra prova usa: il
+    // mondo di prova si azzera a ogni giro, quindi per il server e' sempre nuovo.
+    // Il riavvio del server lo prova la persistenza, con sonda0003.
+
+    public static bool RegistroDiGioco(string tokenAdmin, string tokenNuovo, string host, int port)
+    {
+        Console.WriteLine("--- registro di gioco: lo stato all'ingresso, i cambi, le cancellazioni");
+
+        bool ok = true;
+        string primo;
+        using (var n = new Sonda(tokenNuovo, host, port))
+        {
+            if (!n.AttendiPronta()) { Console.WriteLine("  FALLITA: la sonda nuova non e' entrata"); return false; }
+            n.Attendi(() => n.RegistriRicevuti > 0 && n.Eventi.Count > 0, 6);
+            primo = n.RegistroInRiga();
+            Console.WriteLine($"  primo ingresso: registro [{primo}], notifiche {n.Eventi.Count}");
+            if (n.RegistriRicevuti == 0) { Console.WriteLine("  FALLITA: il registro non e' arrivato"); ok = false; }
+            if (!(n.Eventi.Count == 1 && n.Eventi[0].Kind == WorldEventKind.NowCalm && n.Registro.Count == 1))
+            { Console.WriteLine("  FALLITA: al primo ingresso doveva arrivare una notifica sola, con lo stato attuale"); ok = false; }
+        }
+        Thread.Sleep(2500);   // il registro si mette da parte all'uscita
+
+        // Il mondo cambia mentre e' via: due volte. Al rientro deve sapere solo
+        // com'e' adesso.
+        using var s = new Sonda(tokenAdmin, host, port);
+        if (!s.AttendiPronta()) { Console.WriteLine("  FALLITA: la sonda amministratrice non e' entrata"); return false; }
+        s.Admin("setvitality 0.02");
+        bool carestia = s.Attendi(() => s.UltimaPartita != null && s.UltimaPartita.InFamine, 6);
+
+        string secondo;
+        uint daCancellare = 0;
+        using (var n = new Sonda(tokenNuovo, host, port))
+        {
+            if (!n.AttendiPronta()) { Console.WriteLine("  FALLITA: la sonda nuova non e' rientrata"); s.Admin("setvitality 1"); return false; }
+            n.Attendi(() => n.RegistriRicevuti > 0 && n.Eventi.Count > 0, 6);
+            n.Attendi(() => false, 1.0);   // nient'altro deve arrivare
+            Console.WriteLine($"  rientro in carestia (carestia={carestia}): registro [{n.RegistroInRiga()}], " +
+                              $"notifiche [{string.Join(",", n.Eventi.Select(e => e.Kind))}]");
+            if (!(n.Eventi.Count == 1 && n.Eventi[0].Kind == WorldEventKind.NowInFamine))
+            { Console.WriteLine("  FALLITA: al rientro doveva arrivare una notifica sola, 'il mondo e' in carestia'"); ok = false; }
+            if (!n.RegistroInRiga().StartsWith(primo))
+            { Console.WriteLine("  FALLITA: il registro di prima non e' tornato"); ok = false; }
+
+            // Un cambio mentre e' collegato: voce nuova, come notifica.
+            s.Admin("setvitality 1");
+            bool fine = n.Attendi(() => { s.Poll(); return n.HaEvento(WorldEventKind.FamineEnds); }, 6);
+            Console.WriteLine($"  fine della carestia da collegato: notifica={fine}, registro [{n.RegistroInRiga()}]");
+            if (!fine) { Console.WriteLine("  FALLITA: la fine della carestia non e' arrivata"); ok = false; }
+
+            // Si cancella la voce della carestia.
+            lock (n.Registro)
+                daCancellare = n.Registro.FirstOrDefault(v => v.Kind == WorldEventKind.NowInFamine)?.EntryId ?? 0;
+            int prima = n.RegistriRicevuti;
+            n.CancellaVoce(daCancellare);
+            n.Attendi(() => n.RegistriRicevuti > prima, 6);
+            secondo = n.RegistroInRiga();
+            Console.WriteLine($"  cancellata la voce {daCancellare}: registro [{secondo}]");
+            if (daCancellare == 0 || secondo.Contains($"{daCancellare}:"))
+            { Console.WriteLine("  FALLITA: la voce non e' stata cancellata"); ok = false; }
+        }
+        Thread.Sleep(2500);
+
+        // Rientro senza cambi: lo stesso registro, senza la voce cancellata, e
+        // nessuna notifica.
+        using (var n = new Sonda(tokenNuovo, host, port))
+        {
+            if (!n.AttendiPronta()) { Console.WriteLine("  FALLITA: la sonda nuova non e' rientrata"); s.Admin("setvitality 1"); return false; }
+            n.Attendi(() => n.RegistriRicevuti > 0, 6);
+            n.Attendi(() => false, 1.0);
+            string terzo = n.RegistroInRiga();
+            Console.WriteLine($"  rientro senza cambi: registro [{terzo}], notifiche {n.Eventi.Count}");
+            if (terzo != secondo) { Console.WriteLine("  FALLITA: il registro non e' tornato uguale (la voce cancellata e' tornata?)"); ok = false; }
+            if (n.Eventi.Count != 0) { Console.WriteLine("  FALLITA: senza cambi non doveva arrivare nessuna notifica"); ok = false; }
+        }
+
+        if (ok) Console.WriteLine("  OK: stato al primo ingresso, una voce sola al rientro, cambi notificati, cancellazioni ricordate");
+        return ok;
+    }
+
+    // ---- 17. persistenza del giocatore ----------------------------------------
     //
     // Qui i difetti si sono gia' visti in partita, piu' volte: si costruiva e la
     // costruzione restava, ma l'inventario spariva. E' anche il caso peggiore da
@@ -1386,10 +1503,30 @@ static class Regole
             string.Join(",", asce.Select(a => $"{a.Key}:{a.Value.Usura}")),
             s.X.ToString(Inv), s.Z.ToString(Inv),
         };
-        File.WriteAllLines(Lasciato, righe);
+        // Il registro di gioco: una carestia d'ufficio, avanti e indietro, per
+        // avere voci da ricordare, e se ne cancella una. Al rientro deve tornare
+        // tutto tranne quella, e nessuna notifica: il mondo e' com'era.
+        s.Admin("setvitality 0.02");
+        s.Attendi(() => s.HaEvento(WorldEventKind.FamineBegins), 6);
+        s.Admin("setvitality 1");
+        s.Attendi(() => s.HaEvento(WorldEventKind.FamineEnds), 6);
+        uint via;
+        lock (s.Registro)
+            via = s.Registro.LastOrDefault(v => v.Kind == WorldEventKind.FamineBegins)?.EntryId ?? 0;
+        int ricevuti = s.RegistriRicevuti;
+        s.CancellaVoce(via);
+        s.Attendi(() => s.RegistriRicevuti > ricevuti, 6);
+        string registro = s.RegistroInRiga();
+        if (via == 0 || registro.Contains($"{via}:"))
+        {
+            Console.WriteLine($"  FALLITA in preparazione: registro [{registro}], voce da cancellare {via}");
+            return false;
+        }
+
+        File.WriteAllLines(Lasciato, righe.Append(registro));
 
         Console.WriteLine($"  lasciato: legno {righe[0]}, pietra {righe[1]}, " +
-                          $"asce [{righe[2]}], in ({s.X:F0}, {s.Z:F0})");
+                          $"asce [{righe[2]}], in ({s.X:F0}, {s.Z:F0}), registro [{registro}]");
         return true;
     }
 
@@ -1406,6 +1543,7 @@ static class Regole
         int pietraAtt = int.Parse(atteso[1], Inv);
         string asceAtt = atteso[2];
         float xAtt = float.Parse(atteso[3], Inv), zAtt = float.Parse(atteso[4], Inv);
+        string registroAtt = atteso.Length > 5 ? atteso[5] : "";
 
         using var s = new Sonda(token, host, port);
         if (!s.AttendiPronta()) { Console.WriteLine("  FALLITA: la sonda non e' rientrata in gioco"); return false; }
@@ -1431,6 +1569,17 @@ static class Regole
         // fra un inventario che si ricrea e uno che si ricorda.
         if (asce != asceAtt)     { Console.WriteLine("  FALLITA: non sono tornati gli stessi esemplari"); ok = false; }
         if (scarto > 5f)         { Console.WriteLine("  FALLITA: non e' rientrato dove aveva lasciato"); ok = false; }
+
+        // Il registro arriva subito dopo l'handshake; un secondo in piu' per
+        // essere sicuri che non arrivi anche una notifica che non deve esserci.
+        s.Attendi(() => s.RegistriRicevuti > 0, 6);
+        s.Attendi(() => false, 1.0);
+        string registro = s.RegistroInRiga();
+        Console.WriteLine($"  {quando}: registro [{registro}] (era [{registroAtt}]), notifiche {s.Eventi.Count}");
+        if (registro != registroAtt)
+        { Console.WriteLine("  FALLITA: il registro di gioco non e' tornato uguale"); ok = false; }
+        if (s.Eventi.Count != 0)
+        { Console.WriteLine("  FALLITA: il mondo non e' cambiato, eppure e' arrivata una notifica"); ok = false; }
         return ok;
     }
 
