@@ -39,6 +39,25 @@ sealed class Sonda : IDisposable
     public ConsumeResultMsg UltimoConsumo;
     public ChestContentsMsg UltimoBaule;
     public WorldVitalityMapMsg UltimaVitalita;
+    public MatchStateMsg UltimaPartita;
+    public RitualResultMsg UltimoRituale;
+
+    public void Rituale(ulong sito, CrystalType grado)
+    {
+        UltimoRituale = null;
+        Manda(NetMsgType.Command, new CommandMsg
+        {
+            CommandId = 9,
+            Type      = CommandType.Ritual,
+            Payload   = MessagePack.MessagePackSerializer.Serialize(new RitualCommand
+            { SiteId = sito, Tier = grado }),
+        });
+    }
+
+    public int Cristalli(CrystalType grado)
+    {
+        lock (Zaino) return Zaino.TryGetValue((ItemType.Crystal, (byte)grado), out int n) ? n : 0;
+    }
 
     /// Somma della vitalita di tutti i chunk: basta per dire se e scesa.
     public long VitalitaTotale()
@@ -184,6 +203,16 @@ sealed class Sonda : IDisposable
                     case NetMsgType.ChestContents:
                         UltimoBaule = MessagePack.MessagePackSerializer
                                           .Deserialize<ChestContentsMsg>(env.Payload);
+                        break;
+
+                    case NetMsgType.MatchState:
+                        UltimaPartita = MessagePack.MessagePackSerializer
+                                            .Deserialize<MatchStateMsg>(env.Payload);
+                        break;
+
+                    case NetMsgType.RitualResult:
+                        UltimoRituale = MessagePack.MessagePackSerializer
+                                            .Deserialize<RitualResultMsg>(env.Payload);
                         break;
 
                     case NetMsgType.ConsumeResult:
@@ -1187,7 +1216,72 @@ static class Regole
         return true;
     }
 
-    // ---- 15. persistenza del giocatore ----------------------------------------
+    // ---- 15. carestia ----------------------------------------------------------
+    //
+    // Decisa da Tommaso al posto della fine del mondo del ramo: sotto il 5% la
+    // terra non da piu niente, e i rituali non danno ne doni ne le conseguenze
+    // solite. Si prova anche l'uscita, perche una carestia da cui non si esce
+    // nemmeno d'ufficio lascerebbe il mondo di prova inservibile.
+
+    public static bool Carestia(string token, string host, int port)
+    {
+        Console.WriteLine("--- carestia: sotto il 5% i rituali non danno niente");
+
+        using var s = new Sonda(token, host, port);
+        if (!s.AttendiPronta()) { Console.WriteLine("  FALLITA: la sonda non e' entrata in gioco"); return false; }
+
+        // Il cerchio al centro dell'isola centrale: SpawnDevWorld lo mette li'
+        // con questo identificativo.
+        const ulong Sito = 20_000;
+        const float RX = 2f, RZ = 0f;
+        s.Admin($"tp {RX.ToString(Inv)} {RZ.ToString(Inv)}");
+        s.Admin("give Crystal 1 Common");
+        if (!s.Attendi(() => Dist(s.X, s.Z, RX, RZ) < 3f && s.Cristalli(CrystalType.Common) >= 1, 10))
+        { Console.WriteLine("  FALLITA: preparazione non riuscita (posizione o cristallo)"); return false; }
+
+        if (!s.Attendi(() => s.UltimaPartita != null && !s.UltimaPartita.InFamine, 6))
+        { Console.WriteLine("  FALLITA: il mondo di prova e' gia' in carestia, o lo stato non arriva"); return false; }
+
+        s.Admin("setvitality 0.02");
+        bool entrata = s.Attendi(() => s.UltimaPartita.InFamine, 6);
+        Console.WriteLine($"  dopo setvitality 0.02: carestia={s.UltimaPartita.InFamine}, " +
+                          $"vitalita' {s.UltimaPartita.WorldVitality:P1}");
+
+        bool ok = true;
+        if (!entrata) { Console.WriteLine("  FALLITA: la carestia non e' cominciata"); ok = false; }
+        else
+        {
+            int prima = s.Cristalli(CrystalType.Common);
+            s.Rituale(Sito, CrystalType.Common);
+            if (!s.Attendi(() => s.UltimoRituale != null, 6))
+            { Console.WriteLine("  FALLITA: nessuna risposta al rituale"); ok = false; }
+            else
+            {
+                var r = s.UltimoRituale;
+                s.Attendi(() => s.Cristalli(CrystalType.Common) < prima, 3);
+                Console.WriteLine($"  rituale: accettato={r.Accepted}, dono='{r.Boon}', unico='{r.UniqueName}'");
+                Console.WriteLine($"           esito='{r.Bane}', cristalli {prima} -> {s.Cristalli(CrystalType.Common)}");
+                if (!r.Accepted) { Console.WriteLine("  FALLITA: in carestia il rituale si deve poter fare"); ok = false; }
+                if (!string.IsNullOrEmpty(r.Boon) || !string.IsNullOrEmpty(r.UniqueName))
+                { Console.WriteLine("  FALLITA: in carestia il rituale ha dato un dono"); ok = false; }
+                if (s.Cristalli(CrystalType.Common) >= prima)
+                { Console.WriteLine("  FALLITA: il cristallo non e' stato consumato"); ok = false; }
+            }
+        }
+
+        // Si rimette la terra com'era, anche se qualcosa sopra e' fallito: le
+        // prove che vengono dopo non devono girare in carestia.
+        s.Admin("setvitality 1");
+        bool uscita = s.Attendi(() => !s.UltimaPartita.InFamine && s.UltimaPartita.WorldVitality > 0.99f, 6);
+        Console.WriteLine($"  dopo setvitality 1: carestia={s.UltimaPartita.InFamine}, " +
+                          $"vitalita' {s.UltimaPartita.WorldVitality:P1}");
+        if (!uscita) { Console.WriteLine("  FALLITA: la carestia non e' finita riportando la terra al 100%"); ok = false; }
+
+        if (ok) Console.WriteLine("  OK: in carestia il rituale costa il cristallo e non da niente; se ne esce");
+        return ok;
+    }
+
+    // ---- 16. persistenza del giocatore ----------------------------------------
     //
     // Qui i difetti si sono gia' visti in partita, piu' volte: si costruiva e la
     // costruzione restava, ma l'inventario spariva. E' anche il caso peggiore da
