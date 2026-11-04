@@ -1429,7 +1429,9 @@ static class Regole
     // ---- 15c. l'era rigogliosa si consuma e raddoppia i drop -------------------
     //
     // Numeri di Tommaso (backlog A1a3b): l'eccedenza sopra il 100% se ne va da
-    // sola in 14 giorni; finche dura, minerali rari e cristalli raddoppiano.
+    // sola in 14 giorni; finche dura, sull'isola centrale raddoppia tutto
+    // (risorse, cristalli, animali e nascite) e fuori niente. Animali e nascite
+    // qui non si provano: la sonda non sa cacciare ne' allevare.
     //
     // Due settimane non si aspettano: il comando admin "consumaera" fa passare
     // i giorni come li farebbe passare il tick. Dal 125%, dopo 7 giorni l'era
@@ -1443,7 +1445,7 @@ static class Regole
 
     public static bool EraRigogliosa(string token, string host, int port)
     {
-        Console.WriteLine("--- era rigogliosa: minerali e cristalli doppi, finisce da sola in 14 giorni");
+        Console.WriteLine("--- era rigogliosa: doppio sull'isola centrale, niente fuori, finisce da sola in 14 giorni");
 
         using var s = new Sonda(token, host, port);
         if (!s.AttendiPronta()) { Console.WriteLine("  FALLITA: la sonda non e' entrata in gioco"); return false; }
@@ -1478,18 +1480,32 @@ static class Regole
         if (cristalliDopo < cristalliPrima + 10)
         { Console.WriteLine("  FALLITA: nell'era rigogliosa i cristalli non sono aumentati"); ok = false; }
 
-        // Un nodo di ferro e uno di pietra piantati d'ufficio, lontano dagli
-        // altri scenari.
-        const float NX = -90f, NZ = -340f;
-        s.Admin($"tp {NX.ToString(Inv)} {NZ.ToString(Inv)}");
-        s.Admin($"build IronNode {NX.ToString(Inv)} {(NZ + 1f).ToString(Inv)}");
-        s.Admin($"build StoneNode {(NX + 1f).ToString(Inv)} {NZ.ToString(Inv)}");
-        EntityState ferro = null, pietra = null;
-        if (!s.Attendi(() => (ferro = s.PiuVicina(EntityType.IronNode, NX, NZ + 1f)) != null &&
-                             Dist(ferro.X, ferro.Z, NX, NZ + 1f) < 1f &&
-                             (pietra = s.PiuVicina(EntityType.StoneNode, NX + 1f, NZ)) != null &&
-                             Dist(pietra.X, pietra.Z, NX + 1f, NZ) < 1f, 12))
-        { Console.WriteLine("  FALLITA: i nodi non sono comparsi"); s.Admin("setvitality 1"); return false; }
+        // Un nodo di ferro e uno di pietra piantati d'ufficio, la' dove sta la
+        // sonda: prima fuori dall'isola centrale, poi dentro.
+        var piantati = new List<ulong>();
+        (EntityState Ferro, EntityState Pietra) Pianta(float nx, float nz)
+        {
+            s.Admin($"tp {nx.ToString(Inv)} {nz.ToString(Inv)}");
+            s.Attendi(() => Dist(s.X, s.Z, nx, nz) < 2f, 8);
+            s.Admin($"build IronNode {nx.ToString(Inv)} {(nz + 1f).ToString(Inv)}");
+            s.Admin($"build StoneNode {(nx + 1f).ToString(Inv)} {nz.ToString(Inv)}");
+            EntityState f = null, p = null;
+            s.Attendi(() => (f = s.PiuVicina(EntityType.IronNode, nx, nz + 1f)) != null &&
+                            Dist(f.X, f.Z, nx, nz + 1f) < 1f &&
+                            (p = s.PiuVicina(EntityType.StoneNode, nx + 1f, nz)) != null &&
+                            Dist(p.X, p.Z, nx + 1f, nz) < 1f, 12);
+            if (f != null && Dist(f.X, f.Z, nx, nz + 1f) < 1f) piantati.Add(f.EntityId);
+            if (p != null && Dist(p.X, p.Z, nx + 1f, nz) < 1f) piantati.Add(p.EntityId);
+            return (f, p);
+        }
+
+        void Ripulisci()
+        {
+            s.Admin("setvitality 1");
+            foreach (var id in piantati) s.Admin($"remove {id}");
+            s.Admin("clearinv");
+            s.Attendi(() => false, 1);
+        }
 
         // Un colpo: quanto e' entrato nello zaino. Mezzo secondo dopo, per il
         // tempo di ricarica della raccolta.
@@ -1502,11 +1518,27 @@ static class Regole
             return s.Quanti(cosa) - prima;
         }
 
+        // Fuori: in mare aperto a sud dell'isola centrale, lontano dagli altri
+        // scenari. L'era rigogliosa qui non cambia niente.
+        var (ferroFuori, pietraFuori) = Pianta(-90f, -340f);
+        if (ferroFuori == null || pietraFuori == null)
+        { Console.WriteLine("  FALLITA: i nodi fuori dall'isola centrale non sono comparsi"); Ripulisci(); return false; }
+        int ferroF = Colpo(ferroFuori, ItemType.Iron);
+        int pietraF = Colpo(pietraFuori, ItemType.Stone);
+        Console.WriteLine($"  fuori dall'isola centrale: un colpo da' {ferroF} ferro e {pietraF} pietra");
+        if (ferroF != 1 || pietraF != 1)
+        { Console.WriteLine("  FALLITA: fuori dall'isola centrale l'era rigogliosa ha cambiato i drop"); ok = false; }
+
+        // Dentro: sull'isola centrale (chunk 17, 14), lontano dalla griglia dei
+        // cristalli. Qui raddoppia tutto, la pietra come il ferro.
+        var (ferro, pietra) = Pianta(60f, -60f);
+        if (ferro == null || pietra == null)
+        { Console.WriteLine("  FALLITA: i nodi sull'isola centrale non sono comparsi"); Ripulisci(); return false; }
         int ferroEra = Colpo(ferro, ItemType.Iron);
         int pietraEra = Colpo(pietra, ItemType.Stone);
-        Console.WriteLine($"  era rigogliosa: un colpo da' {ferroEra} ferro e {pietraEra} pietra");
-        if (ferroEra != 2)  { Console.WriteLine("  FALLITA: nell'era rigogliosa il ferro non raddoppia"); ok = false; }
-        if (pietraEra != 1) { Console.WriteLine("  FALLITA: la pietra non e' rara, eppure e' cambiata"); ok = false; }
+        Console.WriteLine($"  sull'isola centrale: un colpo da' {ferroEra} ferro e {pietraEra} pietra");
+        if (ferroEra != 2)  { Console.WriteLine("  FALLITA: sull'isola centrale il ferro non raddoppia"); ok = false; }
+        if (pietraEra != 2) { Console.WriteLine("  FALLITA: sull'isola centrale la pietra non raddoppia"); ok = false; }
 
         // Sette giorni: dal 125% al 112,5%, l'era c'e' ancora.
         s.Admin("consumaera 7");
@@ -1526,13 +1558,9 @@ static class Regole
         if (ferroDopo != 1) { Console.WriteLine("  FALLITA: finita l'era il ferro non torna a uno"); ok = false; }
 
         // Si rimette tutto com'era, anche se qualcosa sopra e' fallito.
-        s.Admin("setvitality 1");
-        s.Admin($"remove {ferro.EntityId}");
-        s.Admin($"remove {pietra.EntityId}");
-        s.Admin("clearinv");
-        s.Attendi(() => false, 1);
+        Ripulisci();
 
-        if (ok) Console.WriteLine("  OK: l'era rigogliosa raddoppia ferro e cristalli, non la pietra, e finisce da sola dopo 14 giorni");
+        if (ok) Console.WriteLine("  OK: l'era rigogliosa raddoppia cristalli e risorse sull'isola centrale, niente fuori, e finisce da sola dopo 14 giorni");
         return ok;
     }
 
