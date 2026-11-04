@@ -50,6 +50,24 @@ sealed class Sonda : IDisposable
         lock (Eventi) return Eventi.Exists(e => e.Kind == tipo);
     }
 
+    /// I messaggi di chat ricevuti, solo il testo, in ordine di arrivo.
+    public readonly List<string> Chat = new();
+
+    /// <summary>
+    /// Quanti cristalli ci sono a terra in tutto il mondo, secondo il server
+    /// (comando admin "contacristalli"). -1 se la risposta non arriva.
+    /// </summary>
+    public int ContaCristalli()
+    {
+        const string Testa = "cristalli a terra: ";
+        int gia;
+        lock (Chat) gia = Chat.Count;
+        Admin("contacristalli");
+        string riga = null;
+        Attendi(() => { lock (Chat) riga = Chat.Skip(gia).LastOrDefault(t => t.StartsWith(Testa)); return riga != null; }, 5);
+        return riga != null && int.TryParse(riga.Substring(Testa.Length), out int n) ? n : -1;
+    }
+
     /// Il registro di gioco come lo vedrebbe il client: sostituito da ogni
     /// WorldJournal, allungato da ogni WorldEvent.
     public readonly List<WorldEventMsg> Registro = new();
@@ -244,6 +262,13 @@ sealed class Sonda : IDisposable
                                             .Deserialize<RitualResultMsg>(env.Payload);
                         break;
 
+                    case NetMsgType.Chat:
+                    {
+                        var c = MessagePack.MessagePackSerializer.Deserialize<ChatMsg>(env.Payload);
+                        lock (Chat) Chat.Add(c.Text ?? "");
+                        break;
+                    }
+
                     case NetMsgType.WorldEvent:
                     {
                         var ev = MessagePack.MessagePackSerializer
@@ -422,9 +447,18 @@ sealed class Sonda : IDisposable
         // Fermarsi davvero: un input di movimento resta valido finche' non ne
         // arriva un altro, e senza questo la sonda continuerebbe a camminare
         // mentre si misura dove si e' fermata.
-        Manda(NetMsgType.Input, new InputMsg { Seq = ++seq, MoveX = 0, MoveY = 0 },
-              DeliveryMethod.Unreliable);
-        Attendi(() => false, 0.4);
+        //
+        // L'arresto si ripete per mezzo secondo: viaggia inaffidabile come il
+        // resto, e un arresto solo a volte si perdeva o arrivava prima
+        // dell'ultimo passo. Nella prova del santuario due sonde hanno
+        // camminato cosi' per 200 metri mentre entravano le altre (backlog P0).
+        var stop = DateTime.UtcNow.AddSeconds(0.5);
+        while (DateTime.UtcNow < stop)
+        {
+            Manda(NetMsgType.Input, new InputMsg { Seq = ++seq, MoveX = 0, MoveY = 0 },
+                  DeliveryMethod.Unreliable);
+            Attendi(() => false, 0.05);
+        }
     }
 
     void Manda<T>(NetMsgType tipo, T carico, DeliveryMethod come = DeliveryMethod.ReliableOrdered)
@@ -1509,8 +1543,33 @@ static class Regole
                 ps[i].Admin("clearinv");
                 ps[i].Admin($"setfaction {(i < 5 ? 1 : 2)}");
             }
+            // --- dentro non nasce niente (Tommaso, A1a3c2a). Prima di spostarlo:
+            // l'angolo scelto alla nascita del mondo e' vuoto, mentre negli
+            // altri tre uno dei quaranta cristalli di partenza cade sempre
+            // dentro il cerchio. Poi si sposta nell'angolo 0, e anche li' si fa
+            // sgombero.
+            int RisorseDentro(int angolo)
+            {
+                float cx = (angolo == 0 || angolo == 3 ? 1f : -1f) * CentroXZ;
+                float cz = (angolo == 0 || angolo == 1 ? 1f : -1f) * CentroXZ;
+                capo.Admin($"tp {cx.ToString(Inv)} {cz.ToString(Inv)}");
+                capo.Attendi(() => Dist(capo.X, capo.Z, cx, cz) < 2f, 6);
+                capo.Attendi(() => false, 1.5);
+                lock (capo.Mondo) return capo.Mondo.Values.Count(e =>
+                    (e.Type == EntityType.Crystal || e.Type.ToString().EndsWith("Node")) &&
+                    Dist(e.X, e.Z, cx, cz) <= 8f);
+            }
+            var perAngolo = Enumerable.Range(0, 4).Select(RisorseDentro).ToArray();
+            Console.WriteLine($"  nodi e cristalli dentro il cerchio, angolo per angolo: {string.Join(", ", perAngolo)}");
+            if (!perAngolo.Contains(0))
+            { Console.WriteLine("  FALLITA: in nessun angolo il santuario e' sgombro"); ok = false; }
+
             capo.Admin("santuario angolo 0");
             capo.Admin("santuario riposo");
+            int dentroAngolo0 = RisorseDentro(0);
+            Console.WriteLine($"  dopo lo spostamento nell'angolo 0: {dentroAngolo0} dentro");
+            if (dentroAngolo0 != 0)
+            { Console.WriteLine("  FALLITA: spostato il santuario, dentro resta qualcosa"); ok = false; }
             capo.Admin("setvitality 0.2");
             if (!capo.Attendi(() => capo.UltimaVitalita != null && ChunkPiuArido(capo) < 60, 6))
             { Console.WriteLine("  FALLITA: la terra non e' scesa al 20%"); capo.Admin("setvitality 1"); return false; }
@@ -1600,6 +1659,62 @@ static class Regole
             if (ChunkPiuArido(capo) != 255)
             { Console.WriteLine("  FALLITA: sopra il 25% la terra e' cambiata"); ok = false; }
 
+            // --- rituale incompleto (Tommaso, A1a3c2a): si apre in dieci, ne
+            // entrano nove, e una fazione non ha piu' i suoi cinque. Senza
+            // offerte non succede niente e il santuario non riposa; con le
+            // offerte i cristalli si perdono, la terra non cambia, e riposa.
+            bool ApriInNove()
+            {
+                foreach (var p in ps) p.Admin("tp 30 30");
+                AllIngresso(ps.Take(10).ToArray());
+                capo.Attendi(() => false, 2.5);
+                foreach (var p in ps.Take(9)) Entra(p);
+                Aggiorna(ps);
+                return ps.Take(9).All(Dentro) && !Dentro(ps[9]);
+            }
+            capo.Admin("santuario riposo");
+            capo.Admin("give Crystal 1 Precursor");
+            epico.Admin("give Crystal 1 Epic");
+            bool nove = ApriInNove();
+            capo.Admin("santuario chiudi");
+            capo.Attendi(() => false, 1.0);
+            Console.WriteLine($"  in nove, nessuna offerta: entrati={nove}, Precursore {capo.Cristalli(CrystalType.Precursor)}, " +
+                              $"Epico {epico.Cristalli(CrystalType.Epic)}");
+            if (!nove) { Console.WriteLine("  FALLITA: non si e' aperto per i nove"); ok = false; }
+            if (capo.Cristalli(CrystalType.Precursor) != 1 || epico.Cristalli(CrystalType.Epic) != 1)
+            { Console.WriteLine("  FALLITA: senza offerte qualcuno ha perso un cristallo"); ok = false; }
+
+            // Niente riposo: si riapre subito, e stavolta si offre.
+            bool noveAncora = ApriInNove();
+            capo.Rituale(CentroDelMondo, CrystalType.Precursor);
+            epico.Rituale(CentroDelMondo, CrystalType.Epic);
+            capo.Attendi(() => capo.UltimoRituale?.Accepted == true, 4);
+            epico.Attendi(() => epico.UltimoRituale?.Accepted == true, 4);
+            capo.Admin("santuario chiudi");
+            capo.Attendi(() => capo.Cristalli(CrystalType.Precursor) == 0, 6);
+            epico.Attendi(() => epico.Cristalli(CrystalType.Epic) == 0, 3);
+            capo.Attendi(() => capo.UltimoRituale?.Bane != null, 3);
+            Console.WriteLine($"  in nove, con le offerte: riaperto subito={noveAncora}, Precursore {capo.Cristalli(CrystalType.Precursor)}, " +
+                              $"Epico {epico.Cristalli(CrystalType.Epic)}, chunk piu' arido {ChunkPiuArido(capo)}/255, " +
+                              $"risposta \"{capo.UltimoRituale?.Bane}\"");
+            if (!noveAncora) { Console.WriteLine("  FALLITA: dopo un rituale mai partito il santuario riposa"); ok = false; }
+            if (capo.Cristalli(CrystalType.Precursor) != 0 || epico.Cristalli(CrystalType.Epic) != 0)
+            { Console.WriteLine("  FALLITA: nel rituale incompleto i cristalli offerti non si sono persi"); ok = false; }
+            if (ChunkPiuArido(capo) != 255)
+            { Console.WriteLine("  FALLITA: il rituale incompleto ha cambiato la terra"); ok = false; }
+            if (capo.UltimoRituale?.Bane?.Contains("incompleto") != true)
+            { Console.WriteLine("  FALLITA: il rituale incompleto non ha risposto"); ok = false; }
+
+            // E ora riposa: con tutte le condizioni resta chiuso.
+            capo.Admin("give Crystal 1 Precursor");
+            epico.Admin("give Crystal 1 Epic");
+            foreach (var p in ps) p.Admin("tp 30 30");
+            AllIngresso(ps.Take(10).ToArray());
+            capo.Attendi(() => false, 2.5);
+            Entra(capo);
+            Console.WriteLine($"  dopo il rituale incompleto, con tutte le condizioni: dentro={Dentro(capo)}");
+            if (Dentro(capo)) { Console.WriteLine("  FALLITA: dopo il rituale incompleto il santuario non riposa"); ok = false; }
+
             // Si rimette tutto com'era, anche se qualcosa sopra e' fallito.
             capo.Admin("santuario riposo");
             capo.Admin("setvitality 1");
@@ -1649,26 +1764,35 @@ static class Regole
         // raccoglie nessuno passandoci sopra.
         s.Admin("tp 1.25 11.25");
         s.Attendi(() => Dist(s.X, s.Z, 1.25f, 11.25f) < 2f, 8);
-        s.Attendi(() => false, 3);
-        int cristalliPrima = CristalliVisti(s);
+        ScacciaBelve(s);
+
+        // I cristalli si contano sul server, non a vista. Il server manda solo
+        // le 32 entita' piu' vicine: con una ventina di cristalli gia' in vista
+        // prima dell'era, "dieci in piu'" sfiorava quel tetto, e la prova
+        // passava o falliva a seconda di cosa c'era attorno (backlog P0:
+        // fallita anche su main). Il comando "contacristalli" risponde col
+        // numero vero: 40 in equilibrio, 80 nell'era.
+        //
+        // Si parte da zero: la prova della riparazione ha gia' aperto un'era,
+        // e i cristalli in piu' restano a terra anche dopo. In 20 secondi di
+        // equilibrio le ondate da 5 tornano al tetto di 40 e si fermano.
+        s.Admin("contacristalli azzera");
+        s.Attendi(() => false, 20);
+        int cristalliPrima = s.ContaCristalli();
 
         s.Admin("setvitality 1.25");
         if (!s.Attendi(() => s.HaEvento(WorldEventKind.BloomBegins), 6))
         { Console.WriteLine("  FALLITA: l'era rigogliosa non e' cominciata"); s.Admin("setvitality 1"); return false; }
 
-        // Un'ondata ogni 2 secondi finche' non ce ne sono 80: in 12 secondi
-        // le ondate doppie devono essere arrivate. Nel frattempo la sonda al
-        // centro puo' finire altrove (rinascita): ci si riporta li' prima di
-        // contare. Il server manda solo le 32 entita' piu' vicine, quindi non si
-        // contano tutti e 80: si guarda che ne siano comparsi molti di piu'.
+        // Un'ondata doppia ogni 2 secondi finche' non ce ne sono 80: in 12
+        // secondi ci si arriva.
         s.Attendi(() => false, 12);
-        s.Admin("tp 1.25 11.25");
-        s.Attendi(() => Dist(s.X, s.Z, 1.25f, 11.25f) < 2f, 8);
-        s.Attendi(() => false, 3);
-        int cristalliDopo = CristalliVisti(s);
-        Console.WriteLine($"  cristalli visti: {cristalliPrima} in equilibrio, {cristalliDopo} dopo 12 secondi di era rigogliosa");
-        if (cristalliDopo < cristalliPrima + 10)
-        { Console.WriteLine("  FALLITA: nell'era rigogliosa i cristalli non sono aumentati"); ok = false; }
+        int cristalliDopo = s.ContaCristalli();
+        Console.WriteLine($"  cristalli a terra: {cristalliPrima} in equilibrio, {cristalliDopo} dopo 12 secondi di era rigogliosa");
+        if (cristalliPrima < 0 || cristalliDopo < 0)
+        { Console.WriteLine("  FALLITA: il server non ha detto quanti cristalli ci sono"); ok = false; }
+        else if (cristalliPrima < 40 || cristalliPrima > 44 || cristalliDopo < 80)
+        { Console.WriteLine("  FALLITA: nell'era rigogliosa i cristalli a terra non sono raddoppiati"); ok = false; }
 
         // Un nodo di ferro e uno di pietra piantati d'ufficio, la' dove sta la
         // sonda: prima fuori dall'isola centrale, poi dentro.
@@ -1715,12 +1839,26 @@ static class Regole
         int Trappola(float nx, float nz)
         {
             float tx = nx - 2f;
-            s.Admin($"tp {nx.ToString(Inv)} {nz.ToString(Inv)}");
-            s.Attendi(() => Dist(s.X, s.Z, nx, nz) < 2f, 8);
-            s.Admin($"build FishTrap {tx.ToString(Inv)} {nz.ToString(Inv)}");
             EntityState t = null;
-            if (!s.Attendi(() => (t = s.PiuVicina(EntityType.FishTrap, tx, nz)) != null &&
-                                 Dist(t.X, t.Z, tx, nz) < 1f, 12)) return -1;
+            // Due tentativi: una volta su cinque, su main, la trappola fuori
+            // dall'isola non e' mai comparsa alla sonda pur essendo stata
+            // piantata (backlog P0). Causa non trovata: si riprova e, se manca
+            // ancora, si scrive dove stava la sonda.
+            for (int tentativo = 1; tentativo <= 2 && t == null; tentativo++)
+            {
+                s.Admin($"tp {nx.ToString(Inv)} {nz.ToString(Inv)}");
+                if (!s.Attendi(() => Dist(s.X, s.Z, nx, nz) < 2f, 8))
+                    Console.WriteLine($"  (trappola, tentativo {tentativo}: la sonda e' a ({s.X:F1}, {s.Z:F1}), non a ({nx}, {nz}))");
+                s.Admin($"build FishTrap {tx.ToString(Inv)} {nz.ToString(Inv)}");
+                if (!s.Attendi(() => (t = s.PiuVicina(EntityType.FishTrap, tx, nz)) != null &&
+                                     Dist(t.X, t.Z, tx, nz) < 1f, 12))
+                {
+                    int viste; lock (s.Mondo) viste = s.Mondo.Count;
+                    Console.WriteLine($"  (trappola, tentativo {tentativo}: non vista; sonda a ({s.X:F1}, {s.Z:F1}), {viste} entita' in vista)");
+                    t = null;
+                }
+            }
+            if (t == null) return -1;
             piantati.Add(t.EntityId);
             s.Admin("produci");
             s.Attendi(() => { var x = s.PiuVicina(EntityType.FishTrap, tx, nz); return x != null && x.Extra1 > 0; }, 6);
