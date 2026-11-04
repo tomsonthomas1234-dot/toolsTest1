@@ -125,6 +125,7 @@ if (modoRegole)
         ("morire costa",            () => Regole.MorireCosta(tokens[1], host, port)),
         ("carestia",                () => Regole.Carestia(tokens[1], tokens[0], host, port)),
         ("riparazione",             () => Regole.Riparazione(tokens[1], tokens[0], host, port)),
+        ("era rigogliosa",          () => Regole.EraRigogliosa(tokens[1], host, port)),
         ("registro di gioco",       () => Regole.RegistroDiGioco(tokens[1], tokens[4], host, port)),
         ("persistenza al rientro",  () => Regole.PersistenzaAlRientro(tokens[3], host, port)),
     };

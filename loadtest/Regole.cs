@@ -1426,6 +1426,116 @@ static class Regole
         return ok;
     }
 
+    // ---- 15c. l'era rigogliosa si consuma e raddoppia i drop -------------------
+    //
+    // Numeri di Tommaso (backlog A1a3b): l'eccedenza sopra il 100% se ne va da
+    // sola in 14 giorni; finche dura, minerali rari e cristalli raddoppiano.
+    //
+    // Due settimane non si aspettano: il comando admin "consumaera" fa passare
+    // i giorni come li farebbe passare il tick. Dal 125%, dopo 7 giorni l'era
+    // c'e' ancora, dopo altri 7 e' finita. Il riavvio a meta' era lo prova la
+    // persistenza, con sonda0003.
+
+    static int CristalliVisti(Sonda s)
+    {
+        lock (s.Mondo) return s.Mondo.Values.Count(e => e.Type == EntityType.Crystal);
+    }
+
+    public static bool EraRigogliosa(string token, string host, int port)
+    {
+        Console.WriteLine("--- era rigogliosa: minerali e cristalli doppi, finisce da sola in 14 giorni");
+
+        using var s = new Sonda(token, host, port);
+        if (!s.AttendiPronta()) { Console.WriteLine("  FALLITA: la sonda non e' entrata in gioco"); return false; }
+
+        bool ok = true;
+        s.Admin("setvitality 1");
+        s.Admin("clearinv");
+
+        // I cristalli nuovi nascono a ondate vicino al centro, su una griglia di
+        // 2,5: ci si mette fra quattro punti della griglia, cosi' la sonda non ne
+        // raccoglie nessuno passandoci sopra.
+        s.Admin("tp 1.25 11.25");
+        s.Attendi(() => Dist(s.X, s.Z, 1.25f, 11.25f) < 2f, 8);
+        s.Attendi(() => false, 3);
+        int cristalliPrima = CristalliVisti(s);
+
+        s.Admin("setvitality 1.25");
+        if (!s.Attendi(() => s.HaEvento(WorldEventKind.BloomBegins), 6))
+        { Console.WriteLine("  FALLITA: l'era rigogliosa non e' cominciata"); s.Admin("setvitality 1"); return false; }
+
+        // Un'ondata ogni 2 secondi finche' non ce ne sono 80: in 12 secondi
+        // le ondate doppie devono essere arrivate. Nel frattempo la sonda al
+        // centro puo' finire altrove (rinascita): ci si riporta li' prima di
+        // contare. Il server manda solo le 32 entita' piu' vicine, quindi non si
+        // contano tutti e 80: si guarda che ne siano comparsi molti di piu'.
+        s.Attendi(() => false, 12);
+        s.Admin("tp 1.25 11.25");
+        s.Attendi(() => Dist(s.X, s.Z, 1.25f, 11.25f) < 2f, 8);
+        s.Attendi(() => false, 3);
+        int cristalliDopo = CristalliVisti(s);
+        Console.WriteLine($"  cristalli visti: {cristalliPrima} in equilibrio, {cristalliDopo} dopo 12 secondi di era rigogliosa");
+        if (cristalliDopo < cristalliPrima + 10)
+        { Console.WriteLine("  FALLITA: nell'era rigogliosa i cristalli non sono aumentati"); ok = false; }
+
+        // Un nodo di ferro e uno di pietra piantati d'ufficio, lontano dagli
+        // altri scenari.
+        const float NX = -90f, NZ = -340f;
+        s.Admin($"tp {NX.ToString(Inv)} {NZ.ToString(Inv)}");
+        s.Admin($"build IronNode {NX.ToString(Inv)} {(NZ + 1f).ToString(Inv)}");
+        s.Admin($"build StoneNode {(NX + 1f).ToString(Inv)} {NZ.ToString(Inv)}");
+        EntityState ferro = null, pietra = null;
+        if (!s.Attendi(() => (ferro = s.PiuVicina(EntityType.IronNode, NX, NZ + 1f)) != null &&
+                             Dist(ferro.X, ferro.Z, NX, NZ + 1f) < 1f &&
+                             (pietra = s.PiuVicina(EntityType.StoneNode, NX + 1f, NZ)) != null &&
+                             Dist(pietra.X, pietra.Z, NX + 1f, NZ) < 1f, 12))
+        { Console.WriteLine("  FALLITA: i nodi non sono comparsi"); s.Admin("setvitality 1"); return false; }
+
+        // Un colpo: quanto e' entrato nello zaino. Mezzo secondo dopo, per il
+        // tempo di ricarica della raccolta.
+        int Colpo(EntityState nodo, ItemType cosa)
+        {
+            int prima = s.Quanti(cosa);
+            s.Raccogli(nodo.EntityId);
+            s.Attendi(() => s.Quanti(cosa) > prima, 4);
+            s.Attendi(() => false, 0.7);
+            return s.Quanti(cosa) - prima;
+        }
+
+        int ferroEra = Colpo(ferro, ItemType.Iron);
+        int pietraEra = Colpo(pietra, ItemType.Stone);
+        Console.WriteLine($"  era rigogliosa: un colpo da' {ferroEra} ferro e {pietraEra} pietra");
+        if (ferroEra != 2)  { Console.WriteLine("  FALLITA: nell'era rigogliosa il ferro non raddoppia"); ok = false; }
+        if (pietraEra != 1) { Console.WriteLine("  FALLITA: la pietra non e' rara, eppure e' cambiata"); ok = false; }
+
+        // Sette giorni: dal 125% al 112,5%, l'era c'e' ancora.
+        s.Admin("consumaera 7");
+        s.Attendi(() => false, 3);
+        bool finitaPresto = s.HaEvento(WorldEventKind.BloomEnds);
+        int ferroMeta = Colpo(ferro, ItemType.Iron);
+        Console.WriteLine($"  dopo 7 giorni: era finita={finitaPresto}, un colpo da' {ferroMeta} ferro");
+        if (finitaPresto)  { Console.WriteLine("  FALLITA: l'era e' finita a meta' delle due settimane"); ok = false; }
+        if (ferroMeta != 2) { Console.WriteLine("  FALLITA: a meta' era il ferro non raddoppia piu'"); ok = false; }
+
+        // Altri sette: l'eccedenza e' finita, e l'era con lei, senza nessun comando.
+        s.Admin("consumaera 7");
+        bool finita = s.Attendi(() => s.HaEvento(WorldEventKind.BloomEnds), 6);
+        int ferroDopo = Colpo(ferro, ItemType.Iron);
+        Console.WriteLine($"  dopo 14 giorni: era finita={finita}, un colpo da' {ferroDopo} ferro");
+        if (!finita)        { Console.WriteLine("  FALLITA: dopo 14 giorni l'era rigogliosa non e' finita"); ok = false; }
+        if (ferroDopo != 1) { Console.WriteLine("  FALLITA: finita l'era il ferro non torna a uno"); ok = false; }
+
+        // Si rimette tutto com'era, anche se qualcosa sopra e' fallito.
+        s.Admin("setvitality 1");
+        s.Admin($"remove {ferro.EntityId}");
+        s.Admin($"remove {pietra.EntityId}");
+        s.Admin("clearinv");
+        s.Attendi(() => false, 1);
+
+        if (ok) Console.WriteLine("  OK: l'era rigogliosa raddoppia ferro e cristalli, non la pietra, e finisce da sola dopo 14 giorni");
+        return ok;
+    }
+
     // ---- 16. registro di gioco -------------------------------------------------
     //
     // Deciso da Tommaso (backlog A1a2b): ogni giocatore ha lo storico degli stati
@@ -1597,6 +1707,18 @@ static class Regole
         int ricevuti = s.RegistriRicevuti;
         s.CancellaVoce(via);
         s.Attendi(() => s.RegistriRicevuti > ricevuti, 6);
+
+        // L'era rigogliosa a meta': 125% e sette giorni consumati, cioe' 112,5%.
+        // Dopo il riavvio deve esserci ancora, ne' ripartita da capo ne' persa:
+        // la verifica lo controlla facendola finire.
+        s.Admin("setvitality 1.25");
+        if (!s.Attendi(() => s.HaEvento(WorldEventKind.BloomBegins), 6))
+        {
+            Console.WriteLine("  FALLITA in preparazione: l'era rigogliosa non e' cominciata");
+            return false;
+        }
+        s.Admin("consumaera 7");
+        s.Attendi(() => false, 1.5);
         string registro = s.RegistroInRiga();
         if (via == 0 || registro.Contains($"{via}:"))
         {
@@ -1661,6 +1783,20 @@ static class Regole
         { Console.WriteLine("  FALLITA: il registro di gioco non e' tornato uguale"); ok = false; }
         if (s.Eventi.Count != 0)
         { Console.WriteLine("  FALLITA: il mondo non e' cambiato, eppure e' arrivata una notifica"); ok = false; }
+
+        // L'era lasciata al 112,5%: 6,8 giorni la portano a un soffio sopra il
+        // 100% e non basta a chiuderla; altri 0,3 si'. Se si fosse persa, o
+        // fosse ripartita dal 125%, non finirebbe esattamente qui.
+        s.Admin("consumaera 6.8");
+        s.Attendi(() => false, 3);
+        bool finitaPresto = s.HaEvento(WorldEventKind.BloomEnds);
+        s.Admin("consumaera 0.3");
+        bool finita = s.Attendi(() => s.HaEvento(WorldEventKind.BloomEnds), 6);
+        Console.WriteLine($"  {quando}: era rigogliosa finita dopo 6,8 giorni={finitaPresto}, dopo 7,1={finita}");
+        if (finitaPresto || !finita)
+        { Console.WriteLine("  FALLITA: l'era rigogliosa non e' ripresa da dove era rimasta"); ok = false; }
+        s.Admin("setvitality 1");
+        s.Attendi(() => false, 1);
         return ok;
     }
 
