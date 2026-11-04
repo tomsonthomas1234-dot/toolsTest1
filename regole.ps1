@@ -28,6 +28,9 @@ function Avvia-ServerDiProva([string]$logFile) {
     # comandi non funzionino. sonda0003 e' dedicata alla persistenza, cosi' il
     # suo zaino non dipende da cosa hanno fatto le altre prove.
     $env:Server__Admins__2 = "sonda0003"
+    # Dalla sonda0005 alla sonda0015: le undici del santuario, che devono
+    # potersi mettere in fazione e portarsi davanti all'ingresso da sole.
+    for ($i = 5; $i -le 15; $i++) { Set-Item "Env:\Server__Admins__$($i - 2)" ("sonda{0:D4}" -f $i) }
     # Mondo separato. Le prove piantano muri e stendardi: senza questo finiscono
     # nel mondo vero, ed e' gia' successo — uno stendardo di prova aveva
     # rivendicato un settore nella partita vera.
@@ -42,6 +45,7 @@ function Avvia-ServerDiProva([string]$logFile) {
     Remove-Item Env:\Server__Admins__0
     Remove-Item Env:\Server__Admins__1
     Remove-Item Env:\Server__Admins__2
+    for ($i = 3; $i -le 13; $i++) { Remove-Item "Env:\Server__Admins__$i" }
     Remove-Item Env:\Persistence__MinioBucket
 
     $deadline = (Get-Date).AddSeconds(90)

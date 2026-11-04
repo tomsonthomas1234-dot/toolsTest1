@@ -1426,6 +1426,195 @@ static class Regole
         return ok;
     }
 
+    // ---- 15b2. il santuario -----------------------------------------------------
+    //
+    // Regole di Tommaso (backlog A1a3c): il rituale di riparazione vero si fa
+    // solo nel santuario. E' chiuso; l'ingresso si apre con 5 giocatori per 2
+    // fazioni davanti e 2 cristalli alti fra loro; dentro si offrono i
+    // cristalli, e alla chiusura contano solo chi e' dentro e quello che ha
+    // offerto. Sotto il 25% la terra si ripara, sopra i cristalli si perdono.
+    // Dopo, un'ora di riposo.
+    //
+    // Undici sonde: cinque della fazione 1, sei della 2, perche' una esce prima
+    // della chiusura e la fazione 2 deve restare a cinque. L'angolo si fissa a
+    // 0 e il minuto d'ingresso si accorcia col comando "santuario chiudi".
+
+    const ulong CentroDelMondo = 20_100;
+    static readonly float Diag       = MathF.Sqrt(0.5f);
+    static readonly float IngressoXZ = 59f * MathF.Sqrt(0.5f);   // 59 metri sulla diagonale
+    static readonly float CentroXZ   = 70f * MathF.Sqrt(0.5f);
+
+    static bool Dentro(Sonda p) => Dist(p.X, p.Z, CentroXZ, CentroXZ) <= 8f;
+
+    /// Tutti davanti all'ingresso, fermi.
+    static bool AllIngresso(Sonda[] ps)
+    {
+        foreach (var p in ps) p.Admin($"tp {IngressoXZ.ToString(Inv)} {IngressoXZ.ToString(Inv)}");
+        bool arrivate = ps.All(p => p.Attendi(() => Dist(p.X, p.Z, IngressoXZ, IngressoXZ) < 1.5f, 6));
+        foreach (var p in ps) p.Cammina(0f, 0f, 0.1);
+        ScacciaBelve(ps[0]);
+        return arrivate;
+    }
+
+    /// <summary>
+    /// Via lupi e cinghiali da quello che la sonda vede. L'isola centrale e'
+    /// selvaggia: dieci sonde ferme per un minuto davanti all'ingresso venivano
+    /// sbranate una dopo l'altra e rinascevano allo stendardo, e la prova
+    /// misurava i lupi invece del santuario.
+    /// </summary>
+    static void ScacciaBelve(Sonda p)
+    {
+        p.Attendi(() => false, 0.5);
+        List<ulong> belve;
+        lock (p.Mondo) belve = p.Mondo.Values
+            .Where(e => e.Type == EntityType.Wolf || e.Type == EntityType.Boar)
+            .Select(e => e.EntityId).ToList();
+        foreach (var id in belve) p.Admin($"remove {id}");
+    }
+
+    /// Dieci metri verso il centro del mondo: dall'ingresso si finisce dentro,
+    /// se si puo' passare.
+    ///
+    /// Poi ci si ferma piu' volte. L'ultimo input di Cammina viaggia
+    /// inaffidabile e il server non guarda il numero di sequenza: se l'arresto
+    /// arriva prima dell'ultimo passo, la sonda continua a camminare mentre le
+    /// altre entrano, ed esce dall'altra parte del santuario senza saperlo.
+    static void Entra(Sonda p)
+    {
+        p.Cammina(Diag, Diag, 2.0);
+        p.Cammina(0f, 0f, 0.3);
+    }
+
+    /// Le posizioni fresche di tutte: una sonda che non gira la rete crede di
+    /// essere dove l'ha lasciata l'ultima volta che ha guardato.
+    static void Aggiorna(Sonda[] ps) { foreach (var p in ps) p.Attendi(() => false, 0.2); }
+
+    public static bool Santuario(string[] tokens, string host, int port)
+    {
+        Console.WriteLine("--- santuario: si apre alle condizioni, conta chi e' dentro, ripara solo sotto il 25%");
+
+        var ps = tokens.Select(t => new Sonda(t, host, port)).ToArray();
+        try
+        {
+            if (!ps.All(p => p.AttendiPronta()))
+            { Console.WriteLine("  FALLITA: le sonde non sono entrate in gioco"); return false; }
+
+            var capo      = ps[0];     // fazione 1, offre il Precursore
+            var epico     = ps[5];     // fazione 2, offre l'Epico
+            var fuggiasco = ps[10];    // fazione 2, offre un Epico ed esce prima
+            bool ok = true;
+
+            for (int i = 0; i < ps.Length; i++)
+            {
+                ps[i].Admin("clearinv");
+                ps[i].Admin($"setfaction {(i < 5 ? 1 : 2)}");
+            }
+            capo.Admin("santuario angolo 0");
+            capo.Admin("santuario riposo");
+            capo.Admin("setvitality 0.2");
+            if (!capo.Attendi(() => capo.UltimaVitalita != null && ChunkPiuArido(capo) < 60, 6))
+            { Console.WriteLine("  FALLITA: la terra non e' scesa al 20%"); capo.Admin("setvitality 1"); return false; }
+
+            // --- chiuso: da solo non si entra
+            if (!AllIngresso(new[] { capo }))
+            { Console.WriteLine("  FALLITA: la sonda non e' arrivata all'ingresso"); return false; }
+            Entra(capo);
+            Console.WriteLine($"  da solo all'ingresso: dentro={Dentro(capo)}");
+            if (Dentro(capo)) { Console.WriteLine("  FALLITA: il santuario chiuso lascia entrare"); ok = false; }
+
+            // --- dieci davanti ma un solo cristallo alto: resta chiuso
+            capo.Admin("give Crystal 1 Precursor");
+            fuggiasco.Admin("give Crystal 1 Epic");     // non e' davanti: non conta
+            if (!AllIngresso(ps.Take(10).ToArray()))
+            { Console.WriteLine("  FALLITA: le sonde non sono arrivate all'ingresso"); return false; }
+            capo.Attendi(() => false, 2.5);
+            Entra(capo);
+            Console.WriteLine($"  dieci davanti, un solo cristallo alto: dentro={Dentro(capo)}");
+            if (Dentro(capo)) { Console.WriteLine("  FALLITA: si apre con un solo cristallo alto"); ok = false; }
+
+            // --- arriva il secondo cristallo: si apre, e si entra
+            epico.Admin("give Crystal 1 Epic");
+            AllIngresso(ps);
+            capo.Attendi(() => false, 2.5);
+            foreach (var p in ps) Entra(p);
+            Aggiorna(ps);
+            int dentro = ps.Count(Dentro);
+            Console.WriteLine($"  con il secondo cristallo: dentro {dentro}/11" + (dentro == 11 ? "" :
+                " (fuori: " + string.Join(", ", ps.Select((p, i) => (p, i)).Where(t => !Dentro(t.p))
+                    .Select(t => $"{t.i} a {Dist(t.p.X, t.p.Z, CentroXZ, CentroXZ):F1} m")) + ")"));
+            if (dentro != 11) { Console.WriteLine("  FALLITA: l'ingresso non si e' aperto per tutti"); ok = false; }
+
+            // --- offerte; il fuggiasco offre ed esce
+            capo.Rituale(CentroDelMondo, CrystalType.Precursor);
+            epico.Rituale(CentroDelMondo, CrystalType.Epic);
+            fuggiasco.Rituale(CentroDelMondo, CrystalType.Epic);
+            bool offerte = capo.Attendi(() => capo.UltimoRituale?.Accepted == true, 4)
+                         & epico.Attendi(() => epico.UltimoRituale?.Accepted == true, 4)
+                         & fuggiasco.Attendi(() => fuggiasco.UltimoRituale?.Accepted == true, 4);
+            if (!offerte) { Console.WriteLine("  FALLITA: il centro del mondo non ha accettato le offerte"); ok = false; }
+            fuggiasco.Admin("tp 30 30");
+            fuggiasco.Attendi(() => Dist(fuggiasco.X, fuggiasco.Z, 30, 30) < 2f, 6);
+
+            capo.Admin("santuario chiudi");
+            capo.Attendi(() => ChunkPiuArido(capo) > 100, 6);
+            foreach (var p in ps) p.Attendi(() => false, 0.3);
+            int arido = ChunkPiuArido(capo);
+            Console.WriteLine($"  sotto il 25%, 2 fazioni, 1 Precursore, 1 Epico: chunk piu' arido {arido}/255 (atteso ~159), " +
+                              $"Precursore del capo {capo.Cristalli(CrystalType.Precursor)}, Epico offerto {epico.Cristalli(CrystalType.Epic)}, " +
+                              $"Epico di chi e' uscito {fuggiasco.Cristalli(CrystalType.Epic)}");
+            if (Math.Abs(arido - 159) > 2) { Console.WriteLine("  FALLITA: la terra non e' al 62,5%"); ok = false; }
+            if (capo.Cristalli(CrystalType.Precursor) != 0 || epico.Cristalli(CrystalType.Epic) != 0)
+            { Console.WriteLine("  FALLITA: i cristalli offerti non sono stati impiegati"); ok = false; }
+            if (fuggiasco.Cristalli(CrystalType.Epic) != 1)
+            { Console.WriteLine("  FALLITA: chi e' uscito prima ha perso il cristallo"); ok = false; }
+
+            // --- riposo: con tutte le condizioni, resta chiuso
+            foreach (var p in ps) p.Admin("tp 30 30");
+            capo.Admin("give Crystal 1 Precursor");
+            epico.Admin("give Crystal 1 Epic");
+            AllIngresso(ps.Take(10).ToArray());
+            capo.Attendi(() => false, 2.5);
+            Entra(capo);
+            Console.WriteLine($"  durante il riposo, con tutte le condizioni: dentro={Dentro(capo)}");
+            if (Dentro(capo)) { Console.WriteLine("  FALLITA: il santuario si apre durante il riposo"); ok = false; }
+
+            // --- sopra il 25%: i cristalli si perdono, la terra resta com'e'
+            capo.Admin("santuario riposo");
+            capo.Admin("setvitality 1");
+            capo.Attendi(() => ChunkPiuArido(capo) == 255, 6);
+            foreach (var p in ps) p.Admin("tp 30 30");
+            AllIngresso(ps.Take(10).ToArray());
+            capo.Attendi(() => false, 2.5);
+            foreach (var p in ps.Take(10)) Entra(p);
+            capo.Rituale(CentroDelMondo, CrystalType.Precursor);
+            epico.Rituale(CentroDelMondo, CrystalType.Epic);
+            capo.Attendi(() => capo.UltimoRituale?.Accepted == true, 4);
+            epico.Attendi(() => epico.UltimoRituale?.Accepted == true, 4);
+            capo.Admin("santuario chiudi");
+            capo.Attendi(() => capo.Cristalli(CrystalType.Precursor) == 0, 6);
+            epico.Attendi(() => epico.Cristalli(CrystalType.Epic) == 0, 3);
+            Console.WriteLine($"  sopra il 25%: Precursore {capo.Cristalli(CrystalType.Precursor)}, Epico {epico.Cristalli(CrystalType.Epic)}, " +
+                              $"chunk piu' arido {ChunkPiuArido(capo)}/255");
+            if (capo.Cristalli(CrystalType.Precursor) != 0 || epico.Cristalli(CrystalType.Epic) != 0)
+            { Console.WriteLine("  FALLITA: sopra il 25% i cristalli non si sono consumati"); ok = false; }
+            if (ChunkPiuArido(capo) != 255)
+            { Console.WriteLine("  FALLITA: sopra il 25% la terra e' cambiata"); ok = false; }
+
+            // Si rimette tutto com'era, anche se qualcosa sopra e' fallito.
+            capo.Admin("santuario riposo");
+            capo.Admin("setvitality 1");
+            foreach (var p in ps) { p.Admin("tp 30 30"); p.Admin("clearinv"); }
+            capo.Attendi(() => false, 1.0);
+
+            if (ok) Console.WriteLine("  OK: il santuario si apre solo alle condizioni, conta chi e' dentro, e ripara solo sotto il 25%");
+            return ok;
+        }
+        finally
+        {
+            foreach (var p in ps) p.Dispose();
+        }
+    }
+
     // ---- 15c. l'era rigogliosa si consuma e raddoppia i drop -------------------
     //
     // Numeri di Tommaso (backlog A1a3b): l'eccedenza sopra il 100% se ne va da
