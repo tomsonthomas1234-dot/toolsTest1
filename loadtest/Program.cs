@@ -100,10 +100,15 @@ if (modoRegole)
 {
     if (tokens.Count < 5) { Console.WriteLine("servono cinque token: prova annullata"); return 1; }
 
+    // L'orda d'ufficio prima dello zaino, e dopo il riavvio lo zaino prima
+    // dell'orda: la sonda che controlla lo zaino deve essere l'ultima a uscire
+    // prima di spegnere e la prima a entrare dopo.
     if (metaPersistenza == "prepara")
-        return Regole.PersistenzaPrepara(tokens[3], host, port) ? 0 : 1;
+        return Regole.OrdaPrepara(tokens[3], host, port)
+             & Regole.PersistenzaPrepara(tokens[3], host, port) ? 0 : 1;
     if (metaPersistenza == "verifica")
-        return Regole.PersistenzaVerifica(tokens[3], host, port, "dopo il riavvio") ? 0 : 1;
+        return Regole.PersistenzaVerifica(tokens[3], host, port, "dopo il riavvio")
+             & Regole.OrdaVerifica(tokens[3], host, port) ? 0 : 1;
 
     // Il terzo account non e' fra gli amministratori: serve proprio a
     // verificare che senza quel titolo i comandi non funzionino.

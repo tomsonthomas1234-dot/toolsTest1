@@ -68,6 +68,33 @@ sealed class Sonda : IDisposable
         return riga != null && int.TryParse(riga.Substring(Testa.Length), out int n) ? n : -1;
     }
 
+    /// <summary>
+    /// Lo stato del santuario e dell'orda secondo il server (comando admin
+    /// "santuario", piu' eventuali argomenti): "stato", "orda", "capi",
+    /// "sparsa", "in attesa", "tornati", "cristalli alti a terra". Vuoto se la
+    /// risposta non arriva.
+    /// </summary>
+    public Dictionary<string, string> StatoSantuario(string argomenti = "")
+    {
+        const string Testa = "santuario: ";
+        int gia;
+        lock (Chat) gia = Chat.Count;
+        Admin(("santuario " + argomenti).Trim());
+        string riga = null;
+        Attendi(() => { lock (Chat) riga = Chat.Skip(gia).LastOrDefault(t => t.StartsWith(Testa)); return riga != null; }, 5);
+        var stato = new Dictionary<string, string>();
+        if (riga == null) return stato;
+        foreach (var voce in riga.Substring(Testa.Length).Split(", "))
+        {
+            int sp = voce.LastIndexOf(' ');
+            if (sp > 0) stato[voce[..sp]] = voce[(sp + 1)..];
+        }
+        return stato;
+    }
+
+    public static string Descrivi(Dictionary<string, string> stato) =>
+        stato.Count == 0 ? "(nessuna risposta)" : string.Join(", ", stato.Select(kv => $"{kv.Key} {kv.Value}"));
+
     /// Il registro di gioco come lo vedrebbe il client: sostituito da ogni
     /// WorldJournal, allungato da ogni WorldEvent.
     public readonly List<WorldEventMsg> Registro = new();
@@ -1659,6 +1686,54 @@ static class Regole
             if (ChunkPiuArido(capo) != 255)
             { Console.WriteLine("  FALLITA: sopra il 25% la terra e' cambiata"); ok = false; }
 
+            // --- l'orda (Tommaso, A1a3c2b): dieci dentro fanno 50 lupi (il
+            // minimo), piu' un mini boss per il Precursore e uno per l'Epico.
+            // Prima uccide chi e' dentro, poi si sparge; finche' vive il
+            // santuario riposa; i mini boss lasciano cadere i loro cristalli.
+            var orda = capo.StatoSantuario();
+            Console.WriteLine($"  l'orda appena sprigionata: {Sonda.Descrivi(orda)}");
+            if (orda.GetValueOrDefault("orda") != "50" || orda.GetValueOrDefault("capi") != "2"
+                || orda.GetValueOrDefault("in attesa") != "2")
+            { Console.WriteLine("  FALLITA: l'orda non ha 50 lupi e 2 mini boss"); ok = false; }
+
+            var finoA = DateTime.UtcNow.AddSeconds(30);
+            while (orda.GetValueOrDefault("sparsa") != "1" && DateTime.UtcNow < finoA)
+            {
+                capo.Attendi(() => false, 1.0);
+                orda = capo.StatoSantuario();
+            }
+            Console.WriteLine($"  dopo: {Sonda.Descrivi(orda)}");
+            if (orda.GetValueOrDefault("sparsa") != "1")
+            { Console.WriteLine("  FALLITA: in 30 secondi l'orda non ha svuotato il santuario"); ok = false; }
+
+            capo.Admin("santuario riposo");
+            capo.Attendi(() => false, 1.5);
+            orda = capo.StatoSantuario();
+            Console.WriteLine($"  riposo finito, orda viva: stato {orda.GetValueOrDefault("stato")}");
+            if (orda.GetValueOrDefault("stato") != "Resting")
+            { Console.WriteLine("  FALLITA: con l'orda viva il santuario non riposa"); ok = false; }
+
+            int aTerraPrima = int.TryParse(orda.GetValueOrDefault("cristalli alti a terra"), out int atp) ? atp : -1;
+            orda = capo.StatoSantuario("orda uccidi");
+            Console.WriteLine($"  orda uccisa: {Sonda.Descrivi(orda)}");
+            if (orda.GetValueOrDefault("orda") != "0" || orda.GetValueOrDefault("capi") != "0"
+                || orda.GetValueOrDefault("in attesa") != "0")
+            { Console.WriteLine("  FALLITA: uccisa l'orda, qualcosa resta vivo o in attesa"); ok = false; }
+            if (orda.GetValueOrDefault("cristalli alti a terra") != (aTerraPrima + 2).ToString())
+            { Console.WriteLine("  FALLITA: i mini boss non hanno lasciato cadere i due cristalli"); ok = false; }
+
+            capo.Admin("santuario riposo");
+            capo.Attendi(() => false, 1.5);
+            orda = capo.StatoSantuario();
+            if (orda.GetValueOrDefault("stato") != "Closed")
+            { Console.WriteLine($"  FALLITA: morta l'orda e finito il riposo, il santuario e' {orda.GetValueOrDefault("stato")}"); ok = false; }
+            // I cristalli dei mini boss restano a terra, e uno morto ancora dentro
+            // il santuario lascia il suo davanti all'ingresso: le sonde lo
+            // raccoglierebbero nel passo dopo, che conta i cristalli di ognuna.
+            capo.Admin("contacristalli azzera");
+            // Chi e' morto rinasce in tre secondi: le prove dopo lo vogliono vivo.
+            capo.Attendi(() => false, 4.0);
+
             // --- rituale incompleto (Tommaso, A1a3c2a): si apre in dieci, ne
             // entrano nove, e una fazione non ha piu' i suoi cinque. Senza
             // offerte non succede niente e il santuario non riposa; con le
@@ -2025,6 +2100,44 @@ static class Regole
     /// successo prima. La domanda vera non e' "ha sette legni" ma "ha ancora
     /// quello che aveva", e quella si risponde solo ricordando.
     /// </summary>
+    // ---- l'orda supera il riavvio ------------------------------------------------
+    //
+    // Tommaso (A1a3c2b): l'orda resta finche' non muore tutta, anche dopo un
+    // riavvio, e un Precursore non deve sparire dal mondo con lei. Prima di
+    // spegnere si sprigiona un'orda d'ufficio (50 lupi e un mini boss Epico);
+    // dopo, deve esserci ancora, sparsa, col suo mini boss. La sonda sta lontana
+    // dall'isola centrale: l'orda non deve poterla raggiungere.
+
+    public static bool OrdaPrepara(string token, string host, int port)
+    {
+        using var s = new Sonda(token, host, port);
+        if (!s.AttendiPronta()) { Console.WriteLine("  FALLITA: la sonda dell'orda non e' entrata in gioco"); return false; }
+        var stato = s.StatoSantuario("orda 1 1 0");
+        Console.WriteLine($"  orda prima del riavvio: {Sonda.Descrivi(stato)}");
+        if (stato.GetValueOrDefault("orda") != "50" || stato.GetValueOrDefault("capi") != "1")
+        { Console.WriteLine("  FALLITA: l'orda d'ufficio non e' nata"); return false; }
+        return true;
+    }
+
+    public static bool OrdaVerifica(string token, string host, int port)
+    {
+        using var s = new Sonda(token, host, port);
+        if (!s.AttendiPronta()) { Console.WriteLine("  FALLITA: la sonda dell'orda non e' entrata in gioco"); return false; }
+        s.Attendi(() => false, 1.5);   // il tick ricrea l'orda una volta al secondo
+        var stato = s.StatoSantuario();
+        Console.WriteLine($"  orda dopo il riavvio: {Sonda.Descrivi(stato)}");
+        bool ok = stato.GetValueOrDefault("orda") == "50" && stato.GetValueOrDefault("capi") == "1"
+                  && stato.GetValueOrDefault("sparsa") == "1" && stato.GetValueOrDefault("in attesa") == "1"
+                  && stato.GetValueOrDefault("stato") == "Resting";
+        if (!ok) Console.WriteLine("  FALLITA: l'orda non e' sopravvissuta al riavvio com'era");
+        // Si toglie comunque: il mondo di prova riparte pulito al prossimo giro,
+        // ma chi lo guarda dopo non deve trovarci 50 lupi.
+        stato = s.StatoSantuario("orda uccidi");
+        if (stato.GetValueOrDefault("in attesa") != "0")
+        { Console.WriteLine($"  FALLITA: uccisa l'orda, resta {Sonda.Descrivi(stato)}"); ok = false; }
+        return ok;
+    }
+
     public static bool PersistenzaPrepara(string token, string host, int port)
     {
         using var s = new Sonda(token, host, port);
