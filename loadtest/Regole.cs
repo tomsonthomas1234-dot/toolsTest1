@@ -1345,6 +1345,87 @@ static class Regole
         return ok;
     }
 
+    // ---- 15b. riparazione ed era rigogliosa -----------------------------------
+    //
+    // La formula di Tommaso (backlog A1a): ogni fazione 12,5%, ogni Epico 12,5%,
+    // ogni Precursore 25%; almeno 2 fazioni e 2 cristalli alti, di cui un
+    // Precursore. Si ferma al 100%, salvo 4 fazioni con 4 Precursori, che
+    // aprono l'era rigogliosa fino al 125%.
+    //
+    // Il rituale di gruppo non c'e' ancora: si prova la formula col comando
+    // admin "riparazione", che ne applica il risultato. Il numero della
+    // vitalita' non arriva ai giocatori, ma la mappa per chunk si': il chunk di
+    // terraferma piu' arido dice a quanto e' stata portata la terra.
+
+    static int ChunkPiuArido(Sonda s) => s.UltimaVitalita == null ? -1 : s.UltimaVitalita.Vitality.Min();
+
+    public static bool Riparazione(string token, string tokenOsservatore, string host, int port)
+    {
+        Console.WriteLine("--- riparazione: la formula, i rifiuti, l'era rigogliosa");
+
+        using var s = new Sonda(token, host, port);
+        using var o = new Sonda(tokenOsservatore, host, port);
+        if (!s.AttendiPronta() || !o.AttendiPronta())
+        { Console.WriteLine("  FALLITA: le sonde non sono entrate in gioco"); return false; }
+        if (!s.Attendi(() => s.UltimaPartita != null && !s.UltimaPartita.InFamine && s.UltimaVitalita != null, 6))
+        { Console.WriteLine("  FALLITA: il mondo di prova e' gia' in carestia, o lo stato non arriva"); return false; }
+
+        bool ok = true;
+        bool Tutti(WorldEventKind k) => s.Attendi(() => { o.Poll(); return s.HaEvento(k) && o.HaEvento(k); }, 6);
+
+        s.Admin("setvitality 0.02");
+        if (!s.Attendi(() => s.UltimaPartita.InFamine, 6))
+        { Console.WriteLine("  FALLITA: la carestia d'ufficio non e' cominciata"); s.Admin("setvitality 1"); return false; }
+
+        // Sotto il minimo: una fazione sola, poi un solo cristallo alto, poi
+        // quattro Epici senza Precursore. Nessuno dei tre deve toccare la terra.
+        s.Admin("riparazione 1 1 1");
+        s.Admin("riparazione 2 0 1");
+        s.Admin("riparazione 4 4 0");
+        s.Attendi(() => false, 3);
+        int dopoRifiuti = ChunkPiuArido(s);
+        Console.WriteLine($"  dopo tre riparazioni sotto il minimo: carestia={s.UltimaPartita.InFamine}, chunk piu' arido {dopoRifiuti}/255");
+        if (!s.UltimaPartita.InFamine || dopoRifiuti > 10)
+        { Console.WriteLine("  FALLITA: una riparazione sotto il minimo ha toccato la terra"); ok = false; }
+
+        // Il minimo: 2 fazioni, 1 Epico, 1 Precursore = 62,5%.
+        s.Admin("riparazione 2 1 1");
+        bool uscita = s.Attendi(() => !s.UltimaPartita.InFamine, 6);
+        bool fine = Tutti(WorldEventKind.FamineEnds);
+        s.Attendi(() => ChunkPiuArido(s) > 10, 6);
+        int minimo = ChunkPiuArido(s);
+        Console.WriteLine($"  riparazione 2 fazioni, 1 Epico, 1 Precursore: carestia={s.UltimaPartita.InFamine}, " +
+                          $"fine carestia a tutti={fine}, chunk piu' arido {minimo}/255 (atteso ~159, il 62,5%)");
+        if (!uscita || !fine) { Console.WriteLine("  FALLITA: la riparazione non ha chiuso la carestia per tutti"); ok = false; }
+        if (Math.Abs(minimo - 159) > 2) { Console.WriteLine("  FALLITA: la terra non e' al 62,5%"); ok = false; }
+
+        // 4 fazioni e 3 Precursori: la formula da' 125%, ma senza 4 Precursori
+        // ci si ferma al 100% e l'era rigogliosa non comincia.
+        s.Admin("riparazione 4 0 3");
+        s.Attendi(() => ChunkPiuArido(s) == 255, 6);
+        s.Attendi(() => { o.Poll(); return false; }, 3);
+        int pieno = ChunkPiuArido(s);
+        bool rigoglioPresto = s.HaEvento(WorldEventKind.BloomBegins) || o.HaEvento(WorldEventKind.BloomBegins);
+        Console.WriteLine($"  riparazione 4 fazioni, 3 Precursori: chunk piu' arido {pieno}/255, era rigogliosa={rigoglioPresto}");
+        if (pieno != 255) { Console.WriteLine("  FALLITA: la terra non e' tornata al 100%"); ok = false; }
+        if (rigoglioPresto) { Console.WriteLine("  FALLITA: era rigogliosa senza 4 Precursori"); ok = false; }
+
+        // 4 fazioni e 4 Precursori: l'era rigogliosa.
+        s.Admin("riparazione 4 0 4");
+        bool rigoglio = Tutti(WorldEventKind.BloomBegins);
+        Console.WriteLine($"  riparazione 4 fazioni, 4 Precursori: inizio era rigogliosa a tutti={rigoglio}");
+        if (!rigoglio) { Console.WriteLine("  FALLITA: l'era rigogliosa non e' cominciata per tutti"); ok = false; }
+
+        // Si rimette la terra com'era, anche se qualcosa sopra e' fallito.
+        s.Admin("setvitality 1");
+        bool fineRigoglio = Tutti(WorldEventKind.BloomEnds);
+        Console.WriteLine($"  dopo setvitality 1: fine era rigogliosa a tutti={fineRigoglio}");
+        if (!fineRigoglio) { Console.WriteLine("  FALLITA: l'era rigogliosa non e' finita tornando al 100%"); ok = false; }
+
+        if (ok) Console.WriteLine("  OK: la riparazione segue la formula, rifiuta sotto il minimo, e solo 4+4 apre l'era rigogliosa");
+        return ok;
+    }
+
     // ---- 16. registro di gioco -------------------------------------------------
     //
     // Deciso da Tommaso (backlog A1a2b): ogni giocatore ha lo storico degli stati

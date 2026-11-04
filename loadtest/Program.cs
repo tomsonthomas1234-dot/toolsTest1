@@ -124,6 +124,7 @@ if (modoRegole)
         ("terra che si consuma",    () => Regole.TerraSiConsuma(tokens[1], host, port)),
         ("morire costa",            () => Regole.MorireCosta(tokens[1], host, port)),
         ("carestia",                () => Regole.Carestia(tokens[1], tokens[0], host, port)),
+        ("riparazione",             () => Regole.Riparazione(tokens[1], tokens[0], host, port)),
         ("registro di gioco",       () => Regole.RegistroDiGioco(tokens[1], tokens[4], host, port)),
         ("persistenza al rientro",  () => Regole.PersistenzaAlRientro(tokens[3], host, port)),
     };
