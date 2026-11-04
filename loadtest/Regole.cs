@@ -1552,7 +1552,7 @@ static class Regole
         p.Cammina(0f, 0f, 0.3);
     }
 
-    static string DescriviSantuario(SanctuaryStateMsg s) => s == null ? "(niente)" :
+    static string DescriviSantuario(SanctuaryStateMsg s) => s == null ? "(niente)" : !s.Known ? "non si sa dove sta" :
         $"centro ({s.CenterX:F1}, {s.CenterZ:F1}) raggio {s.Radius}, ingresso ({s.EntranceX:F1}, {s.EntranceZ:F1}), " +
         $"{s.Gate}" + (s.Gate == SanctuaryGate.Open ? $" per {s.OpenSecondsLeft} s" : "") +
         $", mappa {(s.ShowOnMap ? "si" : "no")}, id {s.CenterId}";
@@ -1688,16 +1688,29 @@ static class Regole
             if (fuggiasco.Cristalli(CrystalType.Epic) != 1)
             { Console.WriteLine("  FALLITA: chi e' uscito prima ha perso il cristallo"); ok = false; }
 
-            // --- a riposo, e lo sa solo chi e' sull'isola centrale: lontano si
-            // conosce il posto ma non l'ingresso.
+            // --- a riposo, e lo sa solo chi e' sull'isola centrale. Lontano
+            // dall'isola, senza carestia, non si sa nemmeno dove sta; con la
+            // carestia si sa dove sta, ma non com'e' l'ingresso; finita la
+            // carestia, il client lo dimentica (Tommaso, revisione di A1a3c2c).
             bool riposoVisto = capo.Attendi(() => capo.UltimoSantuario?.Gate == SanctuaryGate.Resting, 4);
             fuggiasco.Admin("tp 300 -420");
-            bool lontano = fuggiasco.Attendi(() => fuggiasco.UltimoSantuario is { Gate: SanctuaryGate.Unknown } s &&
-                Dist(s.CenterX, s.CenterZ, CentroXZ, CentroXZ) < 0.1f, 6);
+            bool ignoto = fuggiasco.Attendi(() => fuggiasco.UltimoSantuario is
+                { Known: false, Gate: SanctuaryGate.Unknown, CenterX: 0f, CenterZ: 0f, EntranceX: 0f, EntranceZ: 0f, CenterId: 0 }, 6);
             Console.WriteLine($"  dopo il rituale, visto da dentro: {DescriviSantuario(capo.UltimoSantuario)}; " +
                               $"da fuori dall'isola: {DescriviSantuario(fuggiasco.UltimoSantuario)}");
             if (!riposoVisto) { Console.WriteLine("  FALLITA: il client non sa che il santuario riposa"); ok = false; }
-            if (!lontano) { Console.WriteLine("  FALLITA: lontano dall'isola centrale si vede com'e' l'ingresso"); ok = false; }
+            if (!ignoto) { Console.WriteLine("  FALLITA: lontano dall'isola, senza carestia, il client sa qualcosa del santuario"); ok = false; }
+
+            capo.Admin("setvitality 0.02");
+            bool inCarestia = fuggiasco.Attendi(() => fuggiasco.UltimoSantuario is
+                { Known: true, Gate: SanctuaryGate.Unknown, ShowOnMap: true } s &&
+                Dist(s.CenterX, s.CenterZ, CentroXZ, CentroXZ) < 0.1f && s.CenterId == CentroDelMondo, 4);
+            Console.WriteLine($"  lontano dall'isola, in carestia: {DescriviSantuario(fuggiasco.UltimoSantuario)}");
+            if (!inCarestia) { Console.WriteLine("  FALLITA: in carestia chi e' lontano non sa dove sta il santuario"); ok = false; }
+            capo.Admin("setvitality 0.625");
+            bool dimenticato = fuggiasco.Attendi(() => fuggiasco.UltimoSantuario?.Known == false, 4);
+            Console.WriteLine($"  lontano dall'isola, finita la carestia: {DescriviSantuario(fuggiasco.UltimoSantuario)}");
+            if (!dimenticato) { Console.WriteLine("  FALLITA: finita la carestia, chi e' lontano sa ancora dove sta il santuario"); ok = false; }
 
             // --- riposo: con tutte le condizioni, resta chiuso
             foreach (var p in ps) p.Admin("tp 30 30");
