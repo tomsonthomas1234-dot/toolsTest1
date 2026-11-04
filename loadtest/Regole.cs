@@ -1431,7 +1431,8 @@ static class Regole
     // Numeri di Tommaso (backlog A1a3b): l'eccedenza sopra il 100% se ne va da
     // sola in 14 giorni; finche dura, sull'isola centrale raddoppia tutto
     // (risorse, cristalli, animali e nascite) e fuori niente. Animali e nascite
-    // qui non si provano: la sonda non sa cacciare ne' allevare.
+    // qui non si provano: la sonda non sa cacciare ne' allevare. Le strutture
+    // si' (A1a3b2): una trappola da pesce al centro e una fuori.
     //
     // Due settimane non si aspettano: il comando admin "consumaera" fa passare
     // i giorni come li farebbe passare il tick. Dal 125%, dopo 7 giorni l'era
@@ -1518,8 +1519,35 @@ static class Regole
             return s.Quanti(cosa) - prima;
         }
 
+        // Una trappola da pesce piantata due metri a ovest della sonda, fatta
+        // rendere una volta col comando "produci": quanti pesci ci sono dentro.
+        // Decisione di Tommaso (A1a3b2): al centro anche le strutture rendono
+        // il doppio, fuori no.
+        int Trappola(float nx, float nz)
+        {
+            float tx = nx - 2f;
+            s.Admin($"tp {nx.ToString(Inv)} {nz.ToString(Inv)}");
+            s.Attendi(() => Dist(s.X, s.Z, nx, nz) < 2f, 8);
+            s.Admin($"build FishTrap {tx.ToString(Inv)} {nz.ToString(Inv)}");
+            EntityState t = null;
+            if (!s.Attendi(() => (t = s.PiuVicina(EntityType.FishTrap, tx, nz)) != null &&
+                                 Dist(t.X, t.Z, tx, nz) < 1f, 12)) return -1;
+            piantati.Add(t.EntityId);
+            s.Admin("produci");
+            s.Attendi(() => { var x = s.PiuVicina(EntityType.FishTrap, tx, nz); return x != null && x.Extra1 > 0; }, 6);
+            s.Attendi(() => false, 1);
+            var dopo = s.PiuVicina(EntityType.FishTrap, tx, nz);
+            return dopo != null ? (int)dopo.Extra1 : -1;
+        }
+
         // Fuori: in mare aperto a sud dell'isola centrale, lontano dagli altri
         // scenari. L'era rigogliosa qui non cambia niente.
+        int pesciFuori = Trappola(-90f, -340f);
+        int pesciCentro = Trappola(60f, -60f);
+        Console.WriteLine($"  trappola da pesce: {pesciFuori} pesci fuori dall'isola centrale, {pesciCentro} sull'isola centrale");
+        if (pesciFuori != 1)  { Console.WriteLine("  FALLITA: fuori dall'isola centrale la trappola non rende uno"); ok = false; }
+        if (pesciCentro != 2) { Console.WriteLine("  FALLITA: sull'isola centrale la trappola non rende il doppio"); ok = false; }
+
         var (ferroFuori, pietraFuori) = Pianta(-90f, -340f);
         if (ferroFuori == null || pietraFuori == null)
         { Console.WriteLine("  FALLITA: i nodi fuori dall'isola centrale non sono comparsi"); Ripulisci(); return false; }
@@ -1560,7 +1588,7 @@ static class Regole
         // Si rimette tutto com'era, anche se qualcosa sopra e' fallito.
         Ripulisci();
 
-        if (ok) Console.WriteLine("  OK: l'era rigogliosa raddoppia cristalli e risorse sull'isola centrale, niente fuori, e finisce da sola dopo 14 giorni");
+        if (ok) Console.WriteLine("  OK: l'era rigogliosa raddoppia cristalli, risorse e strutture sull'isola centrale, niente fuori, e finisce da sola dopo 14 giorni");
         return ok;
     }
 
