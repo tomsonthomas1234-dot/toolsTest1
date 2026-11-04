@@ -14,6 +14,20 @@ $root = "C:\precursori"
 $log  = "$root\tools\logs"
 New-Item -ItemType Directory -Force -Path $log | Out-Null
 
+# Segno che le prove stanno girando, per run.ps1: un suo avvio a meta' giro
+# fermava il server delle prove e mandava le sonde sul mondo vero. Dentro, il
+# PID di questo script e l'ora in cui e' nato, cosi' un lucchetto rimasto da un
+# giro interrotto si riconosce. Lo stesso segno, --Prove, va nella riga di
+# comando di ogni processo avviato qui: run.ps1 ferma solo quelli senza.
+$lucchetto = "$root\tools\regole.lock"
+$io = Get-Process -Id $PID
+Set-Content -Path $lucchetto -Value @($PID, $io.StartTime.ToString("o")) -Encoding ascii
+
+function Esci([int]$codice) {
+    Remove-Item $lucchetto -Force -ErrorAction SilentlyContinue
+    exit $codice
+}
+
 function Avvia-ServerDiProva([string]$logFile) {
     # Tetto basso ma non nullo: una prova lo riempie apposta, le altre devono
     # restare libere di costruire.
@@ -36,7 +50,7 @@ function Avvia-ServerDiProva([string]$logFile) {
     # rivendicato un settore nella partita vera.
     $env:Persistence__MinioBucket = "precursori-prove"
 
-    Start-Process -FilePath "dotnet" -ArgumentList "run","--no-build" `
+    Start-Process -FilePath "dotnet" -ArgumentList "run","--no-build","--","--Prove=regole" `
         -WorkingDirectory "$root\bootstrap\02_gameserver\src\Precursori.GameServer" `
         -RedirectStandardOutput $logFile `
         -RedirectStandardError  "$log\regole-server.err.log" -WindowStyle Hidden
@@ -85,7 +99,7 @@ $srvOk  = $LASTEXITCODE -eq 0
 Pop-Location
 $srvOut | Select-String -Pattern "error|Errori:|Compilazione" | Select-Object -First 4 |
     ForEach-Object { "  " + $_.Line }
-if (-not $srvOk) { Write-Output "  SERVER NON COMPILATO: annullo."; exit 1 }
+if (-not $srvOk) { Write-Output "  SERVER NON COMPILATO: annullo."; Esci 1 }
 
 Write-Output "=== build prove ==="
 Push-Location "$root\tools\loadtest"
@@ -94,7 +108,7 @@ $buildOk  = $LASTEXITCODE -eq 0
 Pop-Location
 $buildOut | Select-String -Pattern "error|Errori:|Compilazione" | Select-Object -First 6 |
     ForEach-Object { "  " + $_.Line }
-if (-not $buildOk) { Write-Output "  PROVE NON COMPILATE: annullo."; exit 1 }
+if (-not $buildOk) { Write-Output "  PROVE NON COMPILATE: annullo."; Esci 1 }
 
 Ferma-Tutto
 
@@ -111,7 +125,7 @@ docker exec precursori-postgres psql -U postgres -d precursori `
     -c "DELETE FROM world_snapshots WHERE bucket='precursori-prove';" | Out-Null
 if ($LASTEXITCODE -ne 0) { Write-Output "  attenzione: non ho potuto azzerare il mondo di prova" }
 
-Start-Process -FilePath "dotnet" -ArgumentList "run","--no-build" `
+Start-Process -FilePath "dotnet" -ArgumentList "run","--no-build","--","--Prove=regole" `
     -WorkingDirectory "$root\bootstrap\05_webapi\src\Precursori.WebApi" `
     -RedirectStandardOutput "$log\regole-webapi.log" `
     -RedirectStandardError  "$log\regole-webapi.err.log" -WindowStyle Hidden
@@ -172,7 +186,7 @@ Write-Output "--- apertura al pubblico: rifiuta di partire con i valori di svilu
 $apLog = "$log\regole-apertura.log"
 Remove-Item $apLog -ErrorAction SilentlyContinue
 $env:Server__ProductionChecks = "true"
-$p = Start-Process -FilePath "dotnet" -ArgumentList "run","--no-build" `
+$p = Start-Process -FilePath "dotnet" -ArgumentList "run","--no-build","--","--Prove=regole" `
     -WorkingDirectory "$root\bootstrap\02_gameserver\src\Precursori.GameServer" `
     -RedirectStandardOutput $apLog -RedirectStandardError "$log\regole-apertura.err.log" `
     -WindowStyle Hidden -PassThru
@@ -195,4 +209,4 @@ if ($inAscolto) {
 Write-Output ""
 if ($esito -eq 0) { Write-Output "PROVE SUPERATE" } else { Write-Output "PROVE FALLITE (codice $esito)" }
 Write-Output "Per tornare a giocare: & C:\precursori\tools\run.ps1"
-exit $esito
+Esci $esito

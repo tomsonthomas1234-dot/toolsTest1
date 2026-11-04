@@ -15,6 +15,12 @@ $clients = 200
 $seconds = 120
 New-Item -ItemType Directory -Force -Path $log | Out-Null
 
+# Come in regole.ps1: un lucchetto con PID e ora di nascita di questo script, e
+# il segno --Prove sui processi avviati qui, perche' run.ps1 non li fermi.
+$lucchetto = "$root\tools\bench.lock"
+$io = Get-Process -Id $PID
+Set-Content -Path $lucchetto -Value @($PID, $io.StartTime.ToString("o")) -Encoding ascii
+
 Write-Output "=== build banco di prova ==="
 Push-Location "$root\tools\loadtest"
 $buildOut = dotnet build -c Release -v minimal --nologo 2>&1
@@ -30,6 +36,7 @@ $buildOut | Select-String -Pattern "error|Errori:|Compilazione" | Select-Object 
 if (-not $buildOk) {
     Write-Output ""
     Write-Output "BANCO NON COMPILATO: misura annullata. Nessun numero e' meglio di un numero falso."
+    Remove-Item $lucchetto -Force -ErrorAction SilentlyContinue
     exit 1
 }
 
@@ -47,13 +54,13 @@ foreach ($delta in @($false, $true)) {
     $srvLog = "$log\bench-server-$($delta.ToString().ToLower()).log"
     Remove-Item $srvLog -ErrorAction SilentlyContinue
 
-    Start-Process -FilePath "dotnet" -ArgumentList "run","--no-build" `
+    Start-Process -FilePath "dotnet" -ArgumentList "run","--no-build","--","--Prove=bench" `
         -WorkingDirectory "$root\bootstrap\05_webapi\src\Precursori.WebApi" `
         -RedirectStandardOutput "$log\bench-webapi.log" `
         -RedirectStandardError  "$log\bench-webapi.err.log" -WindowStyle Hidden
 
     $env:Server__DeltaSnapshots = $delta.ToString().ToLower()
-    Start-Process -FilePath "dotnet" -ArgumentList "run","--no-build" `
+    Start-Process -FilePath "dotnet" -ArgumentList "run","--no-build","--","--Prove=bench" `
         -WorkingDirectory "$root\bootstrap\02_gameserver\src\Precursori.GameServer" `
         -RedirectStandardOutput $srvLog `
         -RedirectStandardError  "$log\bench-server.err.log" -WindowStyle Hidden
@@ -102,3 +109,4 @@ Get-Process -Name "Precursori.GameServer","Precursori.WebApi" -ErrorAction Silen
     ForEach-Object { Stop-Process -Id $_.Id -Force }
 Write-Output ""
 Write-Output "processi di prova fermati. Per tornare a giocare: & C:\precursori\tools\run.ps1"
+Remove-Item $lucchetto -Force -ErrorAction SilentlyContinue

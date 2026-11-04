@@ -10,12 +10,42 @@ ogni volta, e "consenti sempre" non serve a niente.
 | comando | cosa fa |
 |---|---|
 | `build.ps1` | ferma il server, compila `shared`, game server e web API, e se Unity è chiuso lancia `BatchVerify` sul client |
-| `run.ps1` | avvia web API e game server, fermando prima le istanze già attive |
+| `run.ps1` | avvia web API e game server veri, fermando prima le istanze vere già attive; non fa niente se stanno girando le prove |
 | `ship.ps1` | committa e pusha i repository che hanno modifiche **e** un messaggio pronto in `msg/` |
 
 `ship.ps1` legge i messaggi da `msg/<repo>.txt` e cancella il file a commit
 riuscito: un messaggio esiste solo fra il momento in cui lo si scrive e quello in
 cui parte.
+
+### `run.ps1` e le prove
+
+Server vero e server delle prove usano le stesse porte, quindi non possono
+girare insieme. `regole.ps1` e `bench.ps1` scrivono, finché girano,
+`regole.lock` o `bench.lock` con il loro PID: se `run.ps1` ne trova uno vivo
+dice chi sta girando e non avvia niente. Un lucchetto rimasto da un giro
+interrotto si riconosce (il PID è morto o è di un altro processo) e viene tolto.
+In più i processi delle prove portano `--Prove=regole` o `--Prove=bench` nella
+riga di comando, e `run.ps1` ferma solo quelli senza.
+
+Le prove, invece, fermano anche il server vero e non lo riaccendono: finito un
+giro, per tornare a giocare si lancia `run.ps1`.
+
+### Perché il server avviato da un agente si spegneva
+
+Gli agenti lanciano i comandi da una shell che sta dentro un *job* di Windows.
+Un processo avviato con `Start-Process` resta in quel job: quando il comando
+viene fermato, o la sessione dell'agente si chiude, Windows chiude il job e
+uccide anche il server, senza errori nei log. Provato il 4 novembre: un figlio
+di `Start-Process` è morto allo stop del comando che lo aveva lanciato, uno
+creato tramite WMI (`Win32_Process.Create`) è rimasto vivo. Se il comando
+finisce da solo, invece, il figlio sopravvive: per questo succedeva solo a volte.
+
+Per questo `run.ps1` avvia web API e server tramite WMI, con l'uscita rediretta
+nei soliti `logs/server.log` e `logs/webapi.log`. Un processo creato così non
+eredita le variabili d'ambiente di chi lancia: il server vero si configura solo
+dai suoi file, quindi va bene. Le prove continuano a usare `Start-Process`,
+perché devono passare variabili d'ambiente al server e devono morire con chi le
+lancia.
 
 ## Prove
 
