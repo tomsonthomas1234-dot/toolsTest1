@@ -42,7 +42,7 @@ string api  = args.Length > 4 ? args[4] : "http://127.0.0.1:5080";
 // account che serve anche ad altro.
 string prefisso = modoRegole || modoAdmin ? "sonda" : "carico";
 if (modoAdmin) { clients = 1; Console.WriteLine($"Modalita amministratore su {host}:{port}"); }
-else if (modoRegole) { clients = metaPersistenza == null ? 16 : 5; if (metaPersistenza == null) Console.WriteLine($"Prova sulle regole su {host}:{port}"); }
+else if (modoRegole) { clients = 5; if (metaPersistenza == null) Console.WriteLine($"Prova sulle regole su {host}:{port}"); }
 else Console.WriteLine($"Prova di carico: {clients} client per {seconds}s su {host}:{port}");
 
 // ---- account -------------------------------------------------------------
@@ -126,11 +126,19 @@ if (modoRegole)
         ("carestia",                () => Regole.Carestia(tokens[1], tokens[0], host, port)),
         ("riparazione",             () => Regole.Riparazione(tokens[1], tokens[0], host, port)),
         ("era rigogliosa",          () => Regole.EraRigogliosa(tokens[1], host, port)),
-        // Dalla sesta alla sedicesima: il santuario vuole dieci giocatori in
-        // due fazioni, piu' uno che esce prima. Dopo l'era rigogliosa: quella
-        // conta i cristalli comparsi, e un minuto in piu' prima di lei ne fa
-        // arrivare tanti da riempire il tetto.
-        ("santuario",               () => tokens.Count >= 16 && Regole.Santuario(tokens.Skip(5).Take(11).ToArray(), host, port)),
+        // Dalla sonda0005 alla sonda0015: il santuario vuole dieci giocatori in
+        // due fazioni, piu' uno che esce prima. Si autenticano solo qui, e la
+        // prova sta dopo l'era rigogliosa: quella conta i cristalli comparsi
+        // dall'avvio, e i secondi spesi prima di lei la fanno partire col
+        // mondo gia' pieno.
+        ("santuario",               () =>
+        {
+            var st = Enumerable.Range(5, 11)
+                .Select(i => { var n = $"{prefisso}{i:D4}"; return (Auth("login", n).Result ?? Auth("register", n).Result); })
+                .ToArray();
+            if (st.Any(t => t == null)) { Console.WriteLine("  FALLITA: sonde del santuario non autenticate"); return false; }
+            return Regole.Santuario(st, host, port);
+        }),
         ("registro di gioco",       () => Regole.RegistroDiGioco(tokens[1], tokens[4], host, port)),
         ("persistenza al rientro",  () => Regole.PersistenzaAlRientro(tokens[3], host, port)),
     };
