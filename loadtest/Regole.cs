@@ -21,6 +21,9 @@ sealed class Sonda : IDisposable
 
     public bool Pronta;
     public float X, Y, Z;
+
+    /// L'id con cui il server ci mostra a noi stessi.
+    public ulong Id => _playerId;
     public bool Vista;                 // vero appena il server ci ha mostrato a noi stessi
     public CraftResultMsg UltimoCraft;
     public RepairResultMsg UltimaRiparazione;
@@ -75,12 +78,25 @@ sealed class Sonda : IDisposable
     /// "sparsa", "in attesa", "tornati", "cristalli alti a terra". Vuoto se la
     /// risposta non arriva.
     /// </summary>
-    public Dictionary<string, string> StatoSantuario(string argomenti = "")
+    public Dictionary<string, string> StatoSantuario(string argomenti = "") => StatoAdmin("santuario", argomenti);
+
+    /// <summary>
+    /// Gli Echi secondo il server (comando admin "echi", piu' eventuali
+    /// argomenti): "eco", "vaganti", "divoratori", "araldi", "con cristallo",
+    /// "a caccia", "da ricreare", "cristalli alti a terra".
+    /// </summary>
+    public Dictionary<string, string> StatoEchi(string argomenti = "") => StatoAdmin("echi", argomenti);
+
+    /// Un numero dallo stato, -1 se manca.
+    public static int Numero(Dictionary<string, string> stato, string chiave) =>
+        stato.TryGetValue(chiave, out var v) && int.TryParse(v, out int n) ? n : -1;
+
+    Dictionary<string, string> StatoAdmin(string comando, string argomenti)
     {
-        const string Testa = "santuario: ";
+        string Testa = comando + ": ";
         int gia;
         lock (Chat) gia = Chat.Count;
-        Admin(("santuario " + argomenti).Trim());
+        Admin((comando + " " + argomenti).Trim());
         string riga = null;
         Attendi(() => { lock (Chat) riga = Chat.Skip(gia).LastOrDefault(t => t.StartsWith(Testa)); return riga != null; }, 5);
         var stato = new Dictionary<string, string>();
@@ -1397,7 +1413,9 @@ static class Regole
         }
 
         // Si rimette la terra com'era, anche se qualcosa sopra e' fallito: le
-        // prove che vengono dopo non devono girare in carestia.
+        // prove che vengono dopo non devono girare in carestia. Il rituale ha
+        // chiamato tre Eco, che non se ne vanno da soli: si tolgono.
+        s.StatoEchi("uccidi");
         s.Admin("setvitality 1");
         bool uscita = s.Attendi(() => !s.UltimaPartita.InFamine, 6);
         bool avvisatiFine = s.Attendi(() => { o.Poll(); return s.HaEvento(WorldEventKind.FamineEnds)
@@ -1409,6 +1427,153 @@ static class Regole
         if (!avvisatiFine) { Console.WriteLine("  FALLITA: l'evento di fine carestia non e' arrivato a tutti"); ok = false; }
 
         if (ok) Console.WriteLine("  OK: in carestia il rituale costa il cristallo e non da niente; tutti lo sanno; se ne esce");
+        return ok;
+    }
+
+    // ---- 15a. gli Echi ---------------------------------------------------------
+    //
+    // Regole di Tommaso (backlog A1a4): un rituale in carestia chiama gli Echi
+    // del grado del cristallo; cacciano prima chi ha celebrato, poi chiunque;
+    // chi colpisce un grande si ritrova addosso i piccoli; non rinascono; il
+    // cristallo lo lascia solo il grande. La sonda non sa combattere: il colpo
+    // e le uccisioni passano dal comando admin "echi", che usa le stesse
+    // funzioni del combattimento vero.
+
+    /// Vero se un Eco e' a meno di r metri dalla sonda, fra quelli che vede.
+    static bool EcoVicino(Sonda s, float r)
+    {
+        lock (s.Mondo)
+            return s.Mondo.Values.Any(e => e.Type == EntityType.Echo && Dist(e.X, e.Z, s.X, s.Z) < r);
+    }
+
+    /// La vita della sonda, da quello che il server le mostra di se'.
+    static int Vita(Sonda s, ulong id)
+    {
+        lock (s.Mondo) return s.Mondo.TryGetValue(id, out var e) ? (int)e.Extra0 : -1;
+    }
+
+    public static bool Echi(string token, string tokenOsservatore, string host, int port)
+    {
+        Console.WriteLine("--- echi: un rituale in carestia chiama gli Echi, che cacciano chi ha celebrato");
+
+        using var s = new Sonda(token, host, port);
+        using var o = new Sonda(tokenOsservatore, host, port);
+        if (!s.AttendiPronta() || !o.AttendiPronta())
+        { Console.WriteLine("  FALLITA: le sonde non sono entrate in gioco"); return false; }
+
+        const ulong Sito = 20_000;   // il cerchio al centro dell'isola centrale
+        const float RX = 2f, RZ = 0f;
+
+        // Si parte senza Echi: un giro precedente andato male potrebbe averne
+        // lasciati.
+        var stato = s.StatoEchi("uccidi");
+        int altiPrima = Sonda.Numero(stato, "cristalli alti a terra");
+
+        s.Admin($"tp {RX.ToString(Inv)} {RZ.ToString(Inv)}");
+        s.Admin("give Crystal 1 Epic");
+        o.Admin("tp 2 -20");
+        if (!s.Attendi(() => { o.Poll(); return Dist(s.X, s.Z, RX, RZ) < 3f && Dist(o.X, o.Z, 2f, -20f) < 3f
+                                               && s.Cristalli(CrystalType.Epic) >= 1; }, 10))
+        { Console.WriteLine("  FALLITA: preparazione non riuscita (posizioni o cristallo)"); return false; }
+
+        bool ok = true;
+        s.Admin("setvitality 0.02");
+        if (!s.Attendi(() => s.UltimaPartita != null && s.UltimaPartita.InFamine, 6))
+        { Console.WriteLine("  FALLITA: la carestia non e' cominciata"); s.Admin("setvitality 1"); return false; }
+
+        try
+        {
+            // --- il rituale chiama gli Echi dell'Epico. Chi ha celebrato se ne va
+            // subito a 70 metri (entro i 150 dal sito): gli Eco nascono a 10-15
+            // metri e corrono a 6,5 al secondo, restando li' sarebbe morto prima
+            // della prova. L'osservatore resta a 20 dal sito, piu' vicino agli
+            // Echi: devono andare dal primo.
+            int vitaO = Vita(o, o.Id), vitaOMin = vitaO;
+            s.Rituale(Sito, CrystalType.Epic);
+            s.Admin("tp 2 70");
+            if (!s.Attendi(() => s.UltimoRituale != null, 6))
+            { Console.WriteLine("  FALLITA: nessuna risposta al rituale"); return false; }
+            var r = s.UltimoRituale;
+            Console.WriteLine($"  rituale Epico: accettato={r.Accepted}, dono='{r.Boon}', esito='{r.Bane}'");
+            if (!r.Accepted || !string.IsNullOrEmpty(r.Boon))
+            { Console.WriteLine("  FALLITA: in carestia il rituale va accettato e non da' doni"); ok = false; }
+            if (r.Bane == null || !r.Bane.Contains("arrivando"))
+            { Console.WriteLine("  FALLITA: il rito non avvisa che qualcosa arriva"); ok = false; }
+
+            stato = s.StatoEchi();
+            Console.WriteLine($"  dopo il rituale: {Sonda.Descrivi(stato)}");
+            if (Sonda.Numero(stato, "eco") != 6 || Sonda.Numero(stato, "vaganti") != 2
+                || Sonda.Numero(stato, "divoratori") != 1 || Sonda.Numero(stato, "araldi") != 0
+                || Sonda.Numero(stato, "con cristallo") != 1)
+            { Console.WriteLine("  FALLITA: per un Epico servono 6 Eco, 2 Vaganti e 1 Divoratore col cristallo"); ok = false; }
+
+            // --- prima chi ha celebrato. La vita dell'osservatore si segue per
+            // tutta l'attesa: se morisse, rinascerebbe a 100 e non si vedrebbe.
+            bool raggiunta = s.Attendi(() =>
+            {
+                o.Poll();
+                int v = Vita(o, o.Id);
+                if (v >= 0) vitaOMin = Math.Min(vitaOMin, v);
+                return EcoVicino(s, 4f);
+            }, 20);
+            Console.WriteLine($"  chi ha celebrato, a 70 metri: raggiunto dagli Eco={raggiunta} (e' in {s.X:F0}, {s.Z:F0}); " +
+                              $"vita dell'osservatore {vitaO}, al minimo {vitaOMin}");
+            if (!raggiunta) { Console.WriteLine("  FALLITA: gli Eco non hanno inseguito chi ha celebrato"); ok = false; }
+            if (vitaO > 0 && vitaOMin < vitaO)
+            { Console.WriteLine("  FALLITA: gli Echi hanno attaccato l'osservatore prima di chi ha celebrato"); ok = false; }
+
+            // L'osservatore si allontana prima che gli Echi tornino al sito, e
+            // chi ha celebrato scappa oltre i 150 metri: lo dimenticano.
+            o.Admin("tp 2 -60");
+            s.Admin("tp 300 300");
+            // Smettono subito di cacciare, ma i Vaganti tornano al sito a 3,5
+            // metri al secondo: si aspetta che siano tutti a casa, cosi' tutti
+            // i piccoli stanno entro 30 metri dal Divoratore.
+            bool calmi = false, aCasa = false;
+            for (int i = 0; i < 40 && !(calmi && aCasa); i++)
+            {
+                s.Attendi(() => { o.Poll(); return false; }, 1.0);
+                stato = s.StatoEchi();
+                calmi = Sonda.Numero(stato, "a caccia") == 0;
+                aCasa = Sonda.Numero(stato, "fuori casa") == 0;
+            }
+            Console.WriteLine($"  scappati tutti e due: {Sonda.Descrivi(stato)}");
+            if (!calmi) { Console.WriteLine("  FALLITA: gli Echi cacciano ancora senza nessuno vicino"); ok = false; }
+            if (!aCasa) { Console.WriteLine("  FALLITA: gli Echi non sono tornati al sito"); ok = false; }
+
+            // --- i piccoli difendono i grandi: l'osservatore, a 60 metri dal
+            // sito e fuori dalla vista di tutti, colpisce il Divoratore.
+            o.StatoEchi("colpisci");
+            o.Attendi(() => false, 0.5);
+            stato = o.StatoEchi();
+            int aCaccia = Sonda.Numero(stato, "a caccia");
+            bool difeso = o.Attendi(() => EcoVicino(o, 4f), 20);
+            Console.WriteLine($"  colpito il Divoratore da lontano: a caccia {aCaccia} su 9, " +
+                              $"Eco addosso a chi ha colpito={difeso}");
+            if (aCaccia != 9) { Console.WriteLine("  FALLITA: non tutti i piccoli vicini difendono il grande"); ok = false; }
+            if (!difeso) { Console.WriteLine("  FALLITA: gli Eco non sono arrivati addosso a chi ha colpito"); ok = false; }
+            o.Admin("tp 2 -250");
+
+            // --- muoiono, non rinascono, e il Divoratore lascia il cristallo
+            stato = s.StatoEchi("uccidi");
+            s.Attendi(() => false, 2.5);
+            stato = s.StatoEchi();
+            int alti = Sonda.Numero(stato, "cristalli alti a terra");
+            Console.WriteLine($"  uccisi tutti: {Sonda.Descrivi(stato)} (cristalli alti a terra prima {altiPrima})");
+            if (Sonda.Numero(stato, "eco") + Sonda.Numero(stato, "vaganti") + Sonda.Numero(stato, "divoratori") != 0)
+            { Console.WriteLine("  FALLITA: qualche Echo e' rinato"); ok = false; }
+            if (alti != altiPrima + 1)
+            { Console.WriteLine("  FALLITA: il Divoratore non ha lasciato il suo cristallo, o l'hanno lasciato altri"); ok = false; }
+        }
+        finally
+        {
+            // Le prove dopo non devono girare in carestia ne' con Echi in giro.
+            s.StatoEchi("uccidi");
+            s.Admin("setvitality 1");
+            s.Attendi(() => s.UltimaPartita != null && !s.UltimaPartita.InFamine, 6);
+        }
+
+        if (ok) Console.WriteLine("  OK: gli Echi arrivano, cacciano chi ha celebrato, difendono il grande e lasciano il cristallo");
         return ok;
     }
 
@@ -2178,6 +2343,16 @@ static class Regole
         Console.WriteLine($"  orda prima del riavvio: {Sonda.Descrivi(stato)}");
         if (stato.GetValueOrDefault("orda") != "50" || stato.GetValueOrDefault("capi") != "1")
         { Console.WriteLine("  FALLITA: l'orda d'ufficio non e' nata"); return false; }
+
+        // Gli Echi di un Precursore, lontano da tutti: non si dissolvono mai,
+        // quindi dopo il riavvio devono esserci ancora, Araldo e cristallo
+        // compresi.
+        s.StatoEchi("uccidi");
+        var echi = s.StatoEchi("evoca Precursor -400 400");
+        Console.WriteLine($"  echi prima del riavvio: {Sonda.Descrivi(echi)}");
+        if (Sonda.Numero(echi, "eco") != 6 || Sonda.Numero(echi, "vaganti") != 2
+            || Sonda.Numero(echi, "araldi") != 1 || Sonda.Numero(echi, "con cristallo") != 1)
+        { Console.WriteLine("  FALLITA: gli Echi d'ufficio non sono nati"); return false; }
         return true;
     }
 
@@ -2197,6 +2372,16 @@ static class Regole
         stato = s.StatoSantuario("orda uccidi");
         if (stato.GetValueOrDefault("in attesa") != "0")
         { Console.WriteLine($"  FALLITA: uccisa l'orda, resta {Sonda.Descrivi(stato)}"); ok = false; }
+
+        var echi = s.StatoEchi();
+        Console.WriteLine($"  echi dopo il riavvio: {Sonda.Descrivi(echi)}");
+        if (Sonda.Numero(echi, "eco") != 6 || Sonda.Numero(echi, "vaganti") != 2
+            || Sonda.Numero(echi, "araldi") != 1 || Sonda.Numero(echi, "con cristallo") != 1)
+        { Console.WriteLine("  FALLITA: gli Echi non sono sopravvissuti al riavvio com'erano"); ok = false; }
+        int altiPrima = Sonda.Numero(echi, "cristalli alti a terra");
+        echi = s.StatoEchi("uccidi");
+        if (Sonda.Numero(echi, "cristalli alti a terra") != altiPrima + 1)
+        { Console.WriteLine($"  FALLITA: ucciso l'Araldo, il Precursore non e' caduto: {Sonda.Descrivi(echi)}"); ok = false; }
         return ok;
     }
 
