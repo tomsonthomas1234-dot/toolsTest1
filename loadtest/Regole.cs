@@ -42,6 +42,14 @@ sealed class Sonda : IDisposable
     public MatchStateMsg UltimaPartita;
     public RitualResultMsg UltimoRituale;
 
+    /// Gli eventi del mondo ricevuti, in ordine di arrivo.
+    public readonly List<WorldEventMsg> Eventi = new();
+
+    public bool HaEvento(WorldEventKind tipo)
+    {
+        lock (Eventi) return Eventi.Exists(e => e.Kind == tipo);
+    }
+
     public void Rituale(ulong sito, CrystalType grado)
     {
         UltimoRituale = null;
@@ -214,6 +222,14 @@ sealed class Sonda : IDisposable
                         UltimoRituale = MessagePack.MessagePackSerializer
                                             .Deserialize<RitualResultMsg>(env.Payload);
                         break;
+
+                    case NetMsgType.WorldEvent:
+                    {
+                        var ev = MessagePack.MessagePackSerializer
+                                     .Deserialize<WorldEventMsg>(env.Payload);
+                        lock (Eventi) Eventi.Add(ev);
+                        break;
+                    }
 
                     case NetMsgType.ConsumeResult:
                         UltimoConsumo = MessagePack.MessagePackSerializer
@@ -1222,13 +1238,19 @@ static class Regole
     // terra non da piu niente, e i rituali non danno ne doni ne le conseguenze
     // solite. Si prova anche l'uscita, perche una carestia da cui non si esce
     // nemmeno d'ufficio lascerebbe il mondo di prova inservibile.
+    //
+    // Inizio e fine arrivano come evento del mondo a tutti i collegati: per
+    // questo c'e' un secondo giocatore che guarda soltanto. Il numero della
+    // vitalita' invece non deve arrivare a nessuno.
 
-    public static bool Carestia(string token, string host, int port)
+    public static bool Carestia(string token, string tokenOsservatore, string host, int port)
     {
-        Console.WriteLine("--- carestia: sotto il 5% i rituali non danno niente");
+        Console.WriteLine("--- carestia: sotto il 5% i rituali non danno niente, e lo sanno tutti");
 
         using var s = new Sonda(token, host, port);
-        if (!s.AttendiPronta()) { Console.WriteLine("  FALLITA: la sonda non e' entrata in gioco"); return false; }
+        using var o = new Sonda(tokenOsservatore, host, port);
+        if (!s.AttendiPronta() || !o.AttendiPronta())
+        { Console.WriteLine("  FALLITA: le sonde non sono entrate in gioco"); return false; }
 
         // Il cerchio al centro dell'isola centrale: SpawnDevWorld lo mette li'
         // con questo identificativo.
@@ -1244,11 +1266,18 @@ static class Regole
 
         s.Admin("setvitality 0.02");
         bool entrata = s.Attendi(() => s.UltimaPartita.InFamine, 6);
+        // L'osservatore non gira la rete da solo: lo si fa girare qui.
+        bool avvisati = s.Attendi(() => { o.Poll(); return s.HaEvento(WorldEventKind.FamineBegins)
+                                                    && o.HaEvento(WorldEventKind.FamineBegins); }, 6);
         Console.WriteLine($"  dopo setvitality 0.02: carestia={s.UltimaPartita.InFamine}, " +
-                          $"vitalita' {s.UltimaPartita.WorldVitality:P1}");
+                          $"evento a chi l'ha causata={s.HaEvento(WorldEventKind.FamineBegins)}, " +
+                          $"all'altro={o.HaEvento(WorldEventKind.FamineBegins)}");
 
         bool ok = true;
         if (!entrata) { Console.WriteLine("  FALLITA: la carestia non e' cominciata"); ok = false; }
+        if (!avvisati) { Console.WriteLine("  FALLITA: l'evento d'inizio carestia non e' arrivato a tutti"); ok = false; }
+        if (s.UltimaPartita.WorldVitality != 0f || (o.UltimaPartita != null && o.UltimaPartita.WorldVitality != 0f))
+        { Console.WriteLine("  FALLITA: il numero della vitalita' arriva ai giocatori"); ok = false; }
         else
         {
             int prima = s.Cristalli(CrystalType.Common);
@@ -1272,12 +1301,16 @@ static class Regole
         // Si rimette la terra com'era, anche se qualcosa sopra e' fallito: le
         // prove che vengono dopo non devono girare in carestia.
         s.Admin("setvitality 1");
-        bool uscita = s.Attendi(() => !s.UltimaPartita.InFamine && s.UltimaPartita.WorldVitality > 0.99f, 6);
+        bool uscita = s.Attendi(() => !s.UltimaPartita.InFamine, 6);
+        bool avvisatiFine = s.Attendi(() => { o.Poll(); return s.HaEvento(WorldEventKind.FamineEnds)
+                                                        && o.HaEvento(WorldEventKind.FamineEnds); }, 6);
         Console.WriteLine($"  dopo setvitality 1: carestia={s.UltimaPartita.InFamine}, " +
-                          $"vitalita' {s.UltimaPartita.WorldVitality:P1}");
+                          $"evento a chi l'ha causata={s.HaEvento(WorldEventKind.FamineEnds)}, " +
+                          $"all'altro={o.HaEvento(WorldEventKind.FamineEnds)}");
         if (!uscita) { Console.WriteLine("  FALLITA: la carestia non e' finita riportando la terra al 100%"); ok = false; }
+        if (!avvisatiFine) { Console.WriteLine("  FALLITA: l'evento di fine carestia non e' arrivato a tutti"); ok = false; }
 
-        if (ok) Console.WriteLine("  OK: in carestia il rituale costa il cristallo e non da niente; se ne esce");
+        if (ok) Console.WriteLine("  OK: in carestia il rituale costa il cristallo e non da niente; tutti lo sanno; se ne esce");
         return ok;
     }
 

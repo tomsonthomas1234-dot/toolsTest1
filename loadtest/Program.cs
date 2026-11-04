@@ -123,7 +123,7 @@ if (modoRegole)
         ("combinazioni",            () => Regole.Combinazioni(tokens[1], host, port)),
         ("terra che si consuma",    () => Regole.TerraSiConsuma(tokens[1], host, port)),
         ("morire costa",            () => Regole.MorireCosta(tokens[1], host, port)),
-        ("carestia",                () => Regole.Carestia(tokens[1], host, port)),
+        ("carestia",                () => Regole.Carestia(tokens[1], tokens[0], host, port)),
         ("persistenza al rientro",  () => Regole.PersistenzaAlRientro(tokens[3], host, port)),
     };
 
