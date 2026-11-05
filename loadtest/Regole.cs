@@ -247,6 +247,22 @@ sealed class Sonda : IDisposable
             Payload   = MessagePack.MessagePackSerializer.Serialize(cmd),
         });
 
+    /// L'ultima risposta ricevuta per ogni CommandId. Gli altri comandi della
+    /// sonda usano numeri sotto 100: chi vuole leggere la risposta di un comando
+    /// preciso usa un numero suo da 100 in su (A14a).
+    public readonly Dictionary<uint, CommandResultMsg> Esiti = new();
+
+    public void Comando(uint id, CommandType tipo, byte[] contenuto)
+    {
+        lock (Esiti) Esiti.Remove(id);
+        Manda(NetMsgType.Command, new CommandMsg { CommandId = id, Type = tipo, Payload = contenuto });
+    }
+
+    public CommandResultMsg Esito(uint id)
+    {
+        lock (Esiti) return Esiti.TryGetValue(id, out var r) ? r : null;
+    }
+
     public void Mangia(ItemType cosa)
     {
         UltimoConsumo = null;
@@ -420,6 +436,14 @@ sealed class Sonda : IDisposable
                         UltimoConsumo = MessagePack.MessagePackSerializer
                                             .Deserialize<ConsumeResultMsg>(env.Payload);
                         break;
+
+                    case NetMsgType.CommandResult:
+                    {
+                        var cr = MessagePack.MessagePackSerializer
+                                     .Deserialize<CommandResultMsg>(env.Payload);
+                        lock (Esiti) Esiti[cr.CommandId] = cr;
+                        break;
+                    }
 
                     case NetMsgType.RecipeList:
                         Ricette = MessagePack.MessagePackSerializer
@@ -1178,6 +1202,126 @@ static class Regole
         if (!comparso)   Console.WriteLine("  FALLITA: l'abbeveratoio non e' comparso");
         if (bancoSpurio) Console.WriteLine("  FALLITA: e' stato costruito un banco al posto suo");
         return false;
+    }
+
+    // ---- protocollo delle abilita (A14a) ---------------------------------------
+    //
+    // Solo il protocollo: i numeri delle abilita devono dire famiglia, classe e
+    // grado giusti, nelle quantita decise (decisioni/abilita.md); i messaggi
+    // nuovi devono fare andata e ritorno; il server deve riconoscere i comandi
+    // nuovi e dire di no, non "riuscito" come per un tipo sconosciuto.
+
+    public static bool ProtocolloAbilita(string token, string host, int port)
+    {
+        Console.WriteLine("--- protocollo delle abilita: numeri, messaggi, comandi rifiutati");
+        bool ok = true;
+        void Male(string m) { Console.WriteLine("  FALLITA: " + m); ok = false; }
+
+        var tutte = Enum.GetValues<AbilityId>().Where(a => a != AbilityId.None).ToArray();
+        Console.WriteLine($"  abilita nel protocollo: {tutte.Length}");
+        if (tutte.Length != 175) Male($"ne servono 175 (4 armi da 13, 6 classi da 19, Mago 9), sono {tutte.Length}");
+
+        // Quante per grado: attive base, Comuni, Rare, Epiche, Dono di Torak;
+        // poi passive base, Comuni, Rare, Epiche.
+        string Conta(IEnumerable<AbilityId> ab)
+        {
+            var att = ab.Where(a => !AbilityIds.IsPassive(a)).ToArray();
+            var pas = ab.Where(a =>  AbilityIds.IsPassive(a)).ToArray();
+            string g(AbilityId[] v, int n) => string.Join("/", Enumerable.Range(0, n)
+                .Select(i => v.Count(a => (int)AbilityIds.GradeOf(a) == i)));
+            return $"{g(att, 5)} + {g(pas, 4)}";
+        }
+
+        foreach (var f in new[] { WeaponFamily.Sword, WeaponFamily.Spear, WeaponFamily.Bow, WeaponFamily.Staff })
+        {
+            var ab = tutte.Where(a => AbilityIds.FamilyOf(a) == f).ToArray();
+            string c = Conta(ab);
+            Console.WriteLine($"  {f,-14} {c}");
+            if (c != "4/3/3/2/1 + 0/0/0/0") Male($"{f}: atteso 4/3/3/2/1 + 0/0/0/0");
+            if (ab.Any(a => AbilityIds.ClassOf(a) != ClassId.None)) Male($"{f}: un'abilita d'arma risulta di una classe");
+        }
+        foreach (var k in Enum.GetValues<ClassId>().Where(k => k != ClassId.None))
+        {
+            var ab = tutte.Where(a => AbilityIds.ClassOf(a) == k).ToArray();
+            string c = Conta(ab);
+            string atteso = k == ClassId.Mage ? "2/3/0/0/0 + 2/2/0/0" : "2/3/3/2/1 + 2/2/2/2";
+            Console.WriteLine($"  {k,-14} {c}");
+            if (c != atteso) Male($"{k}: atteso {atteso}");
+            if (ab.Any(a => AbilityIds.FamilyOf(a) != WeaponFamily.None)) Male($"{k}: un'abilita di classe risulta d'arma");
+        }
+        if (tutte.Any(a => AbilityIds.FamilyOf(a) == WeaponFamily.None && AbilityIds.ClassOf(a) == ClassId.None))
+            Male("c'e un'abilita che non e ne d'arma ne di classe");
+
+        // Armature: nove pezzi, tre per tipo, testa busto gambe.
+        var armi = Enum.GetValues<ItemType>().Where(AbilityIds.IsArmor).ToArray();
+        string arm = string.Join(" ", armi.Select(t => $"{AbilityIds.ArmorKindOf(t)}.{AbilityIds.SlotOf(t)}"));
+        Console.WriteLine($"  armature: {arm}");
+        if (arm != "Leather.Head Leather.Body Leather.Legs Iron.Head Iron.Body Iron.Legs Bone.Head Bone.Body Bone.Legs")
+            Male("tipi o slot delle armature sbagliati");
+        if (AbilityIds.FamilyOf(ItemType.Staff) != WeaponFamily.Staff || AbilityIds.FamilyOf(ItemType.WoodJavelin) != WeaponFamily.None
+            || AbilityIds.FamilyOf(ItemType.IronSword) != WeaponFamily.Sword || AbilityIds.IsArmor(ItemType.Shield))
+            Male("famiglie delle armi sbagliate");
+
+        // Andata e ritorno dei messaggi nuovi.
+        var st = new AbilityStateMsg
+        {
+            Unlocked          = new[] { new AbilityProgress { Id = AbilityId.SwordLunge, Level = 2 } },
+            WeaponSlots       = new[] { new WeaponSlotSet { Family = WeaponFamily.Sword,
+                                         Abilities = new[] { AbilityId.SwordLunge, AbilityId.None, AbilityId.SwordParry } } },
+            ClassActiveSlots  = new[] { AbilityId.WarriorChallenge, AbilityId.None, AbilityId.MageMagicBolt },
+            ClassPassiveSlots = new[] { AbilityId.WarriorSturdy, AbilityId.MageArcane },
+            MainClass = ClassId.Warrior, SecondaryClass = ClassId.Mage,
+            Classes      = new[] { new ClassProgress { Class = ClassId.Warrior, Unlocked = true, Kills = 7, Points = 1 } },
+            WeaponPoints = new[] { new WeaponPoints { Family = WeaponFamily.Sword, Grade = Grade.Rare, Points = 2, Kills = 13 } },
+            Cooldowns    = new[] { new AbilityCooldown { Id = AbilityId.SwordLunge, MsLeft = 4500 } },
+        };
+        var st2 = MessagePack.MessagePackSerializer.Deserialize<AbilityStateMsg>(MessagePack.MessagePackSerializer.Serialize(st));
+        bool andata = st2.Unlocked[0].Level == 2 && st2.WeaponSlots[0].Abilities[2] == AbilityId.SwordParry
+                      && st2.ClassPassiveSlots[1] == AbilityId.MageArcane && st2.SecondaryClass == ClassId.Mage
+                      && st2.WeaponPoints[0].Grade == Grade.Rare && st2.Cooldowns[0].MsLeft == 4500
+                      && st2.Classes[0].Kills == 7;
+        var eq = new EquipmentStateMsg { Worn = new[]
+        {
+            new InventoryItem { Type = ItemType.IronHelm, Count = 1, InstanceId = 42, Level = 3 },
+            new InventoryItem(), new InventoryItem { Type = ItemType.BoneGreaves, Count = 1 },
+        } };
+        var eq2 = MessagePack.MessagePackSerializer.Deserialize<EquipmentStateMsg>(MessagePack.MessagePackSerializer.Serialize(eq));
+        andata &= eq2.Worn.Length == 3 && eq2.Worn[0].Level == 3 && eq2.Worn[1].Type == ItemType.None
+                  && eq2.Worn[2].Type == ItemType.BoneGreaves;
+        var ps = MessagePack.MessagePackSerializer.Deserialize<PlayerStatsMsg>(MessagePack.MessagePackSerializer.Serialize(
+            new PlayerStatsMsg { DefensePercent = 5, AttackSpeedPercent = 6, CooldownReductionPercent = -4, CombatRegenPerMille = 3 }));
+        andata &= ps.DefensePercent == 5 && ps.AttackSpeedPercent == 6 && ps.CooldownReductionPercent == -4 && ps.CombatRegenPerMille == 3;
+        Console.WriteLine($"  andata e ritorno dei messaggi: {(andata ? "si" : "no")}");
+        if (!andata) Male("un messaggio nuovo non torna uguale");
+
+        // Il server: i sei comandi nuovi si riconoscono e si rifiutano.
+        using var s = new Sonda(token, host, port);
+        if (!s.AttendiPronta()) { Console.WriteLine("  FALLITA: la sonda non e' entrata in gioco"); return false; }
+        static byte[] P<T>(T v) => MessagePack.MessagePackSerializer.Serialize(v);
+        var comandi = new (uint Id, CommandType Tipo, byte[] Contenuto)[]
+        {
+            (101, CommandType.UseAbility,     P(new UseAbilityCommand { Ability = AbilityId.SwordHeavySlash, Yaw = 1f })),
+            (102, CommandType.SetAbilitySlot, P(new SetAbilitySlotCommand { Kind = AbilitySlotKind.Weapon, Family = WeaponFamily.Sword, Slot = 0, Ability = AbilityId.SwordParry })),
+            (103, CommandType.ChooseClass,    P(new ChooseClassCommand { Class = ClassId.Warrior })),
+            (104, CommandType.Evolve,         P(new EvolveCommand { Into = ClassId.CrystalAdept })),
+            (105, CommandType.SpendPoint,     P(new SpendPointCommand { Ability = AbilityId.SwordLunge })),
+            (106, CommandType.Equip,          P(new EquipCommand { Slot = EquipSlot.Body, InstanceId = 0 })),
+            // Contenuto rotto: dev'essere InvalidCommand, non NotAllowed.
+            (107, CommandType.UseAbility,     new byte[] { 0xC1 }),
+        };
+        foreach (var c in comandi) s.Comando(c.Id, c.Tipo, c.Contenuto);
+        s.Attendi(() => comandi.All(c => s.Esito(c.Id) != null), 8);
+        foreach (var c in comandi)
+        {
+            var r = s.Esito(c.Id);
+            var atteso = c.Id == 107 ? ErrorCode.InvalidCommand : ErrorCode.NotAllowed;
+            string visto = r == null ? "nessuna risposta" : $"{(r.Success ? "riuscito" : "rifiutato")} {r.ErrorCode}";
+            Console.WriteLine($"  {c.Tipo,-15}{(c.Id == 107 ? " (rotto)" : "        ")} → {visto}");
+            if (r == null || r.Success || r.ErrorCode != atteso) Male($"{c.Tipo}: atteso rifiutato {atteso}");
+        }
+
+        if (ok) Console.WriteLine("  OK: numeri, messaggi e comandi del protocollo delle abilita come deciso");
+        return ok;
     }
 
     // ---- 8. mangiare cura ------------------------------------------------------

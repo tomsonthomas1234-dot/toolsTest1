@@ -131,6 +131,7 @@ if (modoRegole)
         ("riparazione stendardo",   () => Regole.RiparazioneStendardo(tokens[0], host, port)),
         ("amministrazione chiusa",  () => Regole.AmministrazioneChiusa(tokens[2], host, port)),
         ("catalogo ricette",        () => Regole.CatalogoRicette(tokens[1], host, port)),
+        ("protocollo delle abilita",() => Regole.ProtocolloAbilita(tokens[2], host, port)),
         ("mangiare cura",           () => Regole.MangiareCura(tokens[1], host, port)),
         ("bauli",                   () => Regole.Bauli(tokens[1], host, port)),
         ("agricoltura",             () => Regole.Agricoltura(tokens[1], host, port)),
