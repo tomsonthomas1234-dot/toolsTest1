@@ -318,6 +318,10 @@ sealed class Sonda : IDisposable
     /// Gli esemplari con identita' propria, per identificativo.
     public readonly Dictionary<ulong, (ItemType Tipo, int Usura)> Istanze = new();
 
+    /// Il grado di ogni esemplare, per identificativo (A14c). Sotto lo stesso
+    /// lucchetto dello zaino.
+    public readonly Dictionary<ulong, byte> GradiIstanze = new();
+
     /// Il motivo del rifiuto all'ingresso, se il server ne ha dato uno.
     public ErrorCode? ErroreIngresso;
 
@@ -483,8 +487,8 @@ sealed class Sonda : IDisposable
                                 // che torni indietro LO STESSO esemplare.
                                 // Quantita' zero vuol dire che non c'e' piu'.
                                 if (it.InstanceId == 0) continue;
-                                if (it.Count == 0) Istanze.Remove(it.InstanceId);
-                                else Istanze[it.InstanceId] = (it.Type, it.Durability);
+                                if (it.Count == 0) { Istanze.Remove(it.InstanceId); GradiIstanze.Remove(it.InstanceId); }
+                                else { Istanze[it.InstanceId] = (it.Type, it.Durability); GradiIstanze[it.InstanceId] = it.Level; }
                             }
                         break;
                     }
@@ -1425,6 +1429,130 @@ static class Regole
         if (SenzaRicariche(ancora) != AbilitaEsempioPulita) Male($"riletto, lo stato e' cambiato: {ancora}");
 
         if (ok) Console.WriteLine("  OK: catalogo completo, stato mandato al client e ripulito al caricamento");
+        return ok;
+    }
+
+    // ---- comandi di prova delle abilita (A14c) ---------------------------------
+    //
+    // I comandi con cui Tommaso prova armi e abilita senza fare il percorso
+    // (decisioni/abilita.md, sezione 10): ognuno deve fare quello che dice,
+    // rifiutare quello che non ha senso (l'abilita che sta sull'oggetto, il
+    // grado Dono di Torak, un'evoluzione scelta senza evolvere), lasciare uno
+    // stato pulito e mandarlo al client.
+
+    public static bool ComandiDiProvaAbilita(string token, string host, int port)
+    {
+        Console.WriteLine("--- comandi di prova delle abilita: dai, sblocca, livello, classe, evolvi, punti, ricarica");
+        bool ok = true;
+        void Male(string m) { Console.WriteLine("  FALLITA: " + m); ok = false; }
+
+        using var s = new Sonda(token, host, port);
+        if (!s.AttendiPronta()) { Console.WriteLine("  FALLITA: la sonda non e' entrata in gioco"); return false; }
+
+        // Ogni comando risponde con il suo nome davanti; "errore" se non ha fatto niente.
+        string Chiedi(string comando, string testa)
+        {
+            var r = s.ChiediAdmin(comando, testa + ": ");
+            Console.WriteLine($"  {comando} -> {r ?? "(nessuna risposta)"}");
+            return r ?? "(nessuna risposta)";
+        }
+        void Atteso(string comando, string testa, string atteso)
+        {
+            var r = Chiedi(comando, testa);
+            if (r != atteso) Male($"'{comando}' doveva rispondere '{atteso}'");
+        }
+        void Rifiutato(string comando, string testa)
+        {
+            if (!Chiedi(comando, testa).StartsWith("errore")) Male($"'{comando}' doveva essere rifiutato");
+        }
+        void Stato(string atteso, string quando)
+        {
+            var r = SenzaRicariche(s.AbilitaInRiga());
+            if (r != atteso) Male($"{quando}: lo stato e' [{r}], atteso [{atteso}]");
+        }
+
+        // ricarica, e il cambio di classe che svuota gli slot della classe
+        // lasciata: si parte dallo stato d'esempio, che ha due ricariche e
+        // uno slot del Guerriero.
+        s.AbilitaInRiga("esempio");
+        Atteso("ricarica", "ricarica", "azzerate 2");
+        if (Ricariche(s.AbilitaInRiga()) != "") Male("dopo 'ricarica' restano ricariche in corso");
+        Atteso("classe cacciatore", "classe", "principale=Hunter secondaria=Mage slot svuotati=1");
+        Stato("sbloccate=101:3,102:2,201:1,1000:1,1001:1,1050:1,1300:1,1301:1 arma=Sword:102/-/101 " +
+              "attivi=-/1300/- passivi=-/- principale=Hunter secondaria=Mage " +
+              "classi=Warrior:1:7:1,Hunter:0:0:0,Mage:0:3:0 punti=Sword.Rare:2:13", "dopo il cambio di classe");
+
+        // azzera e sblocca.
+        Atteso("abilita azzera", "abilita azzera", "ok");
+        const string Vuoto = "sbloccate= arma= attivi=-/-/- passivi=-/- principale=None secondaria=None classi= punti=";
+        Stato(Vuoto, "dopo 'abilita azzera'");
+        Atteso("abilita sblocca spada", "abilita sblocca", "sbloccate 12 nuove, saltate 1, in tutto 12");
+        Rifiutato("abilita sblocca 140", "abilita sblocca");            // Tempesta di lame, sull'oggetto
+        Rifiutato("abilita sblocca nienteditale", "abilita sblocca");
+        Atteso("abilita sblocca guerriero", "abilita sblocca", "sbloccate 18 nuove, saltate 1, in tutto 30");
+        Atteso("abilita sblocca 1040", "abilita sblocca", "sbloccate 1 nuove, saltate 0, in tutto 31"); // l'unica, solo per numero
+        // Tutte: 175 meno le 4 sull'oggetto e le 6 uniche, piu' l'unica gia' presa.
+        Atteso("abilita sblocca tutte", "abilita sblocca", "sbloccate 135 nuove, saltate 10, in tutto 166");
+
+        // livello, per nome e per numero.
+        Atteso("abilita livello Affondo 3", "abilita livello", "102 Affondo al livello 3");
+        Atteso("abilita livello 1310 2", "abilita livello", "1310 Scudo magico al livello 2");
+        Rifiutato("abilita livello 102 4", "abilita livello");
+        Rifiutato("abilita livello 240 1", "abilita livello");           // Lancia del cielo, sull'oggetto
+
+        // classe, sblocca, punti.
+        Rifiutato("classe adepto", "classe");                            // un'evoluzione si raggiunge evolvendo
+        Rifiutato("classe guerriero secondaria guerriero", "classe");
+        Atteso("classe guerriero secondaria mago", "classe", "principale=Warrior secondaria=Mage slot svuotati=0");
+        Atteso("classe sblocca", "classe", "sbloccate Warrior e Mage, abilita base nuove=0");
+        Atteso("punti classe 4", "punti", "punti di classe Warrior=4");
+        Atteso("punti arma raro 2 lancia", "punti", "punti d'arma Rare=2 per Spear");
+        Rifiutato("punti arma leggendario 2 lancia", "punti");
+        var r = SenzaRicariche(s.AbilitaInRiga());
+        if (r == null || !r.Contains(" principale=Warrior secondaria=Mage classi=Warrior:1:0:4,Mage:1:0:0 punti=Spear.Rare:2:0"))
+            Male($"classi e punti non sono quelli chiesti: {r}");
+
+        // evolvi: l'evoluzione diventa la principale; dopo, ci si puo' tornare
+        // col comando classe.
+        Atteso("evolvi accolito", "evolvi", "principale=EchoAcolyte secondaria=Mage abilita base nuove=0 slot svuotati=0");
+        Rifiutato("evolvi guerriero", "evolvi");
+        Atteso("classe mago", "classe", "principale=Mage secondaria=None slot svuotati=0");
+        Atteso("classe accolito", "classe", "principale=EchoAcolyte secondaria=None slot svuotati=0");
+
+        // Il client riceve lo stato dopo un cambio.
+        int prima = s.AbilitaRicevute;
+        Atteso("classe cacciatore secondaria accolito", "classe", "principale=Hunter secondaria=EchoAcolyte slot svuotati=0");
+        if (!s.Attendi(() => s.AbilitaRicevute > prima && s.Abilita?.MainClass == ClassId.Hunter
+                             && s.Abilita.SecondaryClass == ClassId.EchoAcolyte, 6))
+            Male("dopo il cambio di classe lo stato non e' arrivato al client");
+        else if (s.Abilita.Unlocked.Length != 166 || !s.Abilita.Unlocked.Any(u => u.Id == AbilityId.SwordLunge && u.Level == 3))
+            Male($"al client sono arrivate {s.Abilita.Unlocked.Length} sbloccate, non 166 con l'Affondo al 3");
+
+        // dai: esemplari col grado.
+        ulong Id(string risposta) =>
+            ulong.TryParse(risposta.Split("id=").LastOrDefault()?.Split(',')[0], out var n) ? n : 0;
+        byte? Grado(ulong id)
+        {
+            byte g = 0;
+            bool c = s.Attendi(() => { lock (s.Zaino) return s.GradiIstanze.TryGetValue(id, out g); }, 5);
+            return c ? g : null;
+        }
+        var spada = Chiedi("dai IronSword raro", "dai");
+        if (!spada.StartsWith("1x IronSword Rare id=")) Male("'dai IronSword raro' non ha dato una spada di ferro rara");
+        else if (Grado(Id(spada)) != (byte)Grade.Rare) Male("la spada data non e' arrivata nello zaino come Rara");
+        var scudi = Chiedi("dai Shield epico 2", "dai");
+        if (!scudi.StartsWith("2x Shield Epic id=")) Male("'dai Shield epico 2' non ha dato due scudi epici");
+        else if (Grado(Id(scudi)) != (byte)Grade.Epic) Male("lo scudo dato non e' arrivato nello zaino come Epico");
+        Rifiutato("dai IronSword torak", "dai");                          // uno al mondo: passa dal registro
+        Rifiutato("dai Wood comune", "dai");                              // non ha gradi
+        Rifiutato("dai Staff comune", "dai");                             // non ancora un esemplare (A14d)
+        Rifiutato("dai IronSword leggendario", "dai");
+
+        // Si lascia l'account pulito per chi viene dopo.
+        s.ChiediAdmin("abilita azzera", "abilita azzera: ");
+        s.Admin("clearinv");
+
+        if (ok) Console.WriteLine("  OK: i comandi di prova fanno quello che dicono e rifiutano quello che non ha senso");
         return ok;
     }
 
