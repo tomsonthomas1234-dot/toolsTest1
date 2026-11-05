@@ -159,6 +159,7 @@ if (modoRegole)
             return Regole.Santuario(st, host, port);
         }),
         ("custode",                 () => Regole.Custode(tokens[1], host, port)),
+        ("mosse del custode",       () => Regole.MosseDelCustode(tokens[1], tokens[0], host, port)),
         ("registro di gioco",      () => Regole.RegistroDiGioco(tokens[1], tokens[4], host, port)),
         // La sonda0004 e' quella del registro: i doni e i conti del rituale
         // vero non devono finire addosso a chi raccoglie nelle prove di prima.

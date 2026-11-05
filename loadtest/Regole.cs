@@ -3042,6 +3042,143 @@ static class Regole
         return ok;
     }
 
+    // ---- 15b3. le mosse del Custode ---------------------------------------------
+    //
+    // Backlog B5 (decisioni/boss.md): il colpo a terra ogni 10 secondi prende
+    // tutti entro 6 metri; la carica va su chi gli ha fatto piu' danno. Qui due
+    // sonde, una a 4,5 metri dal centro e una a 7 dall'altra parte, con la terra
+    // al 20% (danno 35: la vita di una sonda arriva al massimo a 100). Le mosse
+    // si chiedono d'ufficio ("custode colpo", "custode carica"), poi si guarda
+    // che arrivino anche da sole al loro ritmo.
+
+    static ulong IdNumero(Dictionary<string, string> stato, string chiave) =>
+        ulong.TryParse(stato.GetValueOrDefault(chiave), out var v) ? v : 0UL;
+
+    static void MettiIn(Sonda s, float x, float z)
+    {
+        // Curata prima di arrivare: accanto al Custode, con poca vita, andrebbe
+        // a terra prima del "sethp" (giro 3: i pugni dopo andavano a vuoto).
+        s.Admin("aterra rialza");
+        s.Admin("sethp 100");
+        s.Admin($"tp {x.ToString(Inv)} {z.ToString(Inv)}");
+        s.Attendi(() => Dist(s.X, s.Z, x, z) < 1f, 6);
+        s.Cammina(0f, 0f, 0.1);
+        s.Admin("sethp 100");
+    }
+
+    public static bool MosseDelCustode(string tokenA, string tokenB, string host, int port)
+    {
+        Console.WriteLine("--- mosse del Custode: il colpo a terra prende chi e' vicino e non chi e' lontano, la carica va su chi picchia di piu'");
+
+        using var a = new Sonda(tokenA, host, port);
+        using var b = new Sonda(tokenB, host, port);
+        if (!a.AttendiPronta() || !b.AttendiPronta()) { Console.WriteLine("  FALLITA: le sonde non sono entrate in gioco"); return false; }
+
+        bool ok = true;
+        float vicinoXZ  = CentroXZ + 4.5f * Diag;   // 4,5 m dal centro
+        float lontanoXZ = CentroXZ - 7f * Diag;     // 7 m dall'altra parte, dentro il muro
+        try
+        {
+            a.Admin("santuario angolo 0");
+            a.Admin("santuario riposo");
+            a.Admin("setvitality 0.2");
+            a.Admin("custode dormi");
+            a.Attendi(() => false, 1.5);   // il secondo del santuario: lo sposta al centro
+            MettiIn(a, vicinoXZ, vicinoXZ);
+            MettiIn(b, lontanoXZ, lontanoXZ);
+            a.Attendi(() => false, 0.5);
+            if (!Dentro(a) || !Dentro(b)) { Console.WriteLine("  FALLITA: le sonde non sono dentro il santuario"); ok = false; }
+
+            // --- colpo a terra: prende la vicina, non la lontana
+            var sv = StatoCustode(a, "sveglia 2");
+            Console.WriteLine($"  svegliato in due, terra al 20%: {Sonda.Descrivi(sv)}");
+            if (sv.GetValueOrDefault("stato") != "sveglio" || Sonda.Numero(sv, "danno") != 35
+                || Sonda.Numero(sv, "colpi a terra") != 0 || Sonda.Numero(sv, "prossimo colpo") < 9)
+            { Console.WriteLine("  FALLITA: al risveglio il Custode doveva avere danno 35, nessun colpo a terra e il prossimo fra 10 secondi"); ok = false; }
+            // La vita si legge prima e dopo: dopo "sethp" lo stato visto puo'
+            // arrivare in ritardo (giro 2: la lontana letta a 74 senza colpi).
+            a.Attendi(() => a.Stato(a.Id).Vita == 100f && b.Stato(b.Id).Vita == 100f, 2);
+            float vaPrima = a.Stato(a.Id).Vita, vbPrima = b.Stato(b.Id).Vita;
+            var colpo = StatoCustode(a, "colpo");
+            a.Attendi(() => false, 0.4);
+            var va = a.Stato(a.Id); var vb = b.Stato(b.Id);
+            Console.WriteLine($"  colpo a terra d'ufficio: colpi {Sonda.Numero(colpo, "colpi a terra")}; " +
+                              $"vicina (4,5 m) vita {vaPrima} -> {va.Vita}, lontana (7 m) vita {vbPrima} -> {vb.Vita}");
+            if (Sonda.Numero(colpo, "colpi a terra") != 1) { Console.WriteLine("  FALLITA: il colpo a terra non e' partito"); ok = false; }
+            if (va.Vita > vaPrima - 35f) { Console.WriteLine("  FALLITA: il colpo a terra non ha preso la sonda a 4,5 metri"); ok = false; }
+            if (vb.Vita < vbPrima) { Console.WriteLine("  FALLITA: il colpo a terra ha preso la sonda a 7 metri"); ok = false; }
+
+            // --- carica: la sonda A lo picchia, poi va lontano; la B gli sta
+            // addosso, ed e' la piu' vicina. La carica va su A.
+            var pos = StatoCustode(a);
+            float kx = float.Parse(pos.GetValueOrDefault("x") ?? "0", Inv), kz = float.Parse(pos.GetValueOrDefault("z") ?? "0", Inv);
+            MettiIn(a, kx, kz);
+            a.Colpisci(1.0);
+            if (a.Stato(a.Id).ATerra) { MettiIn(a, kx, kz); a.Colpisci(1.0); }
+            var picchiato = StatoCustode(a);
+            Console.WriteLine($"  dopo un secondo di pugni: vita {Sonda.Numero(picchiato, "vita")}/{Sonda.Numero(picchiato, "piena")}, " +
+                              $"piu' danno {IdNumero(picchiato, "piu danno")} (A e' {a.Id})");
+            if (IdNumero(picchiato, "piu danno") != a.Id) { Console.WriteLine("  FALLITA: il Custode non ricorda chi l'ha picchiato"); ok = false; }
+            pos = StatoCustode(a);
+            kx = float.Parse(pos.GetValueOrDefault("x") ?? "0", Inv); kz = float.Parse(pos.GetValueOrDefault("z") ?? "0", Inv);
+            MettiIn(b, kx + 1f * Diag, kz + 1f * Diag);
+            MettiIn(a, lontanoXZ, lontanoXZ);
+            float vitaPrima = a.Stato(a.Id).Vita;
+            var carica = StatoCustode(a, "carica");
+            Console.WriteLine($"  carica d'ufficio: {Sonda.Descrivi(carica)}");
+            if (IdNumero(carica, "carica") != a.Id) { Console.WriteLine("  FALLITA: la carica non e' andata su chi l'ha picchiato di piu'"); ok = false; }
+            bool presa = a.Attendi(() => a.Stato(a.Id).Vita < vitaPrima, 3);
+            var arrivato = StatoCustode(a);
+            float dA = Dist(float.Parse(arrivato.GetValueOrDefault("x") ?? "0", Inv), float.Parse(arrivato.GetValueOrDefault("z") ?? "0", Inv), a.X, a.Z);
+            Console.WriteLine($"  dopo la carica: A vita {vitaPrima} -> {a.Stato(a.Id).Vita}, Custode a {dA:F1} m da A, B vita {b.Stato(b.Id).Vita}");
+            if (!presa || dA > 3.5f) { Console.WriteLine("  FALLITA: la carica non ha raggiunto e colpito chi l'ha picchiato"); ok = false; }
+
+            // --- da sole, al loro ritmo: in 18 secondi un altro colpo a terra
+            // (ogni 10) e un'altra carica (ogni 12). Le sonde si curano e si
+            // rialzano, e A torna lontano.
+            MettiIn(b, CentroXZ, CentroXZ);
+            MettiIn(a, lontanoXZ, lontanoXZ);
+            var fine = DateTime.UtcNow.AddSeconds(18);
+            Dictionary<string, string> ritmo = StatoCustode(a);
+            while (DateTime.UtcNow < fine)
+            {
+                ritmo = StatoCustode(a);
+                if (Sonda.Numero(ritmo, "colpi a terra") >= 2 && Sonda.Numero(ritmo, "cariche") >= 2) break;
+                foreach (var p in new[] { a, b }) { p.Admin("aterra rialza"); p.Admin("sethp 100"); }
+                // Sotto i 4 metri non carica: se il Custode e' arrivato addosso
+                // ad A, A va dall'altra parte, e B resta al centro, la piu' vicina.
+                if (IdNumero(ritmo, "carica") == 0 &&
+                    float.TryParse(ritmo.GetValueOrDefault("x"), System.Globalization.NumberStyles.Float, Inv, out var rx) &&
+                    float.TryParse(ritmo.GetValueOrDefault("z"), System.Globalization.NumberStyles.Float, Inv, out var rz) &&
+                    Dist(rx, rz, a.X, a.Z) < 5f)
+                {
+                    float altro = Dist(rx, rz, lontanoXZ, lontanoXZ) > Dist(rx, rz, CentroXZ + 7f * Diag, CentroXZ + 7f * Diag)
+                        ? lontanoXZ : CentroXZ + 7f * Diag;
+                    MettiIn(b, CentroXZ, CentroXZ);
+                    MettiIn(a, altro, altro);
+                }
+                a.Attendi(() => false, 0.5);
+            }
+            Console.WriteLine($"  al loro ritmo: colpi a terra {Sonda.Numero(ritmo, "colpi a terra")}, cariche {Sonda.Numero(ritmo, "cariche")}");
+            if (Sonda.Numero(ritmo, "colpi a terra") < 2) { Console.WriteLine("  FALLITA: il colpo a terra non torna da solo ogni 10 secondi"); ok = false; }
+            if (Sonda.Numero(ritmo, "cariche") < 2) { Console.WriteLine("  FALLITA: la carica non torna da sola"); ok = false; }
+
+            // --- tornato a dormire, le mosse ripartono da zero
+            var dorme = StatoCustode(a, "dormi");
+            if (Sonda.Numero(dorme, "colpi a terra") != 0 || IdNumero(dorme, "piu danno") != 0)
+            { Console.WriteLine("  FALLITA: addormentato, il Custode ricorda ancora mosse e danni"); ok = false; }
+        }
+        finally
+        {
+            a.Admin("custode dormi");
+            a.Admin("setvitality 1");
+            foreach (var p in new[] { a, b }) { p.Admin("aterra rialza"); p.Admin("tp 30 30"); p.Admin("sethp 1000"); }
+            a.Attendi(() => false, 0.5);
+        }
+        if (ok) Console.WriteLine("  OK: il colpo a terra prende chi e' entro 6 metri e non chi e' lontano, la carica va su chi picchia di piu'");
+        return ok;
+    }
+
     // ---- 15c. l'era rigogliosa si consuma e raddoppia i drop -------------------
     //
     // Numeri di Tommaso (backlog A1a3b): l'eccedenza sopra il 100% se ne va da
