@@ -140,6 +140,16 @@ sealed class Sonda : IDisposable
     public readonly List<WorldEventMsg> Registro = new();
     public int RegistriRicevuti;
 
+    /// L'ultimo stato delle abilita mandato dal server (A14b), e quanti ne sono
+    /// arrivati.
+    public volatile AbilityStateMsg Abilita;
+    public int AbilitaRicevute;
+
+    /// Lo stato delle abilita in una riga secondo il server (comando admin
+    /// "abilita", piu' eventuali argomenti); null se la risposta non arriva.
+    public string AbilitaInRiga(string argomenti = "") =>
+        ChiediAdmin(("abilita " + argomenti).Trim(), "abilita: ");
+
     /// Il registro in una riga, "id:tipo" separati da virgole: si confronta e si
     /// annota su file.
     public string RegistroInRiga()
@@ -431,6 +441,11 @@ sealed class Sonda : IDisposable
                         RegistriRicevuti++;
                         break;
                     }
+
+                    case NetMsgType.AbilityState:
+                        Abilita = MessagePack.MessagePackSerializer.Deserialize<AbilityStateMsg>(env.Payload);
+                        Interlocked.Increment(ref AbilitaRicevute);
+                        break;
 
                     case NetMsgType.ConsumeResult:
                         UltimoConsumo = MessagePack.MessagePackSerializer
@@ -1321,6 +1336,95 @@ static class Regole
         }
 
         if (ok) Console.WriteLine("  OK: numeri, messaggi e comandi del protocollo delle abilita come deciso");
+        return ok;
+    }
+
+    // ---- catalogo e stato delle abilita (A14b) ---------------------------------
+    //
+    // Il catalogo del server deve avere una riga per ogni abilita del protocollo,
+    // coi numeri che hanno senso; lo stato del giocatore deve arrivare al client
+    // all'ingresso e a ogni cambio, e chi lo carica deve scartare cio che non ha
+    // senso. Che superi un riavvio lo controlla la prova di persistenza.
+
+    /// Lo stato fisso di "abilita esempio" dopo la pulizia, come lo scrive il
+    /// server: sette voci scartate, il livello 9 diventato 3.
+    public const string AbilitaEsempioPulita =
+        "sbloccate=101:3,102:2,201:1,1000:1,1001:1,1050:1,1300:1,1301:1 arma=Sword:102/-/101 " +
+        "attivi=1000/1300/- passivi=-/- principale=Warrior secondaria=Mage " +
+        "classi=Warrior:1:7:1,Mage:0:3:0 punti=Sword.Rare:2:13";
+
+    /// La riga senza le ricariche, che col passare del tempo finiscono.
+    public static string SenzaRicariche(string riga)
+    {
+        if (riga == null) return null;
+        int i = riga.IndexOf(" ricariche=", StringComparison.Ordinal);
+        return i < 0 ? riga : riga[..i];
+    }
+
+    public static string Ricariche(string riga)
+    {
+        if (riga == null) return "";
+        int i = riga.IndexOf(" ricariche=", StringComparison.Ordinal);
+        return i < 0 ? "" : riga[(i + " ricariche=".Length)..];
+    }
+
+    public static bool CatalogoEStatoAbilita(string token, string host, int port)
+    {
+        Console.WriteLine("--- catalogo e stato delle abilita: ogni abilita ha la sua riga, lo stato arriva e si pulisce");
+        bool ok = true;
+        void Male(string m) { Console.WriteLine("  FALLITA: " + m); ok = false; }
+
+        using var s = new Sonda(token, host, port);
+        if (!s.AttendiPronta()) { Console.WriteLine("  FALLITA: la sonda non e' entrata in gioco"); return false; }
+
+        // All'ingresso arriva lo stato, qualunque sia.
+        bool arrivato = s.Attendi(() => s.AbilitaRicevute > 0, 6);
+        Console.WriteLine($"  stato delle abilita all'ingresso: {(arrivato ? "arrivato" : "non arrivato")}");
+        if (!arrivato) Male("all'ingresso il server non manda lo stato delle abilita");
+
+        // Il catalogo: 175 righe, 123 attive (4 armi da 13, 6 classi da 11,
+        // Mago 5) e 52 passive, 6 uniche e 4 sull'oggetto, nessun problema.
+        var cat = s.ChiediAdmin("abilita catalogo", "catalogo abilita: ");
+        Console.WriteLine($"  catalogo: {cat ?? "(nessuna risposta)"}");
+        if (cat != "totale=175 attive=123 passive=52 uniche=6 sull'oggetto=4 problemi=0")
+            Male("il catalogo non torna col protocollo");
+
+        // Lo stato d'esempio: dopo la pulizia dev'essere esattamente questo.
+        int prima = s.AbilitaRicevute;
+        var riga = s.AbilitaInRiga("esempio");
+        Console.WriteLine($"  esempio: {riga ?? "(nessuna risposta)"}");
+        if (riga == null || !riga.StartsWith("scartate=7 "))
+            Male("le voci senza senso scartate non sono sette");
+        else if (SenzaRicariche(riga["scartate=7 ".Length..]) != AbilitaEsempioPulita)
+            Male("lo stato pulito non e' quello atteso: " + AbilitaEsempioPulita);
+        if (Ricariche(riga) != "102,112") Male($"ricariche attese 102,112, sono {Ricariche(riga)}");
+
+        // Il cambio arriva anche al client, nella stessa forma.
+        if (!s.Attendi(() => s.AbilitaRicevute > prima, 6)) Male("dopo il cambio lo stato non e' arrivato al client");
+        else
+        {
+            var m = s.Abilita;
+            var affondo = m.Cooldowns.FirstOrDefault(c => c.Id == AbilityId.SwordLunge);
+            bool forma = m.Unlocked.Length == 8
+                         && m.Unlocked.Any(u => u.Id == AbilityId.SwordParry && u.Level == 3)
+                         && m.WeaponSlots.Length == 1 && m.WeaponSlots[0].Family == WeaponFamily.Sword
+                         && m.WeaponSlots[0].Abilities.SequenceEqual(new[] { AbilityId.SwordLunge, AbilityId.None, AbilityId.SwordParry })
+                         && m.ClassActiveSlots.SequenceEqual(new[] { AbilityId.WarriorChallenge, AbilityId.MageMagicBolt, AbilityId.None })
+                         && m.ClassPassiveSlots.All(a => a == AbilityId.None)
+                         && m.MainClass == ClassId.Warrior && m.SecondaryClass == ClassId.Mage
+                         && m.WeaponPoints.Length == 1 && m.WeaponPoints[0].Grade == Grade.Rare && m.WeaponPoints[0].Points == 2
+                         // Dieci minuti chiesti, ricarica vera 10 secondi: non di piu',
+                         // salvo un tick di arrotondamento (33 ms).
+                         && affondo != null && affondo.MsLeft > 0 && affondo.MsLeft <= 10_000 + 34;
+            Console.WriteLine($"  messaggio al client: {m.Unlocked.Length} sbloccate, ricarica dell'Affondo {affondo?.MsLeft ?? 0} ms, forma {(forma ? "giusta" : "sbagliata")}");
+            if (!forma) Male("il messaggio al client non e' lo stato pulito");
+        }
+
+        // Rileggendolo, lo stato e' rimasto quello.
+        var ancora = s.AbilitaInRiga();
+        if (SenzaRicariche(ancora) != AbilitaEsempioPulita) Male($"riletto, lo stato e' cambiato: {ancora}");
+
+        if (ok) Console.WriteLine("  OK: catalogo completo, stato mandato al client e ripulito al caricamento");
         return ok;
     }
 
@@ -3935,7 +4039,18 @@ static class Regole
             return false;
         }
 
-        File.WriteAllLines(Lasciato, righe.Append(registro).Append(rituali.ToString(Inv)));
+        // Le abilita (A14b): lo stato d'esempio, con una ricarica di 30 secondi
+        // (il Grido di battaglia) che deve esserci ancora al rientro.
+        var abilita = s.AbilitaInRiga("esempio");
+        if (abilita == null || !abilita.StartsWith("scartate=7 ")
+            || SenzaRicariche(abilita["scartate=7 ".Length..]) != AbilitaEsempioPulita)
+        {
+            Console.WriteLine($"  FALLITA in preparazione: lo stato delle abilita non si carica ({abilita ?? "nessuna risposta"})");
+            return false;
+        }
+
+        File.WriteAllLines(Lasciato, righe.Append(registro).Append(rituali.ToString(Inv))
+                                          .Append(AbilitaEsempioPulita));
 
         Console.WriteLine($"  lasciato: legno {righe[0]}, pietra {righe[1]}, " +
                           $"asce [{righe[2]}], in ({s.X:F0}, {s.Z:F0}), registro [{registro}]");
@@ -3957,6 +4072,7 @@ static class Regole
         float xAtt = float.Parse(atteso[3], Inv), zAtt = float.Parse(atteso[4], Inv);
         string registroAtt = atteso.Length > 5 ? atteso[5] : "";
         int ritualiAtt = atteso.Length > 6 ? int.Parse(atteso[6], Inv) : -1;
+        string abilitaAtt = atteso.Length > 7 ? atteso[7] : "";
 
         using var s = new Sonda(token, host, port);
         if (!s.AttendiPronta()) { Console.WriteLine("  FALLITA: la sonda non e' rientrata in gioco"); return false; }
@@ -3998,6 +4114,20 @@ static class Regole
         Console.WriteLine($"  {quando}: rituali fatti {rituali} (erano {ritualiAtt})");
         if (rituali != ritualiAtt)
         { Console.WriteLine("  FALLITA: il contatore dei rituali non e' tornato uguale"); ok = false; }
+
+        // Le abilita (A14b): arrivate all'ingresso col salvataggio, e uguali.
+        // La ricarica del Grido di battaglia (30 s) deve esserci ancora: il
+        // tempo a server spento non conta. Quella dell'Affondo (10 s) puo'
+        // essere gia' finita.
+        var abilita = s.AbilitaInRiga();
+        var msg = s.Abilita;
+        Console.WriteLine($"  {quando}: abilita [{abilita}], all'ingresso {msg?.Unlocked.Length ?? -1} sbloccate");
+        if (SenzaRicariche(abilita) != abilitaAtt)
+        { Console.WriteLine($"  FALLITA: lo stato delle abilita non e' tornato uguale (era [{abilitaAtt}])"); ok = false; }
+        if (!Ricariche(abilita).Split(',').Contains("112"))
+        { Console.WriteLine("  FALLITA: la ricarica del Grido di battaglia non ha superato l'uscita"); ok = false; }
+        if (msg == null || msg.Unlocked.Length != 8)
+        { Console.WriteLine("  FALLITA: all'ingresso non e' arrivato lo stato delle abilita salvato"); ok = false; }
 
         // Il Custode non si salva: rinasce addormentato al centro del
         // santuario (B3). Dopo un riavvio deve esserci lo stesso.
