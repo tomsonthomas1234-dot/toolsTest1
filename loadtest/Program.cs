@@ -100,15 +100,25 @@ if (modoRegole)
 {
     if (tokens.Count < 5) { Console.WriteLine("servono cinque token: prova annullata"); return 1; }
 
+    // Il bersaglio della moderazione: un account suo, non amministratore. Il
+    // token si chiede ogni volta, perche' un bando non tocca l'account web.
+    string TokenBersaglio() =>
+        Auth("login", Regole.Bersaglio).Result ?? Auth("register", Regole.Bersaglio).Result;
+
     // L'orda d'ufficio prima dello zaino, e dopo il riavvio lo zaino prima
     // dell'orda: la sonda che controlla lo zaino deve essere l'ultima a uscire
     // prima di spegnere e la prima a entrare dopo.
+    //
+    // La moderazione usa la prima sonda e non la quarta: prima di tutto,
+    // e dopo il riavvio per ultima, cosi' non si mette in mezzo.
     if (metaPersistenza == "prepara")
-        return Regole.OrdaPrepara(tokens[3], host, port)
+        return Regole.ModerazionePrepara(tokens[0], host, port)
+             & Regole.OrdaPrepara(tokens[3], host, port)
              & Regole.PersistenzaPrepara(tokens[3], host, port) ? 0 : 1;
     if (metaPersistenza == "verifica")
         return Regole.PersistenzaVerifica(tokens[3], host, port, "dopo il riavvio")
-             & Regole.OrdaVerifica(tokens[3], host, port) ? 0 : 1;
+             & Regole.OrdaVerifica(tokens[3], host, port)
+             & Regole.ModerazioneVerifica(tokens[0], TokenBersaglio, host, port) ? 0 : 1;
 
     // Il terzo account non e' fra gli amministratori: serve proprio a
     // verificare che senza quel titolo i comandi non funzionino.
@@ -146,6 +156,10 @@ if (modoRegole)
         }),
         ("registro di gioco",       () => Regole.RegistroDiGioco(tokens[1], tokens[4], host, port)),
         ("persistenza al rientro",  () => Regole.PersistenzaAlRientro(tokens[3], host, port)),
+        // In fondo: l'era rigogliosa conta il tempo dall'avvio, e queste due
+        // non devono spostarla.
+        ("silenzio",                () => Regole.Silenzio(tokens[0], TokenBersaglio(), host, port)),
+        ("bando",                   () => Regole.Bando(tokens[0], TokenBersaglio, host, port)),
     };
 
     int falliti = 0;

@@ -225,6 +225,28 @@ sealed class Sonda : IDisposable
     /// Gli esemplari con identita' propria, per identificativo.
     public readonly Dictionary<ulong, (ItemType Tipo, int Usura)> Istanze = new();
 
+    /// Il motivo del rifiuto all'ingresso, se il server ne ha dato uno.
+    public ErrorCode? ErroreIngresso;
+
+    /// Vero quando il server ci ha chiuso la porta (espulsione, bando).
+    public bool Disconnessa;
+
+    /// Scrive in chat, nel canale locale.
+    public void Scrivi(string testo) =>
+        Manda(NetMsgType.Command, new CommandMsg
+        {
+            CommandId = 11,
+            Type      = CommandType.Chat,
+            Payload   = MessagePack.MessagePackSerializer.Serialize(
+                            new ChatCommand { Channel = ChatChannel.Local, Text = testo }),
+        });
+
+    /// Vero se fra i messaggi di chat ce n'e' uno che contiene il testo.
+    public bool HaLetto(string pezzo)
+    {
+        lock (Chat) return Chat.Exists(t => t.Contains(pezzo));
+    }
+
     public Sonda(string token, string host, int port)
     {
         var listener = new EventBasedNetListener();
@@ -235,6 +257,8 @@ sealed class Sonda : IDisposable
             Manda(NetMsgType.HandshakeRequest,
                   new HandshakeRequest { ClientBuild = "regole", AuthToken = token });
         };
+
+        listener.PeerDisconnectedEvent += (p, info) => Disconnessa = true;
 
         listener.NetworkReceiveEvent += (p, r, ch, metodo) =>
         {
@@ -247,6 +271,11 @@ sealed class Sonda : IDisposable
                         _playerId = MessagePack.MessagePackSerializer
                                         .Deserialize<HandshakeOk>(env.Payload).PlayerId;
                         Pronta = true;
+                        break;
+
+                    case NetMsgType.HandshakeError:
+                        ErroreIngresso = MessagePack.MessagePackSerializer
+                                             .Deserialize<HandshakeError>(env.Payload).Code;
                         break;
 
                     case NetMsgType.WorldSnapshot:
@@ -839,6 +868,151 @@ static class Regole
         if (spostamento < 3f) { Console.WriteLine("  OK: il comando e' stato ignorato"); return true; }
         Console.WriteLine("  FALLITA: un client qualunque puo' teletrasportarsi");
         return false;
+    }
+
+    // ---- 6b. moderazione: silenzio a tempo e bando ----------------------------
+    //
+    // Il bersaglio e' un account a parte, fuori dagli amministratori: le prove
+    // non devono bandire una sonda che serve anche ad altro, e un giro andato
+    // storto non deve lasciarne una fuori dalla porta (si toglie tutto alla
+    // fine, comunque vada).
+
+    public const string Bersaglio = "sonda0016";
+
+    /// Manda un comando e aspetta la risposta dell'amministrazione in chat.
+    static bool Risposta(Sonda a, string comando, string attesa)
+    {
+        a.Admin(comando);
+        return a.Attendi(() => a.HaLetto(attesa), 5);
+    }
+
+    /// L'amministratore va dove sta il bersaglio, entro il raggio della chat.
+    static bool Avvicina(Sonda a, Sonda b)
+    {
+        a.Admin($"tp {b.X.ToString(Inv)} {b.Z.ToString(Inv)}");
+        return a.Attendi(() => Dist(a.X, a.Z, b.X, b.Z) < 3f, 6);
+    }
+
+    /// Scrive una riga unica e dice se l'altro l'ha letta entro qualche secondo.
+    static bool Arriva(Sonda da, Sonda a, string etichetta, double secondi = 3)
+    {
+        string riga = $"{etichetta}-{Guid.NewGuid():N}"[..24];
+        da.Scrivi(riga);
+        return a.Attendi(() => a.HaLetto(riga), secondi);
+    }
+
+    public static bool Silenzio(string tokenAdmin, string tokenBersaglio, string host, int port)
+    {
+        Console.WriteLine("--- moderazione: chi e' silenziato non arriva a nessuno, e poi torna a parlare");
+        using var a = new Sonda(tokenAdmin, host, port);
+        using var b = new Sonda(tokenBersaglio, host, port);
+        if (!a.AttendiPronta() || !b.AttendiPronta()) { Console.WriteLine("  FALLITA: le sonde non sono entrate in gioco"); return false; }
+        try
+        {
+            if (!Avvicina(a, b)) { Console.WriteLine("  FALLITA: l'amministratore non e' arrivato vicino"); return false; }
+
+            // Senza questo, un silenzio "riuscito" potrebbe essere solo una
+            // chat che non arriva per altri motivi.
+            if (!Arriva(b, a, "prima")) { Console.WriteLine("  FALLITA: la chat non arriva nemmeno senza silenzio"); return false; }
+            Console.WriteLine("  senza silenzio la chat arriva");
+
+            if (!Risposta(a, $"mute {Bersaglio} 5", $"silenziato: {Bersaglio}"))
+            { Console.WriteLine("  FALLITA: nessuna conferma del silenzio"); return false; }
+            bool avvisato = b.Attendi(() => b.HaLetto("Sei stato silenziato"), 3);
+
+            bool passa = Arriva(b, a, "muto");
+            bool saDiEssere = b.Attendi(() => b.HaLetto("Sei silenziato: ancora"), 3);
+            Console.WriteLine($"  silenziato: avvisato {avvisato}, la chat arriva {passa}, glielo si ricorda {saDiEssere}");
+            if (passa || !avvisato || !saDiEssere) { Console.WriteLine("  FALLITA: il silenzio non regge"); return false; }
+
+            if (!Risposta(a, $"unmute {Bersaglio}", $"silenzio tolto: {Bersaglio}"))
+            { Console.WriteLine("  FALLITA: nessuna conferma della fine del silenzio"); return false; }
+            if (!Arriva(b, a, "dopo")) { Console.WriteLine("  FALLITA: tolto il silenzio, la chat non arriva"); return false; }
+            Console.WriteLine("  OK: silenziato non scrive, tolto il silenzio torna a scrivere");
+            return true;
+        }
+        finally { a.Admin($"unmute {Bersaglio}"); a.Attendi(() => false, 0.5); }
+    }
+
+    public static bool Bando(string tokenAdmin, Func<string> tokenBersaglio, string host, int port)
+    {
+        Console.WriteLine("--- moderazione: il bandito esce, non rientra e sa perche'");
+        using var a = new Sonda(tokenAdmin, host, port);
+        if (!a.AttendiPronta()) { Console.WriteLine("  FALLITA: l'amministratore non e' entrato in gioco"); return false; }
+        try
+        {
+            using (var b = new Sonda(tokenBersaglio(), host, port))
+            {
+                if (!b.AttendiPronta()) { Console.WriteLine("  FALLITA: il bersaglio non e' entrato prima del bando"); return false; }
+                if (!Risposta(a, $"ban {Bersaglio}", $"bandito: {Bersaglio}"))
+                { Console.WriteLine("  FALLITA: nessuna conferma del bando"); return false; }
+                bool fuori = b.Attendi(() => b.Disconnessa, 6);
+                Console.WriteLine($"  bandito in gioco: messo fuori {fuori}, avvisato {b.HaLetto("bandito")}");
+                if (!fuori) { Console.WriteLine("  FALLITA: il bandito e' rimasto in gioco"); return false; }
+            }
+
+            if (!BanditoRespinto(tokenBersaglio(), host, port)) return false;
+
+            if (!Risposta(a, $"unban {Bersaglio}", $"bando tolto: {Bersaglio}"))
+            { Console.WriteLine("  FALLITA: nessuna conferma della revoca"); return false; }
+            using (var d = new Sonda(tokenBersaglio(), host, port))
+                if (!d.AttendiPronta()) { Console.WriteLine("  FALLITA: tolto il bando, non rientra"); return false; }
+            Console.WriteLine("  OK: bandito fuori e respinto con il motivo; tolto il bando rientra");
+            return true;
+        }
+        finally { a.Admin($"unban {Bersaglio}"); a.Attendi(() => false, 0.5); }
+    }
+
+    /// Un bandito che prova a entrare: respinto, col codice del bando e non
+    /// con "credenziali rifiutate".
+    static bool BanditoRespinto(string token, string host, int port)
+    {
+        using var c = new Sonda(token, host, port);
+        c.Attendi(() => c.ErroreIngresso != null || c.Pronta, 10);
+        Console.WriteLine($"  il bandito riprova: entrato {c.Pronta}, motivo {c.ErroreIngresso?.ToString() ?? "nessuno"}");
+        if (c.Pronta) { Console.WriteLine("  FALLITA: il bandito e' rientrato"); return false; }
+        if (c.ErroreIngresso != ErrorCode.Banned) { Console.WriteLine("  FALLITA: respinto senza dire che e' bandito"); return false; }
+        return true;
+    }
+
+    /// Prima del riavvio: il bersaglio, che non e' collegato, viene silenziato
+    /// e bandito per nome. Dopo il riavvio i due provvedimenti devono esserci
+    /// ancora.
+    public static bool ModerazionePrepara(string tokenAdmin, string host, int port)
+    {
+        using var a = new Sonda(tokenAdmin, host, port);
+        if (!a.AttendiPronta()) { Console.WriteLine("  FALLITA: l'amministratore non e' entrato in gioco"); return false; }
+        bool ok = Risposta(a, $"mute {Bersaglio} 30", $"silenziato: {Bersaglio}")
+                & Risposta(a, $"ban {Bersaglio}", $"bandito: {Bersaglio}");
+        if (!ok) Console.WriteLine("  FALLITA: silenzio o bando di chi non e' collegato non confermato");
+        else Console.WriteLine($"  {Bersaglio}, non collegato, silenziato e bandito per nome");
+        return ok;
+    }
+
+    public static bool ModerazioneVerifica(string tokenAdmin, Func<string> tokenBersaglio, string host, int port)
+    {
+        using var a = new Sonda(tokenAdmin, host, port);
+        if (!a.AttendiPronta()) { Console.WriteLine("  FALLITA: l'amministratore non e' entrato in gioco"); return false; }
+        try
+        {
+            if (!BanditoRespinto(tokenBersaglio(), host, port))
+            { Console.WriteLine("  FALLITA: il bando non ha superato il riavvio"); return false; }
+
+            if (!Risposta(a, $"unban {Bersaglio}", $"bando tolto: {Bersaglio}"))
+            { Console.WriteLine("  FALLITA: nessuna conferma della revoca"); return false; }
+            using var b = new Sonda(tokenBersaglio(), host, port);
+            if (!b.AttendiPronta()) { Console.WriteLine("  FALLITA: tolto il bando, non rientra"); return false; }
+            if (!Avvicina(a, b)) { Console.WriteLine("  FALLITA: l'amministratore non e' arrivato vicino"); return false; }
+            if (Arriva(b, a, "riavvio")) { Console.WriteLine("  FALLITA: il silenzio non ha superato il riavvio"); return false; }
+            Console.WriteLine("  OK: bando e silenzio hanno superato il riavvio");
+            return true;
+        }
+        finally
+        {
+            a.Admin($"unban {Bersaglio}");
+            a.Admin($"unmute {Bersaglio}");
+            a.Attendi(() => false, 0.5);
+        }
     }
 
     // ---- 7. catalogo: si ottiene la ricetta che si e' chiesta -----------------

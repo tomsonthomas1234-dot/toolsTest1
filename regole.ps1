@@ -172,7 +172,7 @@ if ($preparato -ne 0) {
     Pop-Location
 
     if ($verificato -ne 0) { Write-Output "  FALLITA"; $esito = 1 }
-    else { Write-Output "  OK: lo zaino, la posizione e l'orda hanno superato il riavvio" }
+    else { Write-Output "  OK: lo zaino, la posizione, l'orda, il bando e il silenzio hanno superato il riavvio" }
 }
 
 Ferma-Tutto
