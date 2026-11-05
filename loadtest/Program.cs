@@ -158,7 +158,8 @@ if (modoRegole)
             if (st.Any(t => t == null)) { Console.WriteLine("  FALLITA: sonde del santuario non autenticate"); return false; }
             return Regole.Santuario(st, host, port);
         }),
-        ("registro di gioco",       () => Regole.RegistroDiGioco(tokens[1], tokens[4], host, port)),
+        ("custode",                 () => Regole.Custode(tokens[1], host, port)),
+        ("registro di gioco",      () => Regole.RegistroDiGioco(tokens[1], tokens[4], host, port)),
         // La sonda0004 e' quella del registro: i doni e i conti del rituale
         // vero non devono finire addosso a chi raccoglie nelle prove di prima.
         ("rituali e rischio",       () => Regole.RitualiERischio(tokens[4], host, port)),

@@ -2503,6 +2503,12 @@ static class Regole
             if (capo.UltimoSantuario is not { Gate: SanctuaryGate.Open, OpenSecondsLeft: >= 50 and <= 60 })
             { Console.WriteLine("  FALLITA: il client non sa che l'ingresso e' aperto, o per quanto"); ok = false; }
 
+            // --- il Custode (B3): con l'ingresso aperto dorme
+            var custodeAperto = StatoCustode(capo);
+            Console.WriteLine($"  il Custode con l'ingresso aperto: {Sonda.Descrivi(custodeAperto)}");
+            if (custodeAperto.GetValueOrDefault("stato") != "dorme")
+            { Console.WriteLine("  FALLITA: con l'ingresso aperto il Custode non dorme"); ok = false; }
+
             // --- offerte; il fuggiasco offre ed esce
             capo.Rituale(CentroDelMondo, CrystalType.Precursor);
             epico.Rituale(CentroDelMondo, CrystalType.Epic);
@@ -2515,6 +2521,14 @@ static class Regole
             fuggiasco.Attendi(() => Dist(fuggiasco.X, fuggiasco.Z, 30, 30) < 2f, 6);
 
             capo.Admin("santuario chiudi");
+            // Alla chiusura il Custode si sveglia, con la fascia della terra al
+            // 20% (dal 5% al 25%: 400 di vita per giocatore, danno 35) e la
+            // vita per i dieci rimasti dentro.
+            var custodeChiuso = StatoCustode(capo);
+            Console.WriteLine($"  il Custode alla chiusura, in dieci dentro: {Sonda.Descrivi(custodeChiuso)}");
+            if (custodeChiuso.GetValueOrDefault("stato") != "sveglio" || Sonda.Numero(custodeChiuso, "fascia") != 1
+                || Sonda.Numero(custodeChiuso, "piena") != 4000 || Sonda.Numero(custodeChiuso, "danno") != 35)
+            { Console.WriteLine("  FALLITA: alla chiusura il Custode doveva svegliarsi con fascia 1, vita 4000 e danno 35"); ok = false; }
             capo.Attendi(() => ChunkPiuArido(capo) > 100, 6);
             foreach (var p in ps) p.Attendi(() => false, 0.3);
             int arido = ChunkPiuArido(capo);
@@ -2553,6 +2567,8 @@ static class Regole
 
             // --- riposo: con tutte le condizioni, resta chiuso
             foreach (var p in ps) p.Admin("tp 30 30");
+            // Chi il Custode ha mandato a terra non camminerebbe fino al muro.
+            RialzaTutte(ps);
             capo.Admin("give Crystal 1 Precursor");
             epico.Admin("give Crystal 1 Epic");
             AllIngresso(ps.Take(10).ToArray());
@@ -2666,9 +2682,18 @@ static class Regole
             if (capo.Cristalli(CrystalType.Precursor) != 1 || epico.Cristalli(CrystalType.Epic) != 1)
             { Console.WriteLine("  FALLITA: senza offerte qualcuno ha perso un cristallo"); ok = false; }
 
+            // Anche qui il Custode si e' svegliato, coi nove e la terra al 100%:
+            // 600 per giocatore.
+            var custodeNove = StatoCustode(capo);
+            Console.WriteLine($"  il Custode, in nove senza offerte: {Sonda.Descrivi(custodeNove)}");
+            if (custodeNove.GetValueOrDefault("stato") != "sveglio" || Sonda.Numero(custodeNove, "piena") != 5400)
+            { Console.WriteLine("  FALLITA: in nove con la terra al 100% il Custode doveva svegliarsi con vita 5400"); ok = false; }
+
             // Niente riposo: si riapre subito, e stavolta si offre.
             // Nessun Echo d'altre prove in giro: si contano quelli del rito.
             capo.StatoEchi("uccidi");
+            foreach (var p in ps) p.Admin("tp 30 30");
+            RialzaTutte(ps);
             bool noveAncora = ApriInNove();
             capo.Rituale(CentroDelMondo, CrystalType.Precursor);
             epico.Rituale(CentroDelMondo, CrystalType.Epic);
@@ -2739,6 +2764,140 @@ static class Regole
         {
             foreach (var p in ps) p.Dispose();
         }
+    }
+
+    // ---- 15b2. il Custode -------------------------------------------------------
+    //
+    // Decisioni di Tommaso (backlog B3, decisioni/boss.md): il Custode c'e
+    // sempre dentro il santuario e dorme; si sveglia quando l'ingresso si
+    // richiude (lo prova "santuario"); quattro fasce secondo la vitalita, e la
+    // vita per giocatore dentro al risveglio. Qui, con una sonda sola e il
+    // comando admin "custode": le fasce, che addormentato non attacca, che
+    // sveglio manda a terra chi e dentro e poi torna a dormire, e che battuto
+    // ne nasce un altro.
+
+    static Dictionary<string, string> StatoCustode(Sonda s, string argomenti = "")
+    {
+        var r = s.ChiediAdmin(("custode " + argomenti).Trim(), "custode: ");
+        var stato = new Dictionary<string, string>();
+        if (r == null) return stato;
+        foreach (var voce in r.Split(", "))
+        {
+            int sp = voce.LastIndexOf(' ');
+            if (sp > 0) stato[voce[..sp]] = voce[(sp + 1)..];
+        }
+        return stato;
+    }
+
+    public static bool Custode(string token, string host, int port)
+    {
+        Console.WriteLine("--- il Custode: dorme nel santuario, quattro fasce, vita per chi e' dentro, a terra chi perde");
+
+        using var s = new Sonda(token, host, port);
+        if (!s.AttendiPronta()) { Console.WriteLine("  FALLITA: la sonda non e' entrata in gioco"); return false; }
+
+        bool ok = true;
+        try
+        {
+            s.Admin("santuario angolo 0");
+            s.Admin("santuario riposo");
+            s.Admin("setvitality 1");
+            s.Admin($"tp {IngressoXZ.ToString(Inv)} {IngressoXZ.ToString(Inv)}");
+            s.Attendi(() => Dist(s.X, s.Z, IngressoXZ, IngressoXZ) < 2f, 6);
+            s.Attendi(() => false, 1.5);   // il secondo del santuario: lo sposta al centro
+
+            var st = StatoCustode(s);
+            float dalCentro = st.TryGetValue("dal centro", out var dc) && float.TryParse(dc, System.Globalization.NumberStyles.Float, Inv, out var f) ? f : -1f;
+            EntityState visto;
+            lock (s.Mondo) visto = s.Mondo.Values.FirstOrDefault(e => e.Type == EntityType.Keeper);
+            Console.WriteLine($"  all'inizio: {Sonda.Descrivi(st)}; visto dal client: " +
+                              (visto == null ? "no" : $"vita {visto.Extra0}, piena {visto.Extra1}, sveglio {visto.Extra2}, fascia {visto.Extra3}, " +
+                               $"a {Dist(visto.X, visto.Z, CentroXZ, CentroXZ):F1} m dal centro"));
+            if (st.GetValueOrDefault("stato") != "dorme" || dalCentro < 0f || dalCentro > 0.5f)
+            { Console.WriteLine("  FALLITA: il Custode non dorme al centro del santuario"); ok = false; }
+            if (visto == null || visto.Extra2 != 0f || visto.Extra3 != 2)
+            { Console.WriteLine("  FALLITA: il client non vede il Custode addormentato con la fascia della terra viva"); ok = false; }
+
+            // --- le quattro fasce, svegliato d'ufficio "come se" dentro fossero in tre
+            var fasce = new (string Vit, int Fascia, int PerGiocatore, int Danno)[]
+            {
+                ("0.02",  0, 250, 25),   // carestia
+                ("0.2",   1, 400, 35),   // dal 5% al 25%
+                ("0.625", 2, 600, 50),   // sopra il 25%
+                ("1.2",   3, 800, 60),   // era rigogliosa
+            };
+            foreach (var (vit, fascia, perG, danno) in fasce)
+            {
+                s.Admin($"setvitality {vit}");
+                s.Attendi(() => false, 0.3);
+                var sv = StatoCustode(s, "sveglia 3");
+                Console.WriteLine($"  terra a {vit}, svegliato in tre: {Sonda.Descrivi(sv)}");
+                if (sv.GetValueOrDefault("stato") != "sveglio" || Sonda.Numero(sv, "fascia") != fascia
+                    || Sonda.Numero(sv, "piena") != 3 * perG || Sonda.Numero(sv, "vita") != 3 * perG
+                    || Sonda.Numero(sv, "danno") != danno)
+                { Console.WriteLine($"  FALLITA: terra a {vit}: atteso fascia {fascia}, vita {3 * perG}, danno {danno}"); ok = false; }
+                var dorme = StatoCustode(s, "dormi");
+                if (dorme.GetValueOrDefault("stato") != "dorme")
+                { Console.WriteLine("  FALLITA: il Custode non torna a dormire d'ufficio"); ok = false; }
+            }
+            s.Admin("setvitality 1");
+            s.Attendi(() => false, 1.2);
+
+            // --- addormentato non attacca: tre secondi accanto, vita intatta
+            float vx = CentroXZ + 1.5f * Diag, vz = CentroXZ + 1.5f * Diag;
+            s.Admin("sethp 100");
+            s.Admin($"tp {vx.ToString(Inv)} {vz.ToString(Inv)}");
+            s.Attendi(() => Dist(s.X, s.Z, vx, vz) < 1f, 6);
+            s.Cammina(0f, 0f, 0.1);
+            s.Attendi(() => false, 3.0);
+            var accanto = s.Stato(s.Id);
+            Console.WriteLine($"  tre secondi accanto al Custode che dorme: vita {accanto.Vita}, a terra {accanto.ATerra}, dentro {Dentro(s)}");
+            if (!Dentro(s)) { Console.WriteLine("  FALLITA: la sonda non e' dentro il santuario"); ok = false; }
+            if (accanto.Vita != 100f || accanto.ATerra) { Console.WriteLine("  FALLITA: il Custode che dorme ha attaccato"); ok = false; }
+
+            // --- sveglio: la vita e' per chi e' dentro (una sonda), e la manda a terra
+            var sveglio = StatoCustode(s, "sveglia");
+            Console.WriteLine($"  svegliato con la sonda dentro: {Sonda.Descrivi(sveglio)}");
+            if (Sonda.Numero(sveglio, "piena") != 600 || Sonda.Numero(sveglio, "fascia") != 2)
+            { Console.WriteLine("  FALLITA: con una sonda dentro e la terra al 100% la vita doveva essere 600"); ok = false; }
+            bool caduta = s.Attendi(() => s.Stato(s.Id).ATerra, 12);
+            var giu = s.Stato(s.Id);
+            Console.WriteLine($"  contro il Custode sveglio: a terra={giu.ATerra}, morta={giu.Morto}, vita {giu.Vita}");
+            if (!caduta || giu.Morto) { Console.WriteLine("  FALLITA: contro il Custode la sonda doveva andare a terra, non morire"); ok = false; }
+
+            // --- nessuno in piedi dentro: torna a dormire, a vita piena
+            s.Attendi(() => false, 1.5);
+            var riposa = StatoCustode(s);
+            Console.WriteLine($"  con la sonda a terra: {Sonda.Descrivi(riposa)}");
+            if (riposa.GetValueOrDefault("stato") != "dorme" || Sonda.Numero(riposa, "vita") != Sonda.Numero(riposa, "piena"))
+            { Console.WriteLine("  FALLITA: con nessuno in piedi dentro il Custode non torna a dormire a vita piena"); ok = false; }
+            s.Admin("aterra rialza");
+            s.Admin("sethp 100");
+            s.Attendi(() => false, 2.0);
+            if (s.Stato(s.Id).Vita != 100f) { Console.WriteLine("  FALLITA: rialzata accanto al Custode che dorme, e' stata colpita"); ok = false; }
+
+            // --- battuto: se ne va, e ne nasce un altro addormentato
+            string idPrima = StatoCustode(s).GetValueOrDefault("id");
+            StatoCustode(s, "sveglia");
+            var morto = StatoCustode(s, "uccidi");
+            s.Attendi(() => false, 1.5);
+            var nuovo = StatoCustode(s);
+            Console.WriteLine($"  ucciso d'ufficio: subito '{Sonda.Descrivi(morto)}', dopo un secondo {Sonda.Descrivi(nuovo)}");
+            if (morto.GetValueOrDefault("stato") != "assente") { Console.WriteLine("  FALLITA: ucciso, il Custode e' ancora li'"); ok = false; }
+            if (nuovo.GetValueOrDefault("stato") != "dorme" || nuovo.GetValueOrDefault("id") == idPrima)
+            { Console.WriteLine("  FALLITA: battuto il Custode, non ne e' nato un altro addormentato"); ok = false; }
+        }
+        finally
+        {
+            s.Admin("custode dormi");
+            s.Admin("setvitality 1");
+            s.Admin("aterra rialza");
+            s.Admin("tp 30 30");
+            s.Admin("sethp 1000");
+            s.Attendi(() => false, 0.5);
+        }
+        if (ok) Console.WriteLine("  OK: il Custode dorme nel santuario, ha quattro fasce, vita per chi e' dentro, e chi perde va a terra");
+        return ok;
     }
 
     // ---- 15c. l'era rigogliosa si consuma e raddoppia i drop -------------------
@@ -3266,6 +3425,13 @@ static class Regole
         Console.WriteLine($"  {quando}: rituali fatti {rituali} (erano {ritualiAtt})");
         if (rituali != ritualiAtt)
         { Console.WriteLine("  FALLITA: il contatore dei rituali non e' tornato uguale"); ok = false; }
+
+        // Il Custode non si salva: rinasce addormentato al centro del
+        // santuario (B3). Dopo un riavvio deve esserci lo stesso.
+        var custode = StatoCustode(s);
+        Console.WriteLine($"  {quando}: custode {Sonda.Descrivi(custode)}");
+        if (custode.GetValueOrDefault("stato") != "dorme")
+        { Console.WriteLine("  FALLITA: il Custode non c'e', o non dorme"); ok = false; }
 
         // L'era lasciata al 112,5%: 6,8 giorni la portano a un soffio sopra il
         // 100% e non basta a chiuderla; altri 0,3 si'. Se si fosse persa, o
