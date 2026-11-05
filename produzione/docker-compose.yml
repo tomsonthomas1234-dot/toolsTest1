@@ -1,0 +1,98 @@
+# Precursori in produzione: game server, web API, Postgres e MinIO.
+#
+# Separato apposta da bootstrap/00_infra/docker-compose.yml, che e quello di
+# sviluppo: li le password sono scritte nel file e le porte dei database sono
+# aperte, qui nessuna delle due cose.
+#
+# Si avvia con un solo comando, da questa cartella:
+#
+#   docker compose --env-file .env up -d --build
+#
+# Il file .env si prepara copiando .env.esempio: senza un valore obbligatorio
+# docker compose si rifiuta di partire e dice quale manca. Non ci sono password
+# di ripiego, per scelta: un ripiego e esattamente la password che nessuno si
+# ricorda di cambiare.
+#
+# Istruzioni passo passo in LEGGIMI.md.
+
+name: precursori
+
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: precursori
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?manca POSTGRES_PASSWORD nel file .env}
+      POSTGRES_DB: precursori
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      # Tabelle create al primo avvio, su un volume vuoto. Copia di
+      # bootstrap/00_infra/sql, che non e in nessun repository.
+      - ./sql:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U precursori -d precursori"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    # Nessuna porta pubblicata: ci parlano solo il game server e la web API,
+    # dalla rete interna dei container.
+
+  minio:
+    image: minio/minio:RELEASE.2024-12-13T22-19-12Z
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: ${MINIO_USER:?manca MINIO_USER nel file .env}
+      MINIO_ROOT_PASSWORD: ${MINIO_PASSWORD:?manca MINIO_PASSWORD nel file .env}
+    command: server /data
+    volumes:
+      - minio_data:/data
+    # Anche qui nessuna porta: la console di MinIO non serve in pubblico.
+
+  webapi:
+    build:
+      context: ../../bootstrap
+      dockerfile: ../tools/produzione/Dockerfile.webapi
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      Auth__Secret: ${AUTH_SECRET:?manca AUTH_SECRET nel file .env}
+      Postgres: Host=postgres;Port=5432;Database=precursori;Username=precursori;Password=${POSTGRES_PASSWORD}
+    ports:
+      - "${WEBAPI_PORT:-5080}:5080/tcp"
+
+  gameserver:
+    build:
+      context: ../../bootstrap
+      dockerfile: ../tools/produzione/Dockerfile.gameserver
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_started
+    environment:
+      # Acceso: il server si rifiuta di partire se il segreto e quello di
+      # sviluppo, se l'autenticazione e spenta o se non c'e un amministratore.
+      Server__ProductionChecks: "true"
+      Server__Admins__0: ${ADMIN:?manca ADMIN nel file .env}
+      # Stesso segreto della web API: lei firma i token, il server li verifica.
+      Auth__Secret: ${AUTH_SECRET:?manca AUTH_SECRET nel file .env}
+      Auth__Required: "true"
+      Persistence__MinioEndpoint: minio:9000
+      Persistence__MinioAccessKey: ${MINIO_USER}
+      Persistence__MinioSecretKey: ${MINIO_PASSWORD}
+      Persistence__MinioBucket: precursori
+      Persistence__PostgresConnString: Host=postgres;Port=5432;Database=precursori;Username=precursori;Password=${POSTGRES_PASSWORD}
+    ports:
+      - "${GAME_PORT:-27015}:27015/udp"
+    # Il mondo si salva solo a intervalli, non allo spegnimento (oggi
+    # server.Stop non salva): il margine serve a lasciar finire un salvataggio
+    # gia partito. Quello che succede dopo l'ultimo salvataggio si perde.
+    stop_grace_period: 30s
+
+volumes:
+  pg_data:
+  minio_data:

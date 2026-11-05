@@ -1,0 +1,40 @@
+# Game server in un container. Si costruisce dalla cartella bootstrap, non da
+# qui: il server punta a shared per percorso relativo, e nel container i due
+# progetti devono stare negli stessi posti che hanno sul disco.
+#
+#   docker build -f tools/produzione/Dockerfile.gameserver bootstrap
+#
+# Di solito non serve lanciarlo a mano: lo fa docker compose.
+
+FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
+WORKDIR /src
+
+# Prima solo i progetti, poi il codice: finche le dipendenze non cambiano, il
+# restore resta in cache e una ricostruzione dopo una modifica al codice non
+# riscarica i pacchetti.
+COPY 01_shared/src/Precursori.Shared/Precursori.Shared.csproj 01_shared/src/Precursori.Shared/
+COPY 02_gameserver/src/Precursori.GameServer/Precursori.GameServer.csproj 02_gameserver/src/Precursori.GameServer/
+RUN dotnet restore 02_gameserver/src/Precursori.GameServer/Precursori.GameServer.csproj
+
+COPY 01_shared/src/Precursori.Shared/ 01_shared/src/Precursori.Shared/
+COPY 02_gameserver/src/Precursori.GameServer/ 02_gameserver/src/Precursori.GameServer/
+RUN dotnet publish 02_gameserver/src/Precursori.GameServer/Precursori.GameServer.csproj \
+        -c Release -o /app --no-restore
+
+FROM mcr.microsoft.com/dotnet/runtime:8.0
+WORKDIR /app
+COPY --from=build /app .
+# Il server lo pretende (optional:false in Program.cs) e lo cerca nella
+# cartella corrente. Sul PC c'e perche dotnet run parte dalla cartella del
+# progetto; la publish di un progetto console invece non lo copia.
+COPY --from=build /src/02_gameserver/src/Precursori.GameServer/appsettings.json .
+
+# appsettings.json viaggia dentro l'immagine con i valori di sviluppo: tutto
+# quello che in produzione e diverso arriva dalle variabili d'ambiente, che
+# vincono sul file (vedi Program.cs). Il controllo all'avvio
+# (Server__ProductionChecks) impedisce di partire se qualcosa e rimasto com'era.
+
+# Utente senza privilegi, gia presente nelle immagini .NET 8.
+USER app
+EXPOSE 27015/udp
+ENTRYPOINT ["dotnet", "Precursori.GameServer.dll"]

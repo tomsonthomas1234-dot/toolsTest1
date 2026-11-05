@@ -1,0 +1,25 @@
+# Web API in un container. Come il game server, si costruisce dalla cartella
+# bootstrap, perche punta a shared per percorso relativo:
+#
+#   docker build -f tools/produzione/Dockerfile.webapi bootstrap
+
+FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
+WORKDIR /src
+
+COPY 01_shared/src/Precursori.Shared/Precursori.Shared.csproj 01_shared/src/Precursori.Shared/
+COPY 05_webapi/src/Precursori.WebApi/Precursori.WebApi.csproj 05_webapi/src/Precursori.WebApi/
+RUN dotnet restore 05_webapi/src/Precursori.WebApi/Precursori.WebApi.csproj
+
+COPY 01_shared/src/Precursori.Shared/ 01_shared/src/Precursori.Shared/
+COPY 05_webapi/src/Precursori.WebApi/ 05_webapi/src/Precursori.WebApi/
+RUN dotnet publish 05_webapi/src/Precursori.WebApi/Precursori.WebApi.csproj \
+        -c Release -o /app --no-restore
+
+FROM mcr.microsoft.com/dotnet/aspnet:8.0
+WORKDIR /app
+COPY --from=build /app .
+
+# La porta 5080 e scritta in Program.cs (app.Run), come sul PC.
+USER app
+EXPOSE 5080/tcp
+ENTRYPOINT ["dotnet", "Precursori.WebApi.dll"]

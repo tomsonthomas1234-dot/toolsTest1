@@ -1,0 +1,11 @@
+# Docker legge questo file al posto di un .dockerignore nella cartella
+# bootstrap, che non e un repository. Senza, finirebbero nel contesto le
+# cartelle obj compilate su Windows, e il restore nel container userebbe i
+# percorsi di questo PC.
+**/bin
+**/obj
+**/.git
+03_botclient
+04_unity_stub
+06_persistence
+00_infra
