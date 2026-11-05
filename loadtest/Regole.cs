@@ -585,6 +585,34 @@ sealed class Sonda : IDisposable
         }
     }
 
+    /// <summary>
+    /// Tiene premuto l'attacco per il tempo dato, ferma, come il client vero a
+    /// 30 Hz. Il colpo da vicino prende il piu' vicino a portata: a mani nude
+    /// un metro e mezzo. Serve a battere il Custode (backlog B4).
+    /// </summary>
+    public void Colpisci(double secondi)
+    {
+        uint seq = 1000;
+        var fine = DateTime.UtcNow.AddSeconds(secondi);
+        var prossimo = DateTime.UtcNow;
+        while (DateTime.UtcNow < fine)
+        {
+            Poll();
+            if (DateTime.UtcNow >= prossimo)
+            {
+                Manda(NetMsgType.Input, new InputMsg { Seq = ++seq, Buttons = 1u }, DeliveryMethod.Unreliable);
+                prossimo = DateTime.UtcNow.AddMilliseconds(33);
+            }
+            Thread.Sleep(4);
+        }
+        var stop = DateTime.UtcNow.AddSeconds(0.3);
+        while (DateTime.UtcNow < stop)
+        {
+            Manda(NetMsgType.Input, new InputMsg { Seq = ++seq }, DeliveryMethod.Unreliable);
+            Attendi(() => false, 0.05);
+        }
+    }
+
     void Manda<T>(NetMsgType tipo, T carico, DeliveryMethod come = DeliveryMethod.ReliableOrdered)
     {
         if (_peer == null) return;
@@ -2339,10 +2367,12 @@ static class Regole
     //
     // Regole di Tommaso (backlog A1a3c): il rituale di riparazione vero si fa
     // solo nel santuario. E' chiuso; l'ingresso si apre con 5 giocatori per 2
-    // fazioni davanti e 2 cristalli alti fra loro; dentro si offrono i
-    // cristalli, e alla chiusura contano solo chi e' dentro e quello che ha
-    // offerto. Sotto il 25% la terra si ripara, sopra i cristalli si perdono.
-    // Dopo, un'ora di riposo.
+    // fazioni davanti e 2 cristalli alti fra loro. Quando si richiude si
+    // sveglia il Custode, e finche' vive non si offre (B4); battuto lui si apre
+    // una finestra per offrire, e alla sua fine contano solo chi e' dentro e
+    // quello che ha offerto. Sotto il 25% la terra si ripara, sopra i
+    // cristalli si perdono. Dopo, un'ora di riposo; mezz'ora se vince il
+    // Custode (tutti a terra), tre ore se e' battuto e nessuno offre.
     //
     // Undici sonde: cinque della fazione 1, sei della 2, perche' una esce prima
     // della chiusura e la fazione 2 deve restare a cinque. L'angolo si fissa a
@@ -2398,6 +2428,54 @@ static class Regole
         foreach (var p in ps) p.Admin("aterra rialza");
         Aggiorna(ps);
         ps[0].Attendi(() => false, 0.5);
+    }
+
+    /// Finche' il Custode vive il centro del mondo rifiuta le offerte (B4).
+    static bool RifiutaFincheVive(Sonda s, string quando)
+    {
+        s.Rituale(CentroDelMondo, CrystalType.Precursor);
+        bool risposto = s.Attendi(() => s.UltimoRituale != null, 4);
+        var r = s.UltimoRituale;
+        Console.WriteLine($"  offerta {quando}: accettata={r?.Accepted}, \"{r?.Refusal}\"");
+        if (risposto && r.Accepted == false && r.Refusal?.Contains("Custode") == true) return true;
+        Console.WriteLine($"  FALLITA: {quando} il centro del mondo doveva rifiutare l'offerta per il Custode");
+        return false;
+    }
+
+    /// <summary>
+    /// Il Custode indebolito d'ufficio a 1 di vita, e la sonda lo finisce a
+    /// pugni: gli si mette addosso, cosi' e' lui il piu' vicino a portata e non
+    /// una sonda dell'altra fazione. Vero se e' morto.
+    /// </summary>
+    static bool BattiIlCustode(Sonda s)
+    {
+        StatoCustode(s, "vita 1");
+        var fine = DateTime.UtcNow.AddSeconds(8);
+        while (DateTime.UtcNow < fine)
+        {
+            var st = StatoCustode(s);
+            if (st.GetValueOrDefault("stato") == "assente") return true;
+            if (!float.TryParse(st.GetValueOrDefault("x"), System.Globalization.NumberStyles.Float, Inv, out var kx) ||
+                !float.TryParse(st.GetValueOrDefault("z"), System.Globalization.NumberStyles.Float, Inv, out var kz))
+                return false;
+            s.Admin("aterra rialza");
+            s.Admin($"tp {kx.ToString(Inv)} {kz.ToString(Inv)}");
+            s.Attendi(() => false, 0.2);
+            s.Colpisci(1.0);
+        }
+        return StatoCustode(s).GetValueOrDefault("stato") == "assente";
+    }
+
+    /// Il santuario riposa, per quasi i secondi attesi (B4: un'ora, mezz'ora,
+    /// tre ore).
+    static bool RiposaPer(Sonda s, int secondi, string quando)
+    {
+        var st = s.StatoSantuario();
+        int resta = Sonda.Numero(st, "riposo");
+        Console.WriteLine($"  riposo {quando}: stato {st.GetValueOrDefault("stato")}, {resta} s (attesi {secondi})");
+        if (st.GetValueOrDefault("stato") == "Resting" && resta <= secondi && resta >= secondi - 60) return true;
+        Console.WriteLine($"  FALLITA: {quando} il santuario doveva riposare {secondi} secondi");
+        return false;
     }
 
     public static bool Santuario(string[] tokens, string host, int port)
@@ -2509,6 +2587,36 @@ static class Regole
             if (custodeAperto.GetValueOrDefault("stato") != "dorme")
             { Console.WriteLine("  FALLITA: con l'ingresso aperto il Custode non dorme"); ok = false; }
 
+            // --- finche' il Custode vive il centro del mondo non accetta offerte
+            // (B4): con l'ingresso aperto dorme, e rifiuta lo stesso.
+            if (!RifiutaFincheVive(capo, "con l'ingresso aperto")) ok = false;
+
+            capo.Admin("santuario chiudi");
+            // Alla chiusura il Custode si sveglia, con la fascia della terra al
+            // 20% (dal 5% al 25%: 400 di vita per giocatore, danno 35) e la
+            // vita per gli undici dentro.
+            var custodeChiuso = StatoCustode(capo);
+            var lotta = capo.StatoSantuario();
+            Console.WriteLine($"  il Custode alla chiusura, in undici dentro: {Sonda.Descrivi(custodeChiuso)}; santuario {lotta.GetValueOrDefault("stato")}");
+            if (custodeChiuso.GetValueOrDefault("stato") != "sveglio" || Sonda.Numero(custodeChiuso, "fascia") != 1
+                || Sonda.Numero(custodeChiuso, "piena") != 4400 || Sonda.Numero(custodeChiuso, "danno") != 35)
+            { Console.WriteLine("  FALLITA: alla chiusura il Custode doveva svegliarsi con fascia 1, vita 4400 e danno 35"); ok = false; }
+            if (lotta.GetValueOrDefault("stato") != "Fight")
+            { Console.WriteLine("  FALLITA: alla chiusura il santuario non e' in lotta col Custode"); ok = false; }
+            if (!RifiutaFincheVive(capo, "col Custode sveglio")) ok = false;
+
+            // --- le sonde lo battono: indebolito d'ufficio, il capo lo finisce a
+            // pugni. Si apre la finestra per offrire.
+            bool battuto = BattiIlCustode(capo);
+            var finestra = capo.StatoSantuario();
+            Console.WriteLine($"  Custode battuto a pugni={battuto}; santuario {finestra.GetValueOrDefault("stato")}, " +
+                              $"offerte per {finestra.GetValueOrDefault("offerte")} s");
+            if (!battuto) { Console.WriteLine("  FALLITA: la sonda non e' riuscita a battere il Custode indebolito"); ok = false; }
+            if (finestra.GetValueOrDefault("stato") != "Offering" || Sonda.Numero(finestra, "offerte") is < 55 or > 60)
+            { Console.WriteLine("  FALLITA: battuto il Custode non si e' aperta la finestra di un minuto per offrire"); ok = false; }
+            // Chi il Custode ha mandato a terra non potrebbe offrire.
+            RialzaTutte(ps);
+
             // --- offerte; il fuggiasco offre ed esce
             capo.Rituale(CentroDelMondo, CrystalType.Precursor);
             epico.Rituale(CentroDelMondo, CrystalType.Epic);
@@ -2520,15 +2628,8 @@ static class Regole
             fuggiasco.Admin("tp 30 30");
             fuggiasco.Attendi(() => Dist(fuggiasco.X, fuggiasco.Z, 30, 30) < 2f, 6);
 
+            // Finisce la finestra: il rituale si compie con chi e' dentro.
             capo.Admin("santuario chiudi");
-            // Alla chiusura il Custode si sveglia, con la fascia della terra al
-            // 20% (dal 5% al 25%: 400 di vita per giocatore, danno 35) e la
-            // vita per i dieci rimasti dentro.
-            var custodeChiuso = StatoCustode(capo);
-            Console.WriteLine($"  il Custode alla chiusura, in dieci dentro: {Sonda.Descrivi(custodeChiuso)}");
-            if (custodeChiuso.GetValueOrDefault("stato") != "sveglio" || Sonda.Numero(custodeChiuso, "fascia") != 1
-                || Sonda.Numero(custodeChiuso, "piena") != 4000 || Sonda.Numero(custodeChiuso, "danno") != 35)
-            { Console.WriteLine("  FALLITA: alla chiusura il Custode doveva svegliarsi con fascia 1, vita 4000 e danno 35"); ok = false; }
             capo.Attendi(() => ChunkPiuArido(capo) > 100, 6);
             foreach (var p in ps) p.Attendi(() => false, 0.3);
             int arido = ChunkPiuArido(capo);
@@ -2540,6 +2641,7 @@ static class Regole
             { Console.WriteLine("  FALLITA: i cristalli offerti non sono stati impiegati"); ok = false; }
             if (fuggiasco.Cristalli(CrystalType.Epic) != 1)
             { Console.WriteLine("  FALLITA: chi e' uscito prima ha perso il cristallo"); ok = false; }
+            if (!RiposaPer(capo, 3600, "dopo la riparazione")) ok = false;
 
             // --- a riposo, e lo sa solo chi e' sull'isola centrale. Lontano
             // dall'isola, senza carestia, non si sa nemmeno dove sta; con la
@@ -2589,6 +2691,9 @@ static class Regole
             AllIngresso(ps.Take(10).ToArray());
             capo.Attendi(() => false, 2.5);
             foreach (var p in ps.Take(10)) Entra(p);
+            capo.Admin("santuario chiudi");
+            StatoCustode(capo, "uccidi");   // battuto: si apre la finestra
+            RialzaTutte(ps);
             capo.Rituale(CentroDelMondo, CrystalType.Precursor);
             epico.Rituale(CentroDelMondo, CrystalType.Epic);
             capo.Attendi(() => capo.UltimoRituale?.Accepted == true, 4);
@@ -2675,26 +2780,62 @@ static class Regole
             epico.Admin("give Crystal 1 Epic");
             bool nove = ApriInNove();
             capo.Admin("santuario chiudi");
-            capo.Attendi(() => false, 1.0);
-            Console.WriteLine($"  in nove, nessuna offerta: entrati={nove}, Precursore {capo.Cristalli(CrystalType.Precursor)}, " +
-                              $"Epico {epico.Cristalli(CrystalType.Epic)}");
             if (!nove) { Console.WriteLine("  FALLITA: non si e' aperto per i nove"); ok = false; }
-            if (capo.Cristalli(CrystalType.Precursor) != 1 || epico.Cristalli(CrystalType.Epic) != 1)
-            { Console.WriteLine("  FALLITA: senza offerte qualcuno ha perso un cristallo"); ok = false; }
 
             // Anche qui il Custode si e' svegliato, coi nove e la terra al 100%:
             // 600 per giocatore.
             var custodeNove = StatoCustode(capo);
-            Console.WriteLine($"  il Custode, in nove senza offerte: {Sonda.Descrivi(custodeNove)}");
+            Console.WriteLine($"  il Custode, in nove: {Sonda.Descrivi(custodeNove)}");
             if (custodeNove.GetValueOrDefault("stato") != "sveglio" || Sonda.Numero(custodeNove, "piena") != 5400)
             { Console.WriteLine("  FALLITA: in nove con la terra al 100% il Custode doveva svegliarsi con vita 5400"); ok = false; }
 
-            // Niente riposo: si riapre subito, e stavolta si offre.
+            // --- vince il Custode (B4): tutti e nove a terra nello stesso
+            // momento. Fuori tutti, in piedi e con lo zaino intatto, il Custode a
+            // vita piena, e mezz'ora di riposo.
+            foreach (var p in ps.Take(9)) p.Admin("aterra cadi");
+            capo.Attendi(() => false, 2.0);
+            Aggiorna(ps);
+            var vinto = StatoCustode(capo);
+            int fuori = ps.Take(9).Count(p => !Dentro(p) && Dist(p.X, p.Z, IngressoXZ, IngressoXZ) < 3f);
+            int inPiedi = ps.Take(9).Count(p => !p.Stato(p.Id).ATerra);
+            Console.WriteLine($"  tutti e nove a terra: fuori davanti all'ingresso {fuori}/9, in piedi {inPiedi}/9, " +
+                              $"Precursore {capo.Cristalli(CrystalType.Precursor)}, Epico {epico.Cristalli(CrystalType.Epic)}; " +
+                              $"custode {Sonda.Descrivi(vinto)}");
+            if (fuori != 9 || inPiedi != 9)
+            { Console.WriteLine("  FALLITA: vinto il Custode, il santuario non ha rimesso fuori tutti in piedi"); ok = false; }
+            if (capo.Cristalli(CrystalType.Precursor) != 1 || epico.Cristalli(CrystalType.Epic) != 1)
+            { Console.WriteLine("  FALLITA: vinto il Custode, qualcuno ha perso un cristallo"); ok = false; }
+            if (vinto.GetValueOrDefault("stato") != "dorme" || Sonda.Numero(vinto, "vita") != Sonda.Numero(vinto, "piena"))
+            { Console.WriteLine("  FALLITA: vinto, il Custode non dorme a vita piena"); ok = false; }
+            if (!RiposaPer(capo, 1800, "dopo la vittoria del Custode")) ok = false;
+
+            // --- battuto, ma nessuno offre: tre ore di riposo, nessun cristallo perso
+            capo.Admin("santuario riposo");
+            RialzaTutte(ps);
+            bool noveDiNuovo = ApriInNove();
+            capo.Admin("santuario chiudi");
+            StatoCustode(capo, "uccidi");
+            capo.UltimoRituale = null;
+            capo.Admin("santuario chiudi");
+            capo.Attendi(() => capo.UltimoRituale != null, 3);
+            Console.WriteLine($"  in nove, battuto senza offerte: entrati={noveDiNuovo}, Precursore {capo.Cristalli(CrystalType.Precursor)}, " +
+                              $"Epico {epico.Cristalli(CrystalType.Epic)}, risposta \"{capo.UltimoRituale?.Refusal}\"");
+            if (!noveDiNuovo) { Console.WriteLine("  FALLITA: finito il riposo non si e' riaperto per i nove"); ok = false; }
+            if (capo.Cristalli(CrystalType.Precursor) != 1 || epico.Cristalli(CrystalType.Epic) != 1)
+            { Console.WriteLine("  FALLITA: senza offerte qualcuno ha perso un cristallo"); ok = false; }
+            if (capo.UltimoRituale?.Refusal?.Contains("nessuno ha offerto") != true)
+            { Console.WriteLine("  FALLITA: battuto senza offerte, il santuario non l'ha detto"); ok = false; }
+            if (!RiposaPer(capo, 3 * 3600, "battuto senza offerte")) ok = false;
+
+            // --- ora si offre: rituale incompleto.
             // Nessun Echo d'altre prove in giro: si contano quelli del rito.
+            capo.Admin("santuario riposo");
             capo.StatoEchi("uccidi");
-            foreach (var p in ps) p.Admin("tp 30 30");
             RialzaTutte(ps);
             bool noveAncora = ApriInNove();
+            capo.Admin("santuario chiudi");
+            StatoCustode(capo, "uccidi");
+            RialzaTutte(ps);
             capo.Rituale(CentroDelMondo, CrystalType.Precursor);
             epico.Rituale(CentroDelMondo, CrystalType.Epic);
             capo.Attendi(() => capo.UltimoRituale?.Accepted == true, 4);
@@ -2703,10 +2844,11 @@ static class Regole
             capo.Attendi(() => capo.Cristalli(CrystalType.Precursor) == 0, 6);
             epico.Attendi(() => epico.Cristalli(CrystalType.Epic) == 0, 3);
             capo.Attendi(() => capo.UltimoRituale?.Bane != null, 3);
-            Console.WriteLine($"  in nove, con le offerte: riaperto subito={noveAncora}, Precursore {capo.Cristalli(CrystalType.Precursor)}, " +
+            Console.WriteLine($"  in nove, con le offerte: riaperto={noveAncora}, Precursore {capo.Cristalli(CrystalType.Precursor)}, " +
                               $"Epico {epico.Cristalli(CrystalType.Epic)}, chunk piu' arido {ChunkPiuArido(capo)}/255, " +
                               $"risposta \"{capo.UltimoRituale?.Bane}\"");
-            if (!noveAncora) { Console.WriteLine("  FALLITA: dopo un rituale mai partito il santuario riposa"); ok = false; }
+            if (!noveAncora) { Console.WriteLine("  FALLITA: finito il riposo non si e' riaperto per i nove"); ok = false; }
+            if (!RiposaPer(capo, 3600, "dopo il rituale incompleto")) ok = false;
             if (capo.Cristalli(CrystalType.Precursor) != 0 || epico.Cristalli(CrystalType.Epic) != 0)
             { Console.WriteLine("  FALLITA: nel rituale incompleto i cristalli offerti non si sono persi"); ok = false; }
             if (ChunkPiuArido(capo) != 255)
