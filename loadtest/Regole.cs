@@ -1635,6 +1635,104 @@ static class Regole
         return true;
     }
 
+    // ---- zaino e creature ------------------------------------------------------
+    //
+    // Decisione di Tommaso (5 novembre, backlog A12): sbranati da una belva
+    // normale si perde lo zaino solo sull'isola centrale; uccisi dall'orda del
+    // santuario o dagli Echi lo si perde sempre, dovunque. Quattro morti, ognuna
+    // in un punto suo: la roba caduta da una morte non deve finire nello zaino
+    // della prova dopo (si raccoglie passandoci sopra).
+    //
+    // La sonda ha un punto di vita, cosi muore al primo colpo. Il segno di prova
+    // si toglie solo per le belve normali: l'orda e gli Echi lo ignorano, e
+    // senza segno un lupo qualunque di passaggio potrebbe uccidere la sonda al
+    // posto loro.
+
+    public static bool ZainoECreature(string token, string host, int port)
+    {
+        Console.WriteLine("--- zaino e creature: belve sull'isola, orda ed Echi lo fanno perdere; una belva fuori no");
+
+        using var s = new Sonda(token, host, port);
+        if (!s.AttendiPronta()) { Console.WriteLine("  FALLITA: la sonda non e' entrata in gioco"); return false; }
+
+        bool ok = true;
+        ok &= MorteDaCreatura(s, "lupo fuori dall'isola",        320f, -270f, "lupo",  perde: false);
+        ok &= MorteDaCreatura(s, "lupo sull'isola centrale",     -25f,  -35f, "lupo",  perde: true);
+        ok &= MorteDaCreatura(s, "lupo dell'orda fuori dall'isola", 335f, -285f, "orda", perde: true);
+        ok &= MorteDaCreatura(s, "Echi fuori dall'isola",        305f, -275f, "echi",  perde: true);
+        if (ok) Console.WriteLine("  OK: lo zaino si perde dove deve, e solo li'");
+        return ok;
+    }
+
+    static bool MorteDaCreatura(Sonda s, string nome, float px, float pz, string chi, bool perde)
+    {
+        float Vita() { lock (s.Mondo) return s.Mondo.TryGetValue(s.Id, out var e) ? e.Extra0 : -1f; }
+
+        s.Admin($"tp {px.ToString(Inv)} {pz.ToString(Inv)}");
+        if (!s.Attendi(() => Dist(s.X, s.Z, px, pz) < 2f, 8))
+        { Console.WriteLine($"  FALLITA ({nome}): teletrasporto non arrivato"); return false; }
+        s.Cammina(0f, 0f, 0.1);
+        s.Admin("clearinv");
+        s.Admin("give Wood 20");
+        if (!s.Attendi(() => s.Quanti(ItemType.Wood) == 20, 8))
+        { Console.WriteLine($"  FALLITA ({nome}): preparazione dello zaino non riuscita (legno {s.Quanti(ItemType.Wood)})"); return false; }
+        s.Admin("sethp 1");
+        s.Attendi(() => false, 0.5);
+
+        ulong idBelva = 0;
+        if (chi == "lupo" && s.ChiediAdmin("segnoprova no", "segno di prova: ") != "no")
+        { Console.WriteLine($"  FALLITA ({nome}): il segno non si toglie"); return false; }
+
+        bool ok = true;
+        try
+        {
+            if (chi == "echi") s.Admin("echi evoca Common");
+            else
+            {
+                s.Admin(chi == "orda" ? "spawn wolf orda" : "spawn wolf");
+                EntityState lupo = null;
+                s.Attendi(() =>
+                {
+                    lupo = s.PiuVicina(EntityType.Wolf, px + 2f, pz);
+                    return lupo != null && Dist(lupo.X, lupo.Z, px + 2f, pz) < 1.5f;
+                }, 5);
+                // Il lupo dell'orda caccia subito: puo' essere gia' a qualche
+                // metro quando la sonda lo vede.
+                if (lupo != null && Dist(lupo.X, lupo.Z, px, pz) < 6f) idBelva = lupo.EntityId;
+            }
+
+            bool morta = s.Attendi(() => Vita() == 0f, 20);
+            if (!morta)
+            {
+                Console.WriteLine($"  FALLITA ({nome}): la sonda non e' morta in 20 secondi (vita {Vita()})");
+                return false;
+            }
+            // Si rinasce dopo tre secondi; lo zaino si svuota nello stesso tick
+            // della morte. Un secondo in piu' per i messaggi in volo.
+            s.Attendi(() => Vita() > 0f, 10);
+            s.Attendi(() => false, 1);
+
+            // Cosa cade a terra non si guarda: la sonda e' gia' rinata altrove e
+            // da li' non vede il punto della morte. Lo dice il log del server
+            // ("[MORTE] ... perde tutto: N a terra").
+            int legno = s.Quanti(ItemType.Wood);
+            Console.WriteLine($"  {nome}: morta, legno 20 -> {legno}");
+            if (perde && legno != 0) { Console.WriteLine($"  FALLITA ({nome}): lo zaino doveva svuotarsi"); ok = false; }
+            if (!perde && legno != 20) { Console.WriteLine($"  FALLITA ({nome}): lo zaino doveva restare intatto"); ok = false; }
+        }
+        finally
+        {
+            if (chi == "lupo") s.ChiediAdmin("segnoprova si", "segno di prova: ");
+            if (idBelva != 0) s.Admin($"remove {idBelva}");
+            // Un lupo dell'orda rimasto in vita terrebbe il santuario a riposo.
+            if (chi == "orda") s.Admin("santuario orda uccidi");
+            if (chi == "echi") s.Admin("echi uccidi");
+            s.Admin("sethp 1000");
+            s.Attendi(() => false, 0.5);
+        }
+        return ok;
+    }
+
     // ---- 15. carestia ----------------------------------------------------------
     //
     // Decisa da Tommaso al posto della fine del mondo del ramo: sotto il 5% la
