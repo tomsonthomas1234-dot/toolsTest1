@@ -3179,6 +3179,137 @@ static class Regole
         return ok;
     }
 
+    // ---- 15b4. il bottino del Custode ---------------------------------------------
+    //
+    // Backlog B6 (decisioni/boss.md): battuto, il Custode lascia a terra dentro
+    // il santuario un bottino che cresce quando la vitalita cala; mai cristalli
+    // Precursore; in era rigogliosa non raddoppia. E a tutti i collegati arriva
+    // una voce nel registro con le fazioni che l'hanno vinto, senza nomi.
+    //
+    // Una sonda dentro, a 7 metri dal centro (le pile cadono fra 2,5 e 5 metri
+    // dal Custode: non le raccoglie passando), l'altra fuori, lontana. Il
+    // Custode si batte d'ufficio ("custode uccidi") nelle quattro fasce; dopo
+    // ogni bottino le pile si tolgono con "remove", per non lasciarle alle
+    // prove che vengono dopo. Quantita attese: quelle di Keeper.Loot, tutte
+    // provvisorie: se si tarano, qui si cambiano insieme.
+
+    public static bool BottinoDelCustode(string tokenA, string tokenB, string host, int port)
+    {
+        Console.WriteLine("--- bottino del Custode: cresce quando la terra e' povera, mai Precursori, non raddoppia, e il mondo sa chi l'ha vinto");
+
+        using var a = new Sonda(tokenA, host, port);
+        using var b = new Sonda(tokenB, host, port);
+        if (!a.AttendiPronta() || !b.AttendiPronta()) { Console.WriteLine("  FALLITA: le sonde non sono entrate in gioco"); return false; }
+
+        bool ok = true;
+        float dentroXZ = CentroXZ - 7f * Diag;
+        string nomeA = a.ChiediAdmin("unico chi", "unico: ");
+        string nomeB = b.ChiediAdmin("unico chi", "unico: ");
+        // Cristalli per grado (sottotipo 1..4) e risorse per tipo.
+        const int Comune = 1, Raro = 2, Epico = 3, Precursore = 4;
+        var fasce = new (string Vit, int Fascia, string Nome, int Legno, int Comuni, int Rari, int EpiciMin, int EpiciMax)[]
+        {
+            ("0.02",  0, "carestia",       80, 0, 5, 2, 3),
+            ("0.2",   1, "terra povera",   40, 5, 3, 1, 1),
+            ("0.625", 2, "terra viva",     20, 3, 0, 0, 0),
+            ("1.2",   3, "era rigogliosa", 20, 3, 0, 0, 0),   // come la terra viva: niente raddoppio
+        };
+
+        List<EntityState> PileDentro()
+        {
+            lock (a.Mondo) return a.Mondo.Values
+                .Where(e => e.Type == EntityType.DroppedItem && Dist(e.X, e.Z, CentroXZ, CentroXZ) <= 9f)
+                .ToList();
+        }
+
+        try
+        {
+            a.Admin("santuario angolo 0");
+            a.Admin("santuario riposo");
+            a.Admin("custode dormi");
+            MettiIn(a, dentroXZ, dentroXZ);
+            b.Admin("aterra rialza");
+            b.Admin("tp 30 30");
+            b.Attendi(() => Dist(b.X, b.Z, 30f, 30f) < 2f, 6);
+            a.Attendi(() => false, 1.5);
+            if (!Dentro(a)) { Console.WriteLine("  FALLITA: la sonda non e' dentro il santuario"); ok = false; }
+
+            // Pile gia' a terra nel santuario (di prove di prima): non contano.
+            var giaLi = PileDentro().Select(e => e.EntityId).ToHashSet();
+            if (giaLi.Count > 0) Console.WriteLine($"  pile gia' a terra nel santuario prima della prova: {giaLi.Count}, non contano");
+
+            foreach (var (vit, fascia, nome, legno, comuni, rari, epMin, epMax) in fasce)
+            {
+                a.Admin($"setvitality {vit}");
+                a.Admin("santuario riposo");
+                a.Attendi(() => Sonda.Numero(StatoCustode(a), "fascia") == fascia, 5);
+                var prima = StatoCustode(a);
+                if (prima.GetValueOrDefault("stato") != "dorme" || Sonda.Numero(prima, "fascia") != fascia)
+                { Console.WriteLine($"  FALLITA: terra a {vit}: il Custode non dorme con la fascia {fascia} ({Sonda.Descrivi(prima)})"); ok = false; continue; }
+
+                int voceA0, voceB0;
+                lock (a.Eventi) voceA0 = a.Eventi.Count(e => e.Kind == WorldEventKind.KeeperDefeated);
+                lock (b.Eventi) voceB0 = b.Eventi.Count(e => e.Kind == WorldEventKind.KeeperDefeated);
+
+                StatoCustode(a, "uccidi");
+                a.Attendi(() => PileDentro().Count(e => !giaLi.Contains(e.EntityId)) >= 4, 5);
+                a.Attendi(() => false, 0.7);   // tutte le pile nello stesso snapshot, ma con margine
+                var nuove = PileDentro().Where(e => !giaLi.Contains(e.EntityId)).ToList();
+
+                int Quanti(ItemType t, int sub = 0) => nuove.Where(e => e.Extra1 == (int)t && e.Extra3 == sub).Sum(e => (int)e.Extra2);
+                int c = Quanti(ItemType.Crystal, Comune), r = Quanti(ItemType.Crystal, Raro),
+                    ep = Quanti(ItemType.Crystal, Epico), pr = Quanti(ItemType.Crystal, Precursore);
+                int w = Quanti(ItemType.Wood);
+                float lontana = nuove.Count == 0 ? 0f : nuove.Max(e => Dist(e.X, e.Z, CentroXZ, CentroXZ));
+                Console.WriteLine($"  {nome} (terra a {vit}): {nuove.Count} pile, legno {w}, pietra {Quanti(ItemType.Stone)}, " +
+                                  $"cristalli comuni {c}, rari {r}, epici {ep}, precursori {pr}; la piu' lontana a {lontana:F1} m dal centro");
+
+                if (w != legno || c != comuni || r != rari || ep < epMin || ep > epMax)
+                { Console.WriteLine($"  FALLITA: {nome}: atteso legno {legno}, comuni {comuni}, rari {rari}, epici {epMin}-{epMax}"); ok = false; }
+                if (pr != 0) { Console.WriteLine($"  FALLITA: {nome}: il Custode ha lasciato cristalli Precursore"); ok = false; }
+                if (lontana > 8f) { Console.WriteLine($"  FALLITA: {nome}: una pila e' caduta fuori dal santuario"); ok = false; }
+
+                // La voce nel registro, a chi e' dentro e a chi e' lontano. Ogni
+                // sonda legge i suoi messaggi solo mentre aspetta: si aspettano
+                // tutte e due (giro 1: aspettava solo la prima, e la seconda
+                // sembrava non averla ricevuta).
+                bool arrivata =
+                    a.Attendi(() => { lock (a.Eventi) return a.Eventi.Count(e => e.Kind == WorldEventKind.KeeperDefeated) > voceA0; }, 5)
+                  & b.Attendi(() => { lock (b.Eventi) return b.Eventi.Count(e => e.Kind == WorldEventKind.KeeperDefeated) > voceB0; }, 5);
+                string testoA, testoB;
+                lock (a.Eventi) testoA = a.Eventi.LastOrDefault(e => e.Kind == WorldEventKind.KeeperDefeated)?.Text ?? "(niente)";
+                lock (b.Eventi) testoB = b.Eventi.LastOrDefault(e => e.Kind == WorldEventKind.KeeperDefeated)?.Text ?? "(niente)";
+                if (fascia == 0) Console.WriteLine($"  voce nel registro: \"{testoA}\"");
+                if (!arrivata || testoA != testoB || !testoA.Contains("fazione"))
+                { Console.WriteLine($"  FALLITA: {nome}: la voce del Custode battuto non e' arrivata a tutti e due (dentro: \"{testoA}\", fuori: \"{testoB}\")"); ok = false; }
+                if ((!string.IsNullOrWhiteSpace(nomeA) && testoA.Contains(nomeA)) || (!string.IsNullOrWhiteSpace(nomeB) && testoA.Contains(nomeB)))
+                { Console.WriteLine($"  FALLITA: {nome}: la voce dice il nome di un giocatore"); ok = false; }
+
+                // Via le pile, e si aspetta che non si vedano piu'.
+                foreach (var p in nuove) a.Admin($"remove {p.EntityId}");
+                var tolte = nuove.Select(p => p.EntityId).ToHashSet();
+                if (!a.Attendi(() => !PileDentro().Any(e => tolte.Contains(e.EntityId)), 5))
+                    Console.WriteLine("  attenzione: alcune pile del bottino sono ancora a terra");
+            }
+        }
+        finally
+        {
+            // Anche le pile lasciate nel santuario dalle prove di prima (il
+            // Custode battuto in "santuario" e "custode"): il mondo di prova
+            // resta pulito per chi viene dopo.
+            foreach (var p in PileDentro()) a.Admin($"remove {p.EntityId}");
+            a.Admin("santuario riposo");
+            a.Admin("custode dormi");
+            a.Admin("setvitality 1");
+            a.Admin("tp 30 30");
+            a.Admin("sethp 1000");
+            b.Admin("sethp 1000");
+            a.Attendi(() => false, 1.2);
+        }
+        if (ok) Console.WriteLine("  OK: il bottino cresce quando la terra e' povera, mai Precursori, non raddoppia, e la voce arriva a tutti senza nomi");
+        return ok;
+    }
+
     // ---- 15c. l'era rigogliosa si consuma e raddoppia i drop -------------------
     //
     // Numeri di Tommaso (backlog A1a3b): l'eccedenza sopra il 100% se ne va da
