@@ -216,6 +216,29 @@ sealed class Sonda : IDisposable
         });
     }
 
+    /// Le armi e lo scudo che la sonda dice di portare (backlog B1: andare a
+    /// terra consuma cio' che si impugna).
+    public void Dotazione(ItemType arma1, ItemType arma2, SideItemType fianco) =>
+        Manda(NetMsgType.Command, new CommandMsg
+        {
+            CommandId = 8,
+            Type      = CommandType.ConfigureLoadout,
+            Payload   = MessagePack.MessagePackSerializer.Serialize(new ConfigureLoadoutCommand
+            {
+                Weapon1 = arma1, Weapon2 = arma2, Side = fianco,
+            }),
+        });
+
+    /// Lo stato di un giocatore visto da questa sonda: vita, a terra, morto.
+    /// Vita -1 se non lo vede.
+    public (float Vita, bool ATerra, bool Morto, float Secondi) Stato(ulong id)
+    {
+        lock (Mondo)
+            return Mondo.TryGetValue(id, out var e)
+                ? (e.Extra0, (e.Flags & PlayerFlags.Downed) != 0, (e.Flags & PlayerFlags.Dead) != 0, e.Extra2)
+                : (-1f, false, false, 0f);
+    }
+
     void MandaBaule(ChestTransferCommand cmd) =>
         Manda(NetMsgType.Command, new CommandMsg
         {
@@ -1502,7 +1525,7 @@ static class Regole
     // uccidevano le sonde a caso, e le prove fallivano per i lupi invece che
     // per la regola (backlog P1 e P1b). Qui si controlla che il segno ci sia e
     // che funzioni, e che togliendolo un lupo torni ad attaccare: altrimenti
-    // le prove che vogliono una belva vera (A12) non potrebbero farlo.
+    // le prove che vogliono una belva vera (B1, prima A12) non potrebbero farlo.
 
     public static bool SegnoDiProva(string token, string host, int port)
     {
@@ -1755,49 +1778,67 @@ static class Regole
         return ok;
     }
 
-    // ---- zaino e creature ------------------------------------------------------
+    // ---- a terra contro le creature ---------------------------------------------
     //
-    // Decisione di Tommaso (5 novembre, backlog A12): sbranati da una belva
-    // normale si perde lo zaino solo sull'isola centrale; uccisi dall'orda del
-    // santuario o dagli Echi lo si perde sempre, dovunque. Quattro morti, ognuna
-    // in un punto suo: la roba caduta da una morte non deve finire nello zaino
-    // della prova dopo (si raccoglie passandoci sopra).
+    // Decisione di Tommaso (5 novembre, backlog B1, che annulla A12): contro
+    // qualunque creatura non si muore, si va a terra 30 secondi e ci si rialza
+    // con meta' vita dove si e' caduti. Lo zaino resta sempre: anche sull'isola
+    // centrale, anche per l'orda e per gli Echi, dove con A12 si perdeva. Il
+    // costo e' il 10% della durabilita' massima di cio' che si impugna: la
+    // spada di pietra (55 usi) ne perde 6, lo scudo (80) ne perde 8.
     //
-    // La sonda ha un punto di vita, cosi muore al primo colpo. Il segno di prova
-    // si toglie solo per le belve normali: l'orda e gli Echi lo ignorano, e
-    // senza segno un lupo qualunque di passaggio potrebbe uccidere la sonda al
-    // posto loro.
+    // Quattro cadute, ognuna in un punto suo, come la prova di A12 che
+    // sostituisce. Nella prima c'e' anche un'altra sonda accanto: il lupo,
+    // mandata a terra la prima, passa a lei. E nella prima si aspetta che la
+    // sonda si rialzi da sola; nelle altre la si rialza d'ufficio.
+    //
+    // La sonda ha un punto di vita, cosi' va a terra al primo colpo. Il segno di
+    // prova si toglie solo per le belve normali: l'orda e gli Echi lo ignorano.
 
-    public static bool ZainoECreature(string token, string host, int port)
+    public static bool ATerraControLeCreature(string token, string tokenAltro, string host, int port)
     {
-        Console.WriteLine("--- zaino e creature: belve sull'isola, orda ed Echi lo fanno perdere; una belva fuori no");
+        Console.WriteLine("--- a terra contro le creature: niente morte, zaino intatto, usura, e ci si rialza");
 
         using var s = new Sonda(token, host, port);
-        if (!s.AttendiPronta()) { Console.WriteLine("  FALLITA: la sonda non e' entrata in gioco"); return false; }
+        using var o = new Sonda(tokenAltro, host, port);
+        if (!s.AttendiPronta() || !o.AttendiPronta())
+        { Console.WriteLine("  FALLITA: le sonde non sono entrate in gioco"); return false; }
 
         bool ok = true;
-        ok &= MorteDaCreatura(s, "lupo fuori dall'isola",        320f, -270f, "lupo",  perde: false);
-        ok &= MorteDaCreatura(s, "lupo sull'isola centrale",     -25f,  -35f, "lupo",  perde: true);
-        ok &= MorteDaCreatura(s, "Eco dell'orda fuori dall'isola", 335f, -285f, "orda", perde: true);
-        ok &= MorteDaCreatura(s, "Echi fuori dall'isola",        305f, -275f, "echi",  perde: true);
-        if (ok) Console.WriteLine("  OK: lo zaino si perde dove deve, e solo li'");
+        ok &= ATerraPerUnaCreatura(s, o,    "lupo fuori dall'isola",          320f, -270f, "lupo");
+        ok &= ATerraPerUnaCreatura(s, null, "lupo sull'isola centrale",       -25f,  -35f, "lupo");
+        ok &= ATerraPerUnaCreatura(s, null, "Eco dell'orda fuori dall'isola", 335f, -285f, "orda");
+        ok &= ATerraPerUnaCreatura(s, null, "Echi fuori dall'isola",          305f, -275f, "echi");
+        if (ok) Console.WriteLine("  OK: contro le creature si va a terra, lo zaino resta, si paga in usura e ci si rialza");
         return ok;
     }
 
-    static bool MorteDaCreatura(Sonda s, string nome, float px, float pz, string chi, bool perde)
+    /// Con <paramref name="altra"/> si prova anche che la belva passa a lei e
+    /// che ci si rialza da soli dopo 30 secondi.
+    static bool ATerraPerUnaCreatura(Sonda s, Sonda altra, string nome, float px, float pz, string chi)
     {
-        float Vita() { lock (s.Mondo) return s.Mondo.TryGetValue(s.Id, out var e) ? e.Extra0 : -1f; }
+        void Gira() => altra?.Poll();
 
         s.Admin($"tp {px.ToString(Inv)} {pz.ToString(Inv)}");
-        if (!s.Attendi(() => Dist(s.X, s.Z, px, pz) < 2f, 8))
+        altra?.Admin($"tp {(px - 5f).ToString(Inv)} {pz.ToString(Inv)}");
+        if (!s.Attendi(() => { Gira(); return Dist(s.X, s.Z, px, pz) < 2f && (altra == null || Dist(altra.X, altra.Z, px - 5f, pz) < 2f); }, 8))
         { Console.WriteLine($"  FALLITA ({nome}): teletrasporto non arrivato"); return false; }
         s.Cammina(0f, 0f, 0.1);
+        altra?.Cammina(0f, 0f, 0.1);
         s.Admin("clearinv");
         s.Admin("give Wood 20");
-        if (!s.Attendi(() => s.Quanti(ItemType.Wood) == 20, 8))
+        s.Admin("give StoneSword 1");
+        s.Admin("give Shield 1");
+        if (!s.Attendi(() => s.Quanti(ItemType.Wood) == 20 && s.Quanti(ItemType.Shield) == 1 && s.Quanti(ItemType.StoneSword) == 1, 8))
         { Console.WriteLine($"  FALLITA ({nome}): preparazione dello zaino non riuscita (legno {s.Quanti(ItemType.Wood)})"); return false; }
+        s.Dotazione(ItemType.StoneSword, ItemType.None, SideItemType.Shield);
+        s.Attendi(() => false, 0.3);
+        string usuraPrima = s.ChiediAdmin("aterra usura", "a terra: ");
+        if (usuraPrima != "usura StoneSword=55/55 Shield=80/80")
+        { Console.WriteLine($"  FALLITA ({nome}): dotazione non pronta ('{usuraPrima}')"); return false; }
         s.Admin("sethp 1");
-        s.Attendi(() => false, 0.5);
+        s.Attendi(() => { Gira(); return false; }, 0.5);
+        float cadeX = s.X, cadeZ = s.Z;
 
         ulong idBelva = 0;
         if (chi == "lupo" && s.ChiediAdmin("segnoprova no", "segno di prova: ") != "no")
@@ -1816,6 +1857,7 @@ static class Regole
                 EntityState lupo = null;
                 s.Attendi(() =>
                 {
+                    Gira();
                     lupo = s.PiuVicina(tipo, px + 2f, pz);
                     return lupo != null && Dist(lupo.X, lupo.Z, px + 2f, pz) < 1.5f;
                 }, 5);
@@ -1824,24 +1866,57 @@ static class Regole
                 if (lupo != null && Dist(lupo.X, lupo.Z, px, pz) < 6f) idBelva = lupo.EntityId;
             }
 
-            bool morta = s.Attendi(() => Vita() == 0f, 20);
-            if (!morta)
+            bool caduta = s.Attendi(() => { Gira(); return s.Stato(s.Id).ATerra; }, 20);
+            var st = s.Stato(s.Id);
+            if (!caduta)
             {
-                Console.WriteLine($"  FALLITA ({nome}): la sonda non e' morta in 20 secondi (vita {Vita()})");
+                Console.WriteLine($"  FALLITA ({nome}): la sonda non e' andata a terra in 20 secondi (vita {st.Vita}, morta {st.Morto})");
                 return false;
             }
-            // Si rinasce dopo tre secondi; lo zaino si svuota nello stesso tick
-            // della morte. Un secondo in piu' per i messaggi in volo.
-            s.Attendi(() => Vita() > 0f, 10);
-            s.Attendi(() => false, 1);
-
-            // Cosa cade a terra non si guarda: la sonda e' gia' rinata altrove e
-            // da li' non vede il punto della morte. Lo dice il log del server
-            // ("[MORTE] ... perde tutto: N a terra").
+            // Un attimo per l'usura (si toglie a fine tick) e per i messaggi.
+            s.Attendi(() => { Gira(); return false; }, 1.0);
+            st = s.Stato(s.Id);
+            string risposta = s.ChiediAdmin("aterra", "a terra: ");
+            string usura = s.ChiediAdmin("aterra usura", "a terra: ");
             int legno = s.Quanti(ItemType.Wood);
-            Console.WriteLine($"  {nome}: morta, legno 20 -> {legno}");
-            if (perde && legno != 0) { Console.WriteLine($"  FALLITA ({nome}): lo zaino doveva svuotarsi"); ok = false; }
-            if (!perde && legno != 20) { Console.WriteLine($"  FALLITA ({nome}): lo zaino doveva restare intatto"); ok = false; }
+            float spostata = Dist(s.X, s.Z, cadeX, cadeZ);
+            Console.WriteLine($"  {nome}: a terra={st.ATerra}, morta={st.Morto}, vita {st.Vita}, secondi {st.Secondi} " +
+                              $"(server: '{risposta}'), legno 20 -> {legno}, {usura}, spostata di {spostata:F1} m");
+            if (st.Morto || st.Vita != 0f) { Console.WriteLine($"  FALLITA ({nome}): doveva essere a terra con zero vita, non morta"); ok = false; }
+            if (st.Secondi < 25f || st.Secondi > 30f) { Console.WriteLine($"  FALLITA ({nome}): i secondi al rialzarsi non tornano"); ok = false; }
+            if (legno != 20 || s.Quanti(ItemType.StoneSword) != 1 || s.Quanti(ItemType.Shield) != 1)
+            { Console.WriteLine($"  FALLITA ({nome}): lo zaino doveva restare intatto"); ok = false; }
+            if (usura != "usura StoneSword=49/55 Shield=72/80")
+            { Console.WriteLine($"  FALLITA ({nome}): l'usura doveva essere il 10% del massimo (spada 49, scudo 72)"); ok = false; }
+            if (spostata > 1.5f) { Console.WriteLine($"  FALLITA ({nome}): chi e' a terra non resta dove e' caduto"); ok = false; }
+
+            if (altra != null)
+            {
+                // La belva passa all'altra sonda, appena le si toglie il segno.
+                altra.ChiediAdmin("segnoprova no", "segno di prova: ");
+                float vitaAltra = Vita(altra, altra.Id);
+                bool morsa = s.Attendi(() => { Gira(); return Vita(altra, altra.Id) < vitaAltra; }, 12);
+                var dopo = s.Stato(s.Id);
+                Console.WriteLine($"  il lupo passa all'altra: morsa={morsa} (vita {vitaAltra} -> {Vita(altra, altra.Id)}); " +
+                                  $"la prima resta a terra={dopo.ATerra} con vita {dopo.Vita}");
+                if (!morsa) { Console.WriteLine($"  FALLITA ({nome}): il lupo non e' passato a chi e' in piedi"); ok = false; }
+                if (!dopo.ATerra || dopo.Vita != 0f) { Console.WriteLine($"  FALLITA ({nome}): chi e' a terra e' stato toccato"); ok = false; }
+                if (idBelva != 0) { s.Admin($"remove {idBelva}"); idBelva = 0; }
+                altra.ChiediAdmin("segnoprova si", "segno di prova: ");
+                altra.Admin("aterra rialza");
+                altra.Admin("sethp 1000");
+
+                // E ci si rialza da soli, dove si era caduti, con meta' vita.
+                bool rialzata = s.Attendi(() => { Gira(); return !s.Stato(s.Id).ATerra; }, 35);
+                s.Attendi(() => { Gira(); return false; }, 0.5);
+                var su = s.Stato(s.Id);
+                float spostataDopo = Dist(s.X, s.Z, cadeX, cadeZ);
+                Console.WriteLine($"  dopo mezzo minuto: rialzata={rialzata}, vita {su.Vita}, morta={su.Morto}, " +
+                                  $"spostata di {spostataDopo:F1} m, legno {s.Quanti(ItemType.Wood)}");
+                if (!rialzata || su.Vita != 50f || su.Morto)
+                { Console.WriteLine($"  FALLITA ({nome}): dopo 30 secondi doveva rialzarsi con 50 di vita"); ok = false; }
+                if (spostataDopo > 1.5f) { Console.WriteLine($"  FALLITA ({nome}): non si e' rialzata dove era caduta"); ok = false; }
+            }
         }
         finally
         {
@@ -1850,8 +1925,10 @@ static class Regole
             // Un Eco dell'orda rimasto in vita terrebbe il santuario a riposo.
             if (chi == "orda") s.Admin("santuario orda uccidi");
             if (chi == "echi") s.Admin("echi uccidi");
+            s.Attendi(() => { Gira(); return false; }, 0.3);
+            s.Admin("aterra rialza");
             s.Admin("sethp 1000");
-            s.Attendi(() => false, 0.5);
+            s.Attendi(() => { Gira(); return false; }, 0.5);
         }
         return ok;
     }
@@ -2313,6 +2390,16 @@ static class Regole
     /// essere dove l'ha lasciata l'ultima volta che ha guardato.
     static void Aggiorna(Sonda[] ps) { foreach (var p in ps) p.Attendi(() => false, 0.2); }
 
+    /// Rimette in piedi chi e' a terra (comando admin "aterra rialza", B1):
+    /// prima si aspettavano i tre secondi della rinascita, ora a terra si
+    /// resta mezzo minuto.
+    static void RialzaTutte(Sonda[] ps)
+    {
+        foreach (var p in ps) p.Admin("aterra rialza");
+        Aggiorna(ps);
+        ps[0].Attendi(() => false, 0.5);
+    }
+
     public static bool Santuario(string[] tokens, string host, int port)
     {
         Console.WriteLine("--- santuario: si apre alle condizioni, conta chi e' dentro, ripara solo sotto il 25%");
@@ -2550,8 +2637,9 @@ static class Regole
             // il santuario lascia il suo davanti all'ingresso: le sonde lo
             // raccoglierebbero nel passo dopo, che conta i cristalli di ognuna.
             capo.Admin("contacristalli azzera");
-            // Chi e' morto rinasce in tre secondi: le prove dopo lo vogliono vivo.
-            capo.Attendi(() => false, 4.0);
+            // Contro l'orda non si muore, si va a terra per 30 secondi (B1): le
+            // prove dopo vogliono le sonde in piedi, e le si rialza d'ufficio.
+            RialzaTutte(ps);
 
             // --- rituale incompleto (Tommaso, A1a3c2a): si apre in dieci, ne
             // entrano nove, e una fazione non ha piu' i suoi cinque. Senza
@@ -2620,12 +2708,13 @@ static class Regole
             if (ordaRito.GetValueOrDefault("orda") != "0" || ordaRito.GetValueOrDefault("capi") != "0")
             { Console.WriteLine("  FALLITA: il rito incompleto ha sprigionato l'orda"); ok = false; }
             var echiUccisi = capo.StatoEchi("uccidi");
-            // Il confronto e' con un attimo prima, non con prima del rito: chi
-            // muore per mano degli Echi lascia cadere lo zaino (A12).
+            // Il confronto e' con un attimo prima, non con prima del rito: e'
+            // rimasto cosi' da quando chi moriva per gli Echi lasciava cadere lo
+            // zaino (A12, annullato da B1).
             if (Sonda.Numero(echiUccisi, "cristalli alti a terra") != Sonda.Numero(echiRito, "cristalli alti a terra"))
             { Console.WriteLine($"  FALLITA: uccisi gli Echi del rito incompleto, e' caduto un cristallo: {Sonda.Descrivi(echiUccisi)}"); ok = false; }
-            // Chi e' stato ucciso rinasce in tre secondi.
-            capo.Attendi(() => false, 4.0);
+            // Chi e' andato a terra per gli Echi si rialza d'ufficio (B1).
+            RialzaTutte(ps);
 
             // E ora riposa: con tutte le condizioni resta chiuso.
             capo.Admin("give Crystal 1 Precursor");

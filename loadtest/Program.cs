@@ -139,7 +139,7 @@ if (modoRegole)
         ("terra che si consuma",    () => Regole.TerraSiConsuma(tokens[1], host, port)),
         ("segno di prova",          () => Regole.SegnoDiProva(tokens[1], host, port)),
         ("morire costa",            () => Regole.MorireCosta(tokens[1], host, port)),
-        ("zaino e creature",        () => Regole.ZainoECreature(tokens[1], host, port)),
+        ("a terra contro le creature", () => Regole.ATerraControLeCreature(tokens[1], tokens[0], host, port)),
         ("avvisi sugli unici",      () => Regole.AvvisiSugliUnici(tokens[1], tokens[0], host, port)),
         ("carestia",                () => Regole.Carestia(tokens[1], tokens[0], host, port)),
         ("echi",                    () => Regole.Echi(tokens[1], tokens[0], host, port)),
