@@ -1495,6 +1495,98 @@ static class Regole
     // Fino a ieri si rinasceva con lo zaino intatto. In un gioco dove il PvP e'
     // conquista era la scelta piu' forte del progetto, presa senza volerlo.
 
+    // ---- segno di prova --------------------------------------------------------
+    //
+    // Sul server delle prove ogni sonda nasce col segno di prova: lupi e
+    // cinghiali normali non la vedono. Prima le belve dell'isola centrale
+    // uccidevano le sonde a caso, e le prove fallivano per i lupi invece che
+    // per la regola (backlog P1 e P1b). Qui si controlla che il segno ci sia e
+    // che funzioni, e che togliendolo un lupo torni ad attaccare: altrimenti
+    // le prove che vogliono una belva vera (A12) non potrebbero farlo.
+
+    public static bool SegnoDiProva(string token, string host, int port)
+    {
+        Console.WriteLine("--- segno di prova: le belve normali non vedono le sonde, finche' il segno c'e'");
+
+        using var s = new Sonda(token, host, port);
+        if (!s.AttendiPronta()) { Console.WriteLine("  FALLITA: la sonda non e' entrata in gioco"); return false; }
+
+        float Vita() { lock (s.Mondo) return s.Mondo.TryGetValue(s.Id, out var e) ? e.Extra0 : -1f; }
+
+        const float PX = 310f, PZ = -290f;
+        s.Admin($"tp {PX.ToString(Inv)} {PZ.ToString(Inv)}");
+        if (!s.Attendi(() => Dist(s.X, s.Z, PX, PZ) < 2f, 8))
+        { Console.WriteLine("  FALLITA: teletrasporto non arrivato"); return false; }
+        s.Cammina(0f, 0f, 0.1);
+
+        string segno = s.ChiediAdmin("segnoprova", "segno di prova: ");
+        if (segno != "si") { Console.WriteLine($"  FALLITA: la sonda non nasce col segno (risposta: {segno ?? "nessuna"})"); return false; }
+
+        s.Admin("sethp 1000");
+        s.Attendi(() => false, 0.5);
+        float piena = Vita();
+
+        s.Admin("spawn wolf");
+        EntityState lupo = null;
+        s.Attendi(() =>
+        {
+            lupo = s.PiuVicina(EntityType.Wolf, s.X + 2f, s.Z);
+            return lupo != null && Dist(lupo.X, lupo.Z, s.X + 2f, s.Z) < 1f;
+        }, 5);
+        if (lupo == null || Dist(lupo.X, lupo.Z, s.X + 2f, s.Z) >= 1f)
+        { Console.WriteLine("  FALLITA: il lupo d'ufficio non e' comparso accanto alla sonda"); return false; }
+        ulong idLupo = lupo.EntityId;
+
+        bool ok = true;
+        try
+        {
+            // Col segno: dieci secondi accanto a un lupo, nessun morso. Il lupo
+            // vaga: ogni due secondi la sonda gli si rimette a un metro, se no
+            // "nessun morso" passerebbe anche perche' se n'e' andato.
+            float minima = piena, lontano = 0f;
+            for (int i = 0; i < 5; i++)
+            {
+                EntityState l;
+                lock (s.Mondo) s.Mondo.TryGetValue(idLupo, out l);
+                if (l != null)
+                {
+                    lontano = MathF.Max(lontano, Dist(l.X, l.Z, s.X, s.Z));
+                    s.Admin($"tp {(l.X + 1f).ToString(Inv)} {l.Z.ToString(Inv)}");
+                }
+                s.Attendi(() => { minima = MathF.Min(minima, Vita()); return false; }, 2);
+            }
+            Console.WriteLine($"  col segno: vita {piena} -> minima {minima} in 10 secondi accanto al lupo " +
+                              $"(al piu' {lontano:F1} m prima di riavvicinarsi)");
+            if (minima < piena) { Console.WriteLine("  FALLITA: il lupo ha morso una sonda col segno"); ok = false; }
+
+            // Senza segno: il lupo deve attaccare. In quei dieci secondi il lupo
+            // ha vagato per la sua tana (fino a 32 metri, oltre i 15 della
+            // caccia): la sonda gli si rimette accanto (giro 2 del 5 novembre).
+            if (s.ChiediAdmin("segnoprova no", "segno di prova: ") != "no")
+            { Console.WriteLine("  FALLITA: il segno non si toglie"); return false; }
+            EntityState oraLupo;
+            lock (s.Mondo) s.Mondo.TryGetValue(idLupo, out oraLupo);
+            if (oraLupo != null)
+            {
+                Console.WriteLine($"  il lupo ora e' a {Dist(oraLupo.X, oraLupo.Z, s.X, s.Z):F1} m: la sonda gli va accanto");
+                s.Admin($"tp {(oraLupo.X + 1f).ToString(Inv)} {oraLupo.Z.ToString(Inv)}");
+            }
+            bool morsa = s.Attendi(() => Vita() < piena, 10);
+            Console.WriteLine($"  senza segno: vita {Vita()}");
+            if (!morsa) { Console.WriteLine("  FALLITA: senza segno il lupo non ha attaccato"); ok = false; }
+        }
+        finally
+        {
+            s.ChiediAdmin("segnoprova si", "segno di prova: ");
+            s.Admin($"remove {idLupo}");
+            s.Admin("sethp 1000");
+            s.Attendi(() => false, 0.5);
+        }
+
+        if (ok) Console.WriteLine("  OK: col segno il lupo lascia stare la sonda, senza la morde");
+        return ok;
+    }
+
     public static bool MorireCosta(string token, string host, int port)
     {
         Console.WriteLine("--- morte: si perde quello che si porta");
@@ -1971,28 +2063,11 @@ static class Regole
         foreach (var p in ps) p.Admin($"tp {IngressoXZ.ToString(Inv)} {IngressoXZ.ToString(Inv)}");
         bool arrivate = ps.All(p => p.Attendi(() => Dist(p.X, p.Z, IngressoXZ, IngressoXZ) < 1.5f, 6));
         foreach (var p in ps) p.Cammina(0f, 0f, 0.1);
-        ScacciaBelve(ps[0]);
+        // Le belve dell'isola centrale non si scacciano piu: le sonde hanno il
+        // segno di prova e lupi e cinghiali normali non le vedono (backlog P1b).
+        // Prima uno di loro ne uccideva una davanti all'ingresso, e lei
+        // rinasceva allo stendardo a 210 metri (backlog P1).
         return arrivate;
-    }
-
-    /// <summary>
-    /// Via lupi e cinghiali da quello che la sonda vede. L'isola centrale e'
-    /// selvaggia: dieci sonde ferme per un minuto davanti all'ingresso venivano
-    /// sbranate una dopo l'altra e rinascevano allo stendardo, e la prova
-    /// misurava i lupi invece del santuario.
-    ///
-    /// Si chiede al server, col comando "belve", di toglierle tutte entro 120
-    /// metri. Prima si toglievano quelle a vista, ma la sonda vede solo le 32
-    /// entita' piu' vicine: un lupo poco piu' in la' restava, cacciava, e una
-    /// sonda rinasceva allo stendardo a 210 metri (backlog P1). 120 metri
-    /// coprono l'isola centrale piu' il territorio di un lupo (32) e il suo
-    /// raggio di caccia (15).
-    /// </summary>
-    static void ScacciaBelve(Sonda p)
-    {
-        p.Attendi(() => false, 0.5);
-        p.Admin("belve 120");
-        p.Attendi(() => false, 0.3);
     }
 
     /// Dieci metri verso il centro del mondo: dall'ingresso si finisce dentro,
@@ -2357,7 +2432,6 @@ static class Regole
         // raccoglie nessuno passandoci sopra.
         s.Admin("tp 1.25 11.25");
         s.Attendi(() => Dist(s.X, s.Z, 1.25f, 11.25f) < 2f, 8);
-        ScacciaBelve(s);
 
         // I cristalli si contano sul server, non a vista. Il server manda solo
         // le 32 entita' piu' vicine: con una ventina di cristalli gia' in vista
@@ -2390,19 +2464,32 @@ static class Regole
         // Un nodo di ferro e uno di pietra piantati d'ufficio, la' dove sta la
         // sonda: prima fuori dall'isola centrale, poi dentro.
         var piantati = new List<ulong>();
+        // Una volta, nel primo giro di A5, i nodi fuori dall'isola centrale non
+        // sono comparsi, e il log di quel giro non c'e' piu'. Come per la
+        // trappola: si scrive dov'era la sonda e cosa vedeva, e si ripianta una
+        // volta (backlog P1b). I nodi piantati due volte si tolgono tutti alla
+        // fine, con Ripulisci.
         (EntityState Ferro, EntityState Pietra) Pianta(float nx, float nz)
         {
-            s.Admin($"tp {nx.ToString(Inv)} {nz.ToString(Inv)}");
-            s.Attendi(() => Dist(s.X, s.Z, nx, nz) < 2f, 8);
-            s.Admin($"build IronNode {nx.ToString(Inv)} {(nz + 1f).ToString(Inv)}");
-            s.Admin($"build StoneNode {(nx + 1f).ToString(Inv)} {nz.ToString(Inv)}");
             EntityState f = null, p = null;
-            s.Attendi(() => (f = s.PiuVicina(EntityType.IronNode, nx, nz + 1f)) != null &&
-                            Dist(f.X, f.Z, nx, nz + 1f) < 1f &&
-                            (p = s.PiuVicina(EntityType.StoneNode, nx + 1f, nz)) != null &&
-                            Dist(p.X, p.Z, nx + 1f, nz) < 1f, 12);
-            if (f != null && Dist(f.X, f.Z, nx, nz + 1f) < 1f) piantati.Add(f.EntityId);
-            if (p != null && Dist(p.X, p.Z, nx + 1f, nz) < 1f) piantati.Add(p.EntityId);
+            bool Giusto(EntityState e, float x, float z) => e != null && Dist(e.X, e.Z, x, z) < 1f;
+            for (int tentativo = 1; tentativo <= 2; tentativo++)
+            {
+                s.Admin($"tp {nx.ToString(Inv)} {nz.ToString(Inv)}");
+                if (!s.Attendi(() => Dist(s.X, s.Z, nx, nz) < 2f, 8))
+                    Console.WriteLine($"  (nodi, tentativo {tentativo}: la sonda e' a ({s.X:F1}, {s.Z:F1}), non a ({nx}, {nz}))");
+                if (!Giusto(f, nx, nz + 1f)) s.Admin($"build IronNode {nx.ToString(Inv)} {(nz + 1f).ToString(Inv)}");
+                if (!Giusto(p, nx + 1f, nz)) s.Admin($"build StoneNode {(nx + 1f).ToString(Inv)} {nz.ToString(Inv)}");
+                s.Attendi(() => Giusto(f = s.PiuVicina(EntityType.IronNode, nx, nz + 1f), nx, nz + 1f) &&
+                                Giusto(p = s.PiuVicina(EntityType.StoneNode, nx + 1f, nz), nx + 1f, nz), 12);
+                if (Giusto(f, nx, nz + 1f) && Giusto(p, nx + 1f, nz)) break;
+                int viste; lock (s.Mondo) viste = s.Mondo.Count;
+                Console.WriteLine($"  (nodi, tentativo {tentativo}: ferro {(Giusto(f, nx, nz + 1f) ? "visto" : "non visto")}, " +
+                                  $"pietra {(Giusto(p, nx + 1f, nz) ? "vista" : "non vista")}; " +
+                                  $"sonda a ({s.X:F1}, {s.Z:F1}), {viste} entita' in vista)");
+            }
+            if (Giusto(f, nx, nz + 1f)) piantati.Add(f.EntityId); else f = null;
+            if (Giusto(p, nx + 1f, nz)) piantati.Add(p.EntityId); else p = null;
             return (f, p);
         }
 

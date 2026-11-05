@@ -137,6 +137,7 @@ if (modoRegole)
         ("depositi",                () => Regole.Depositi(tokens[1], host, port)),
         ("combinazioni",            () => Regole.Combinazioni(tokens[1], host, port)),
         ("terra che si consuma",    () => Regole.TerraSiConsuma(tokens[1], host, port)),
+        ("segno di prova",          () => Regole.SegnoDiProva(tokens[1], host, port)),
         ("morire costa",            () => Regole.MorireCosta(tokens[1], host, port)),
         ("carestia",                () => Regole.Carestia(tokens[1], tokens[0], host, port)),
         ("echi",                    () => Regole.Echi(tokens[1], tokens[0], host, port)),
