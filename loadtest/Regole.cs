@@ -1528,15 +1528,19 @@ static class Regole
     /// selvaggia: dieci sonde ferme per un minuto davanti all'ingresso venivano
     /// sbranate una dopo l'altra e rinascevano allo stendardo, e la prova
     /// misurava i lupi invece del santuario.
+    ///
+    /// Si chiede al server, col comando "belve", di toglierle tutte entro 120
+    /// metri. Prima si toglievano quelle a vista, ma la sonda vede solo le 32
+    /// entita' piu' vicine: un lupo poco piu' in la' restava, cacciava, e una
+    /// sonda rinasceva allo stendardo a 210 metri (backlog P1). 120 metri
+    /// coprono l'isola centrale piu' il territorio di un lupo (32) e il suo
+    /// raggio di caccia (15).
     /// </summary>
     static void ScacciaBelve(Sonda p)
     {
         p.Attendi(() => false, 0.5);
-        List<ulong> belve;
-        lock (p.Mondo) belve = p.Mondo.Values
-            .Where(e => e.Type == EntityType.Wolf || e.Type == EntityType.Boar)
-            .Select(e => e.EntityId).ToList();
-        foreach (var id in belve) p.Admin($"remove {id}");
+        p.Admin("belve 120");
+        p.Attendi(() => false, 0.3);
     }
 
     /// Dieci metri verso il centro del mondo: dall'ingresso si finisce dentro,
