@@ -145,6 +145,9 @@ if (modoRegole)
             return Regole.Santuario(st, host, port);
         }),
         ("registro di gioco",       () => Regole.RegistroDiGioco(tokens[1], tokens[4], host, port)),
+        // La sonda0004 e' quella del registro: i doni e i conti del rituale
+        // vero non devono finire addosso a chi raccoglie nelle prove di prima.
+        ("rituali e rischio",       () => Regole.RitualiERischio(tokens[4], host, port)),
         ("persistenza al rientro",  () => Regole.PersistenzaAlRientro(tokens[3], host, port)),
     };
 

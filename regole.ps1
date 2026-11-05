@@ -45,6 +45,9 @@ function Avvia-ServerDiProva([string]$logFile) {
     # Dalla sonda0005 alla sonda0015: le undici del santuario, che devono
     # potersi mettere in fazione e portarsi davanti all'ingresso da sole.
     for ($i = 5; $i -le 15; $i++) { Set-Item "Env:\Server__Admins__$($i - 2)" ("sonda{0:D4}" -f $i) }
+    # sonda0004: quella del registro, che fa anche la prova "rituali e rischio"
+    # e deve poter leggere e fissare il suo contatore dei rituali.
+    $env:Server__Admins__14 = "sonda0004"
     # Mondo separato. Le prove piantano muri e stendardi: senza questo finiscono
     # nel mondo vero, ed e' gia' successo — uno stendardo di prova aveva
     # rivendicato un settore nella partita vera.
@@ -60,6 +63,7 @@ function Avvia-ServerDiProva([string]$logFile) {
     Remove-Item Env:\Server__Admins__1
     Remove-Item Env:\Server__Admins__2
     for ($i = 3; $i -le 13; $i++) { Remove-Item "Env:\Server__Admins__$i" }
+    Remove-Item Env:\Server__Admins__14
     Remove-Item Env:\Persistence__MinioBucket
 
     $deadline = (Get-Date).AddSeconds(90)
