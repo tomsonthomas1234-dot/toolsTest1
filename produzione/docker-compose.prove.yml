@@ -1,0 +1,25 @@
+# Aggiunta per le prove sulle regole contro lo stack in Docker. La usa solo
+# regole-docker.ps1, mai la produzione.
+#
+# Sono gli stessi valori che regole.ps1 passa al server di prova sul PC: un
+# tetto basso di strutture e le sonde amministratrici, per poter preparare gli
+# scenari. sonda0002 resta fuori apposta, come la sonda0004 (vedi regole.ps1).
+
+services:
+  gameserver:
+    environment:
+      Server__MaxStructuresPerFaction: "3"
+      Server__Admins__0: sonda0000
+      Server__Admins__1: sonda0001
+      Server__Admins__2: sonda0003
+      Server__Admins__3: sonda0005
+      Server__Admins__4: sonda0006
+      Server__Admins__5: sonda0007
+      Server__Admins__6: sonda0008
+      Server__Admins__7: sonda0009
+      Server__Admins__8: sonda0010
+      Server__Admins__9: sonda0011
+      Server__Admins__10: sonda0012
+      Server__Admins__11: sonda0013
+      Server__Admins__12: sonda0014
+      Server__Admins__13: sonda0015

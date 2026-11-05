@@ -1,0 +1,8 @@
+# Vedi Dockerfile.gameserver.dockerignore: stesso motivo.
+**/bin
+**/obj
+**/.git
+03_botclient
+04_unity_stub
+06_persistence
+00_infra

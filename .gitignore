@@ -14,3 +14,7 @@ msg/
 # in corso, letti da run.ps1). Valgono solo su questo PC e solo finche' dura il
 # giro che li ha scritti.
 *.lock
+
+# Configurazione di produzione con le password vere: si prepara da
+# produzione/.env.esempio e resta solo sulla macchina dove gira.
+produzione/.env

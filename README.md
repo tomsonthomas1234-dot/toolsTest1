@@ -47,6 +47,7 @@ novembre, notte).
 | comando | cosa misura |
 |---|---|
 | `regole.ps1` | che il server **dica di no quando deve e ricordi quando deve** — nove controlli |
+| `regole-docker.ps1` | le stesse prove, contro lo stack di produzione in Docker (`produzione/`), acceso e buttato via a ogni giro |
 | `bench.ps1` | quanto costa il server sotto carico: 200 client, snapshot interi contro differenziali |
 | `ispeziona.ps1` | cosa c'è costruito nel mondo vero, e chi possiede quali settori. Non modifica nulla |
 
@@ -75,3 +76,9 @@ powershell -ExecutionPolicy Bypass -File C:\precursori\tools\build.ps1
 
 I due progetti C# (`loadtest`, `password`) si possono anche lanciare
 direttamente dal loro eseguibile, senza passare dagli script.
+
+## Produzione
+
+`produzione/` contiene lo stack per un server Linux: Dockerfile di game server e
+web API, `docker-compose.yml` senza password di ripiego, `.env.esempio`.
+Istruzioni passo passo in `produzione/LEGGIMI.md`.
