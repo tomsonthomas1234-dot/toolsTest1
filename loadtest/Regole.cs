@@ -73,6 +73,29 @@ sealed class Sonda : IDisposable
     }
 
     /// <summary>
+    /// Manda un comando admin e aspetta la riga di chat locale che comincia con
+    /// <paramref name="testa"/>; ne restituisce il resto, o null se non arriva.
+    /// </summary>
+    public string ChiediAdmin(string comando, string testa)
+    {
+        int gia;
+        lock (Chat) gia = Chat.Count;
+        Admin(comando);
+        string riga = null;
+        Attendi(() => { lock (Chat) riga = Chat.Skip(gia).LastOrDefault(t => t.StartsWith(testa)); return riga != null; }, 5);
+        return riga?.Substring(testa.Length);
+    }
+
+    /// Quanti rituali con esito ha alle spalle questa sonda, secondo il server
+    /// (comando admin "rituali"); con <paramref name="fissa"/>, prima li fissa.
+    /// -1 se la risposta non arriva.
+    public int RitualiFatti(int? fissa = null)
+    {
+        var r = ChiediAdmin(fissa is int n ? $"rituali {n}" : "rituali", "rituali fatti: ");
+        return r != null && int.TryParse(r, out int v) ? v : -1;
+    }
+
+    /// <summary>
     /// Lo stato del santuario e dell'orda secondo il server (comando admin
     /// "santuario", piu' eventuali argomenti): "stato", "orda", "capi",
     /// "sparsa", "in attesa", "tornati", "cristalli alti a terra". Vuoto se la
@@ -1577,6 +1600,96 @@ static class Regole
         return ok;
     }
 
+    // ---- 15a. piu rituali fai, piu rischi --------------------------------------
+    //
+    // Decisione di Tommaso (backlog A1c): il dono vale sempre lo stesso, ma chi
+    // ha fatto tanti rituali ha piu' probabilita' di un conto, e di un conto
+    // grave. Un tiro solo non dice niente di una probabilita': il comando admin
+    // "rischiorituali" tira l'esito vero duemila volte, con gli stessi dadi, per
+    // chi e' al primo rituale e per chi ne ha fatti quaranta. Poi si controlla
+    // che il contatore salga con un rituale vero.
+
+    /// Le quattro cifre di una risposta di "rischiorituali": solo dono, dono e
+    /// conseguenza, solo conseguenza, gravi. Null se la risposta non arriva.
+    static int[] Rischio(Sonda s, string grado, int fatti)
+    {
+        var r = s.ChiediAdmin($"rischiorituali {grado} {fatti} 2000", "rischio: ");
+        if (r == null) return null;
+        int Cifra(string nome)
+        {
+            int i = r.IndexOf(nome + " ", StringComparison.Ordinal);
+            if (i < 0) return -1;
+            var resto = r[(i + nome.Length + 1)..];
+            int fine = resto.IndexOf(',');
+            return int.TryParse(fine < 0 ? resto : resto[..fine], out int v) ? v : -1;
+        }
+        return new[] { Cifra("solo dono"), Cifra("dono e conseguenza"), Cifra("solo conseguenza"), Cifra("gravi") };
+    }
+
+    public static bool RitualiERischio(string token, string host, int port)
+    {
+        Console.WriteLine("--- rituali e rischio: chi ne ha fatti tanti paga piu' spesso, e piu' caro");
+
+        using var s = new Sonda(token, host, port);
+        if (!s.AttendiPronta()) { Console.WriteLine("  FALLITA: la sonda non e' entrata in gioco"); return false; }
+
+        bool ok = true;
+
+        // Atteso (MetaStrada 20, tetto 95): Comune 20% di conti al primo
+        // rituale, 70% al quarantesimo, gravi da 0 a 27% dei conti; Epico da 55%
+        // a 82%, gravi da 25% a 58%. Si lascia un margine di 4 punti al caso.
+        foreach (var (grado, contoPrima, contoDopo) in new[] { ("Common", 20, 70), ("Epic", 55, 82) })
+        {
+            var prima = Rischio(s, grado, 0);
+            var dopo  = Rischio(s, grado, 40);
+            if (prima == null || dopo == null || prima.Contains(-1) || dopo.Contains(-1))
+            { Console.WriteLine($"  FALLITA: {grado}, nessuna risposta leggibile a rischiorituali"); ok = false; continue; }
+
+            int ContoPct(int[] v) => (int)Math.Round(100.0 * (v[1] + v[2]) / 2000);
+            int GraviPct(int[] v) => (int)Math.Round(100.0 * v[3] / 2000);
+            Console.WriteLine($"  {grado}, al primo rituale: solo dono {prima[0]}, entrambi {prima[1]}, " +
+                              $"solo conto {prima[2]}, gravi {prima[3]} (conto {ContoPct(prima)}%)");
+            Console.WriteLine($"  {grado}, dopo 40 rituali: solo dono {dopo[0]}, entrambi {dopo[1]}, " +
+                              $"solo conto {dopo[2]}, gravi {dopo[3]} (conto {ContoPct(dopo)}%)");
+
+            if (Math.Abs(ContoPct(prima) - contoPrima) > 4 || Math.Abs(ContoPct(dopo) - contoDopo) > 4)
+            { Console.WriteLine($"  FALLITA: {grado}, conto atteso {contoPrima}% e {contoDopo}%"); ok = false; }
+            if (dopo[1] + dopo[2] <= prima[1] + prima[2])
+            { Console.WriteLine($"  FALLITA: {grado}, dopo 40 rituali i conti non sono aumentati"); ok = false; }
+            if (dopo[3] <= prima[3] || GraviPct(dopo) < GraviPct(prima) + 10)
+            { Console.WriteLine($"  FALLITA: {grado}, dopo 40 rituali i conti gravi non sono aumentati abbastanza"); ok = false; }
+            if (dopo[0] >= prima[0])
+            { Console.WriteLine($"  FALLITA: {grado}, dopo 40 rituali si esce puliti quanto prima"); ok = false; }
+            if (grado == "Common" && prima[3] != 0)
+            { Console.WriteLine("  FALLITA: un Comune al primo rituale non deve mai avere un conto grave"); ok = false; }
+        }
+
+        // Il contatore vero: si parte da 3, un rituale Comune al cerchio del
+        // centro lo porta a 4.
+        const ulong Sito = 20_000;
+        const float RX = 2f, RZ = 0f;
+        int partenza = s.RitualiFatti(3);
+        s.Admin($"tp {RX.ToString(Inv)} {RZ.ToString(Inv)}");
+        s.Admin("give Crystal 1 Common");
+        if (partenza != 3)
+        { Console.WriteLine($"  FALLITA: il contatore non si fissa (risposta {partenza})"); return false; }
+        if (!s.Attendi(() => Dist(s.X, s.Z, RX, RZ) < 3f && s.Cristalli(CrystalType.Common) >= 1, 10))
+        { Console.WriteLine("  FALLITA: preparazione non riuscita (posizione o cristallo)"); return false; }
+        if (!s.Attendi(() => s.UltimaPartita != null && !s.UltimaPartita.InFamine, 6))
+        { Console.WriteLine("  FALLITA: il mondo di prova e' in carestia, il rituale non tirerebbe l'esito"); return false; }
+
+        s.Rituale(Sito, CrystalType.Common);
+        if (!s.Attendi(() => s.UltimoRituale != null, 6) || !s.UltimoRituale.Accepted)
+        { Console.WriteLine($"  FALLITA: rituale non accettato ({s.UltimoRituale?.Refusal})"); return false; }
+        int dopoRito = s.RitualiFatti();
+        Console.WriteLine($"  rituale vero: dono='{s.UltimoRituale.Boon}', conto='{s.UltimoRituale.Bane}', " +
+                          $"rituali fatti 3 -> {dopoRito}");
+        if (dopoRito != 4) { Console.WriteLine("  FALLITA: il rituale non ha contato"); ok = false; }
+
+        if (ok) Console.WriteLine("  OK: piu' rituali alle spalle, piu' conti e piu' gravi; il contatore sale");
+        return ok;
+    }
+
     // ---- 15b. riparazione ed era rigogliosa -----------------------------------
     //
     // La formula di Tommaso (backlog A1a): ogni fazione 12,5%, ogni Epico 12,5%,
@@ -2473,7 +2586,15 @@ static class Regole
             return false;
         }
 
-        File.WriteAllLines(Lasciato, righe.Append(registro));
+        // Il rischio dei rituali accumulato non deve sparire con un riavvio.
+        int rituali = s.RitualiFatti(7);
+        if (rituali != 7)
+        {
+            Console.WriteLine($"  FALLITA in preparazione: il contatore dei rituali non si fissa (risposta {rituali})");
+            return false;
+        }
+
+        File.WriteAllLines(Lasciato, righe.Append(registro).Append(rituali.ToString(Inv)));
 
         Console.WriteLine($"  lasciato: legno {righe[0]}, pietra {righe[1]}, " +
                           $"asce [{righe[2]}], in ({s.X:F0}, {s.Z:F0}), registro [{registro}]");
@@ -2494,6 +2615,7 @@ static class Regole
         string asceAtt = atteso[2];
         float xAtt = float.Parse(atteso[3], Inv), zAtt = float.Parse(atteso[4], Inv);
         string registroAtt = atteso.Length > 5 ? atteso[5] : "";
+        int ritualiAtt = atteso.Length > 6 ? int.Parse(atteso[6], Inv) : -1;
 
         using var s = new Sonda(token, host, port);
         if (!s.AttendiPronta()) { Console.WriteLine("  FALLITA: la sonda non e' rientrata in gioco"); return false; }
@@ -2530,6 +2652,11 @@ static class Regole
         { Console.WriteLine("  FALLITA: il registro di gioco non e' tornato uguale"); ok = false; }
         if (s.Eventi.Count != 0)
         { Console.WriteLine("  FALLITA: il mondo non e' cambiato, eppure e' arrivata una notifica"); ok = false; }
+
+        int rituali = s.RitualiFatti();
+        Console.WriteLine($"  {quando}: rituali fatti {rituali} (erano {ritualiAtt})");
+        if (rituali != ritualiAtt)
+        { Console.WriteLine("  FALLITA: il contatore dei rituali non e' tornato uguale"); ok = false; }
 
         // L'era lasciata al 112,5%: 6,8 giorni la portano a un soffio sopra il
         // 100% e non basta a chiuderla; altri 0,3 si'. Se si fosse persa, o
