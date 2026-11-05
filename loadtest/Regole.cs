@@ -1658,7 +1658,7 @@ static class Regole
         bool ok = true;
         ok &= MorteDaCreatura(s, "lupo fuori dall'isola",        320f, -270f, "lupo",  perde: false);
         ok &= MorteDaCreatura(s, "lupo sull'isola centrale",     -25f,  -35f, "lupo",  perde: true);
-        ok &= MorteDaCreatura(s, "lupo dell'orda fuori dall'isola", 335f, -285f, "orda", perde: true);
+        ok &= MorteDaCreatura(s, "Eco dell'orda fuori dall'isola", 335f, -285f, "orda", perde: true);
         ok &= MorteDaCreatura(s, "Echi fuori dall'isola",        305f, -275f, "echi",  perde: true);
         if (ok) Console.WriteLine("  OK: lo zaino si perde dove deve, e solo li'");
         return ok;
@@ -1689,14 +1689,17 @@ static class Regole
             if (chi == "echi") s.Admin("echi evoca Common");
             else
             {
-                s.Admin(chi == "orda" ? "spawn wolf orda" : "spawn wolf");
+                // L'orda del santuario e' fatta di Echi (A1a4a2): "spawn orda"
+                // fa nascere un Eco dell'orda.
+                s.Admin(chi == "orda" ? "spawn orda" : "spawn wolf");
+                var tipo = chi == "orda" ? EntityType.Echo : EntityType.Wolf;
                 EntityState lupo = null;
                 s.Attendi(() =>
                 {
-                    lupo = s.PiuVicina(EntityType.Wolf, px + 2f, pz);
+                    lupo = s.PiuVicina(tipo, px + 2f, pz);
                     return lupo != null && Dist(lupo.X, lupo.Z, px + 2f, pz) < 1.5f;
                 }, 5);
-                // Il lupo dell'orda caccia subito: puo' essere gia' a qualche
+                // Chi e' dell'orda caccia subito: puo' essere gia' a qualche
                 // metro quando la sonda lo vede.
                 if (lupo != null && Dist(lupo.X, lupo.Z, px, pz) < 6f) idBelva = lupo.EntityId;
             }
@@ -1724,7 +1727,7 @@ static class Regole
         {
             if (chi == "lupo") s.ChiediAdmin("segnoprova si", "segno di prova: ");
             if (idBelva != 0) s.Admin($"remove {idBelva}");
-            // Un lupo dell'orda rimasto in vita terrebbe il santuario a riposo.
+            // Un Eco dell'orda rimasto in vita terrebbe il santuario a riposo.
             if (chi == "orda") s.Admin("santuario orda uccidi");
             if (chi == "echi") s.Admin("echi uccidi");
             s.Admin("sethp 1000");
@@ -2377,15 +2380,20 @@ static class Regole
             if (ChunkPiuArido(capo) != 255)
             { Console.WriteLine("  FALLITA: sopra il 25% la terra e' cambiata"); ok = false; }
 
-            // --- l'orda (Tommaso, A1a3c2b): dieci dentro fanno 50 lupi (il
+            // --- l'orda (Tommaso, A1a3c2b): dieci dentro fanno 50 piccoli (il
             // minimo), piu' un mini boss per il Precursore e uno per l'Epico.
             // Prima uccide chi e' dentro, poi si sparge; finche' vive il
             // santuario riposa; i mini boss lasciano cadere i loro cristalli.
+            // E' fatta di Echi (A1a4a2): 25 Eco e 25 Vaganti, un Divoratore
+            // per l'Epico e un Araldo per il Precursore.
             var orda = capo.StatoSantuario();
             Console.WriteLine($"  l'orda appena sprigionata: {Sonda.Descrivi(orda)}");
             if (orda.GetValueOrDefault("orda") != "50" || orda.GetValueOrDefault("capi") != "2"
                 || orda.GetValueOrDefault("in attesa") != "2")
-            { Console.WriteLine("  FALLITA: l'orda non ha 50 lupi e 2 mini boss"); ok = false; }
+            { Console.WriteLine("  FALLITA: l'orda non ha 50 piccoli e 2 mini boss"); ok = false; }
+            if (orda.GetValueOrDefault("eco") != "25" || orda.GetValueOrDefault("vaganti") != "25"
+                || orda.GetValueOrDefault("divoratori") != "1" || orda.GetValueOrDefault("araldi") != "1")
+            { Console.WriteLine("  FALLITA: l'orda non e' di 25 Eco, 25 Vaganti, un Divoratore e un Araldo"); ok = false; }
 
             var finoA = DateTime.UtcNow.AddSeconds(30);
             while (orda.GetValueOrDefault("sparsa") != "1" && DateTime.UtcNow < finoA)
@@ -2451,6 +2459,8 @@ static class Regole
             { Console.WriteLine("  FALLITA: senza offerte qualcuno ha perso un cristallo"); ok = false; }
 
             // Niente riposo: si riapre subito, e stavolta si offre.
+            // Nessun Echo d'altre prove in giro: si contano quelli del rito.
+            capo.StatoEchi("uccidi");
             bool noveAncora = ApriInNove();
             capo.Rituale(CentroDelMondo, CrystalType.Precursor);
             epico.Rituale(CentroDelMondo, CrystalType.Epic);
@@ -2470,6 +2480,32 @@ static class Regole
             { Console.WriteLine("  FALLITA: il rituale incompleto ha cambiato la terra"); ok = false; }
             if (capo.UltimoRituale?.Bane?.Contains("incompleto") != true)
             { Console.WriteLine("  FALLITA: il rituale incompleto non ha risposto"); ok = false; }
+
+            // Gli Echi del rito incompleto (proposta A1a4, punto 8): uno
+            // schieramento per cristallo offerto, di casa dentro il santuario.
+            // Epico: 6 Eco, 2 Vaganti, un Divoratore; Precursore: 6 Eco, 2
+            // Vaganti, un Araldo. Nessuno porta il cristallo: e' gia' tornato in
+            // circolo. Non sono l'orda: il santuario non ne conta nessuno.
+            var echiRito = capo.StatoEchi();
+            var ordaRito = capo.StatoSantuario();
+            Console.WriteLine($"  echi del rito incompleto: {Sonda.Descrivi(echiRito)}; orda {ordaRito.GetValueOrDefault("orda")}, " +
+                              $"capi {ordaRito.GetValueOrDefault("capi")}");
+            if (Sonda.Numero(echiRito, "eco") != 12 || Sonda.Numero(echiRito, "vaganti") != 4
+                || Sonda.Numero(echiRito, "divoratori") != 1 || Sonda.Numero(echiRito, "araldi") != 1)
+            { Console.WriteLine("  FALLITA: il rito incompleto non ha chiamato gli Echi di un Epico e di un Precursore"); ok = false; }
+            if (Sonda.Numero(echiRito, "di casa nel santuario") != 18)
+            { Console.WriteLine("  FALLITA: gli Echi del rito incompleto non sono di casa nel santuario"); ok = false; }
+            if (Sonda.Numero(echiRito, "con cristallo") != 0)
+            { Console.WriteLine("  FALLITA: gli Echi del rito incompleto portano un cristallo che era gia' perso"); ok = false; }
+            if (ordaRito.GetValueOrDefault("orda") != "0" || ordaRito.GetValueOrDefault("capi") != "0")
+            { Console.WriteLine("  FALLITA: il rito incompleto ha sprigionato l'orda"); ok = false; }
+            var echiUccisi = capo.StatoEchi("uccidi");
+            // Il confronto e' con un attimo prima, non con prima del rito: chi
+            // muore per mano degli Echi lascia cadere lo zaino (A12).
+            if (Sonda.Numero(echiUccisi, "cristalli alti a terra") != Sonda.Numero(echiRito, "cristalli alti a terra"))
+            { Console.WriteLine($"  FALLITA: uccisi gli Echi del rito incompleto, e' caduto un cristallo: {Sonda.Descrivi(echiUccisi)}"); ok = false; }
+            // Chi e' stato ucciso rinasce in tre secondi.
+            capo.Attendi(() => false, 4.0);
 
             // E ora riposa: con tutte le condizioni resta chiuso.
             capo.Admin("give Crystal 1 Precursor");
@@ -2807,7 +2843,7 @@ static class Regole
     //
     // Tommaso (A1a3c2b): l'orda resta finche' non muore tutta, anche dopo un
     // riavvio, e un Precursore non deve sparire dal mondo con lei. Prima di
-    // spegnere si sprigiona un'orda d'ufficio (50 lupi e un mini boss Epico);
+    // spegnere si sprigiona un'orda d'ufficio (50 piccoli e un mini boss Epico, tutti Echi);
     // dopo, deve esserci ancora, sparsa, col suo mini boss. La sonda sta lontana
     // dall'isola centrale: l'orda non deve poterla raggiungere.
 
@@ -2817,7 +2853,9 @@ static class Regole
         if (!s.AttendiPronta()) { Console.WriteLine("  FALLITA: la sonda dell'orda non e' entrata in gioco"); return false; }
         var stato = s.StatoSantuario("orda 1 1 0");
         Console.WriteLine($"  orda prima del riavvio: {Sonda.Descrivi(stato)}");
-        if (stato.GetValueOrDefault("orda") != "50" || stato.GetValueOrDefault("capi") != "1")
+        if (stato.GetValueOrDefault("orda") != "50" || stato.GetValueOrDefault("capi") != "1"
+            || stato.GetValueOrDefault("eco") != "25" || stato.GetValueOrDefault("vaganti") != "25"
+            || stato.GetValueOrDefault("divoratori") != "1")
         { Console.WriteLine("  FALLITA: l'orda d'ufficio non e' nata"); return false; }
 
         // Gli Echi di un Precursore, lontano da tutti: non si dissolvono mai,
@@ -2839,12 +2877,15 @@ static class Regole
         s.Attendi(() => false, 1.5);   // il tick ricrea l'orda una volta al secondo
         var stato = s.StatoSantuario();
         Console.WriteLine($"  orda dopo il riavvio: {Sonda.Descrivi(stato)}");
+        // Echi dal A1a4a2: 25 Eco, 25 Vaganti e il Divoratore dell'Epico.
         bool ok = stato.GetValueOrDefault("orda") == "50" && stato.GetValueOrDefault("capi") == "1"
+                  && stato.GetValueOrDefault("eco") == "25" && stato.GetValueOrDefault("vaganti") == "25"
+                  && stato.GetValueOrDefault("divoratori") == "1"
                   && stato.GetValueOrDefault("sparsa") == "1" && stato.GetValueOrDefault("in attesa") == "1"
                   && stato.GetValueOrDefault("stato") == "Resting";
         if (!ok) Console.WriteLine("  FALLITA: l'orda non e' sopravvissuta al riavvio com'era");
         // Si toglie comunque: il mondo di prova riparte pulito al prossimo giro,
-        // ma chi lo guarda dopo non deve trovarci 50 lupi.
+        // ma chi lo guarda dopo non deve trovarci 50 Echi.
         stato = s.StatoSantuario("orda uccidi");
         if (stato.GetValueOrDefault("in attesa") != "0")
         { Console.WriteLine($"  FALLITA: uccisa l'orda, resta {Sonda.Descrivi(stato)}"); ok = false; }
