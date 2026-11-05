@@ -281,6 +281,11 @@ sealed class Sonda : IDisposable
     /// quello.
     public readonly Dictionary<ulong, EntityState> Mondo = new();
 
+    /// Tutti i bit visti nei Flags del Custode da quando si e azzerato
+    /// (backlog B7: le mosse, vedi KeeperState). Si legge e si azzera sotto
+    /// lock (Mondo).
+    public uint BitDelCustodeVisti;
+
     /// Quanto abbiamo di ciascun oggetto, secondo il server.
     public readonly Dictionary<(ItemType, byte), int> Zaino = new();
 
@@ -462,6 +467,9 @@ sealed class Sonda : IDisposable
             foreach (var e in entita)
             {
                 Mondo[e.EntityId] = e;
+                // I bit delle mosse durano un secondo o meno: tra un controllo
+                // e l'altro si perderebbero, quindi si tengono qui (B7).
+                if (e.Type == EntityType.Keeper) BitDelCustodeVisti |= e.Flags;
                 if (e.EntityId != _playerId) continue;
                 X = e.X; Y = e.Y; Z = e.Z;
                 Vista = true;
@@ -3124,6 +3132,7 @@ static class Regole
             MettiIn(b, kx + 1f * Diag, kz + 1f * Diag);
             MettiIn(a, lontanoXZ, lontanoXZ);
             float vitaPrima = a.Stato(a.Id).Vita;
+            lock (a.Mondo) a.BitDelCustodeVisti = 0;
             var carica = StatoCustode(a, "carica");
             Console.WriteLine($"  carica d'ufficio: {Sonda.Descrivi(carica)}");
             if (IdNumero(carica, "carica") != a.Id) { Console.WriteLine("  FALLITA: la carica non e' andata su chi l'ha picchiato di piu'"); ok = false; }
@@ -3132,6 +3141,10 @@ static class Regole
             float dA = Dist(float.Parse(arrivato.GetValueOrDefault("x") ?? "0", Inv), float.Parse(arrivato.GetValueOrDefault("z") ?? "0", Inv), a.X, a.Z);
             Console.WriteLine($"  dopo la carica: A vita {vitaPrima} -> {a.Stato(a.Id).Vita}, Custode a {dA:F1} m da A, B vita {b.Stato(b.Id).Vita}");
             if (!presa || dA > 3.5f) { Console.WriteLine("  FALLITA: la carica non ha raggiunto e colpito chi l'ha picchiato"); ok = false; }
+            // B7: il client deve sapere che carica (bit Charging nei Flags).
+            uint bitCarica; lock (a.Mondo) bitCarica = a.BitDelCustodeVisti;
+            Console.WriteLine($"  bit visti dal client durante la carica: {bitCarica} (carica {((bitCarica & KeeperState.Charging) != 0 ? "si" : "no")})");
+            if ((bitCarica & KeeperState.Charging) == 0) { Console.WriteLine("  FALLITA: il client non ha visto il segno della carica"); ok = false; }
 
             // --- da sole, al loro ritmo: in 18 secondi un altro colpo a terra
             // (ogni 10) e un'altra carica (ogni 12). Le sonde si curano e si
@@ -3140,6 +3153,7 @@ static class Regole
             MettiIn(a, lontanoXZ, lontanoXZ);
             var fine = DateTime.UtcNow.AddSeconds(18);
             Dictionary<string, string> ritmo = StatoCustode(a);
+            lock (a.Mondo) a.BitDelCustodeVisti = 0;
             while (DateTime.UtcNow < fine)
             {
                 ritmo = StatoCustode(a);
@@ -3162,6 +3176,11 @@ static class Regole
             Console.WriteLine($"  al loro ritmo: colpi a terra {Sonda.Numero(ritmo, "colpi a terra")}, cariche {Sonda.Numero(ritmo, "cariche")}");
             if (Sonda.Numero(ritmo, "colpi a terra") < 2) { Console.WriteLine("  FALLITA: il colpo a terra non torna da solo ogni 10 secondi"); ok = false; }
             if (Sonda.Numero(ritmo, "cariche") < 2) { Console.WriteLine("  FALLITA: la carica non torna da sola"); ok = false; }
+            // B7: il colpo al suo ritmo si prepara per un secondo, e il client
+            // lo vede (bit SlamWindup): e quello che gli fa disegnare il cerchio.
+            uint bitRitmo; lock (a.Mondo) bitRitmo = a.BitDelCustodeVisti;
+            Console.WriteLine($"  bit visti dal client al loro ritmo: {bitRitmo} (preparazione {((bitRitmo & KeeperState.SlamWindup) != 0 ? "si" : "no")})");
+            if ((bitRitmo & KeeperState.SlamWindup) == 0) { Console.WriteLine("  FALLITA: il client non ha visto la preparazione del colpo a terra"); ok = false; }
 
             // --- tornato a dormire, le mosse ripartono da zero
             var dorme = StatoCustode(a, "dormi");
