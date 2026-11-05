@@ -1635,6 +1635,106 @@ static class Regole
         return true;
     }
 
+    // ---- avvisi sugli unici --------------------------------------------------
+    //
+    // Decisione di Tommaso (5 novembre, backlog A13): quando un unico si
+    // ottiene, si perde, passa di mano o va distrutto, tutti i collegati lo
+    // trovano nel registro. Due sonde: chi lo ottiene e lo butta, e l'altra che
+    // lo raccoglie e lo distrugge; ognuna deve ricevere ogni avviso, anche
+    // quelli che non la riguardano. In fondo l'unico distrutto si riottiene: e
+    // la promessa scritta nell'avviso.
+    //
+    // Gli unici si danno e si buttano col comando admin "unico": il rituale li
+    // da a caso, e la morte li butta a terra o li distrugge a caso.
+
+    public static bool AvvisiSugliUnici(string token, string tokenAltro, string host, int port)
+    {
+        Console.WriteLine("--- avvisi sugli unici: ottenuto, perso, passato di mano, distrutto, a tutti");
+
+        using var s = new Sonda(token, host, port);
+        using var o = new Sonda(tokenAltro, host, port);
+        if (!s.AttendiPronta() || !o.AttendiPronta())
+        { Console.WriteLine("  FALLITA: le sonde non sono entrate in gioco"); return false; }
+
+        const float PX = 360f, PZ = -300f;
+        s.Admin($"tp {PX.ToString(Inv)} {PZ.ToString(Inv)}");
+        o.Admin($"tp {(PX + 12f).ToString(Inv)} {PZ.ToString(Inv)}");
+        if (!s.Attendi(() => { o.Poll(); return Dist(s.X, s.Z, PX, PZ) < 2f && Dist(o.X, o.Z, PX + 12f, PZ) < 2f; }, 8))
+        { Console.WriteLine("  FALLITA: teletrasporto non arrivato"); return false; }
+        s.Cammina(0f, 0f, 0.1);
+        s.Admin("clearinv");
+        o.Admin("clearinv");
+        s.Attendi(() => { o.Poll(); return false; }, 0.5);
+
+        int Conta(Sonda x, WorldEventKind k) { lock (x.Eventi) return x.Eventi.Count(e => e.Kind == k); }
+        bool ok = true;
+
+        // Aspetta che il conteggio di quel tipo cresca per tutte e due, e dice
+        // il testo arrivato.
+        bool ArrivatoATutti(string passo, WorldEventKind k, int primaS, int primaO)
+        {
+            bool arrivato = s.Attendi(() => { o.Poll(); return Conta(s, k) > primaS && Conta(o, k) > primaO; }, 6);
+            string testo;
+            lock (s.Eventi) testo = s.Eventi.LastOrDefault(e => e.Kind == k)?.Text ?? "(niente)";
+            Console.WriteLine($"  {passo}: {k} a chi lo fa={Conta(s, k) > primaS}, all'altro={Conta(o, k) > primaO} — \"{testo}\"");
+            if (!arrivato) Console.WriteLine($"  FALLITA ({passo}): l'avviso non e' arrivato a tutti");
+            return arrivato;
+        }
+
+        // 1. ottenuto
+        int os0 = Conta(s, WorldEventKind.UniqueObtained), oo0 = Conta(o, WorldEventKind.UniqueObtained);
+        var dato = s.ChiediAdmin("unico dai", "unico: ");
+        if (dato == null || dato == "nessuno")
+        { Console.WriteLine($"  FALLITA: nessun unico libero da dare (risposta '{dato}')"); return false; }
+        string id = dato.Split(' ')[0];
+        Console.WriteLine($"  dato l'unico {dato}");
+        ok &= ArrivatoATutti("ottenuto", WorldEventKind.UniqueObtained, os0, oo0);
+        string diS = s.ChiediAdmin($"unico stato {id}", "unico: ");
+
+        // 2. perso: a terra, a quattro metri dalla sonda
+        int ls0 = Conta(s, WorldEventKind.UniqueLost), lo0 = Conta(o, WorldEventKind.UniqueLost);
+        var aTerra = s.ChiediAdmin("unico butta", "unico: ");
+        var pezzi = aTerra?.Split(' ');
+        // "a terra <entita> <x> <z>"
+        if (pezzi == null || pezzi.Length < 5 || pezzi[0] != "a")
+        { Console.WriteLine($"  FALLITA: l'unico non e' stato buttato (risposta '{aTerra}')"); return false; }
+        float bx = float.Parse(pezzi[3], Inv), bz = float.Parse(pezzi[4], Inv);
+        ok &= ArrivatoATutti("perso", WorldEventKind.UniqueLost, ls0, lo0);
+
+        // 3. passato di mano: l'altra sonda ci passa sopra e lo raccoglie
+        int hs0 = Conta(s, WorldEventKind.UniqueChangedHands), ho0 = Conta(o, WorldEventKind.UniqueChangedHands);
+        o.Admin($"tp {bx.ToString(Inv)} {bz.ToString(Inv)}");
+        ok &= ArrivatoATutti("passato di mano", WorldEventKind.UniqueChangedHands, hs0, ho0);
+        string diO = o.ChiediAdmin($"unico stato {id}", "unico: ");
+        if (diO == null || diO == "libero" || diO == diS)
+        {
+            Console.WriteLine($"  FALLITA: nel registro l'unico non e' passato all'altra (prima '{diS}', ora '{diO}')");
+            ok = false;
+        }
+
+        // 4. distrutto: l'altra si svuota lo zaino
+        int ds0 = Conta(s, WorldEventKind.UniqueDestroyed), do0 = Conta(o, WorldEventKind.UniqueDestroyed);
+        o.Admin("clearinv");
+        ok &= ArrivatoATutti("distrutto", WorldEventKind.UniqueDestroyed, ds0, do0);
+        string dopo = s.ChiediAdmin($"unico stato {id}", "unico: ");
+        if (dopo != "libero")
+        { Console.WriteLine($"  FALLITA: distrutto ma non e' tornato libero ('{dopo}')"); ok = false; }
+
+        // 5. e ora si riottiene, proprio quello
+        int rs0 = Conta(s, WorldEventKind.UniqueObtained), ro0 = Conta(o, WorldEventKind.UniqueObtained);
+        var ridato = s.ChiediAdmin($"unico dai {id}", "unico: ");
+        if (ridato == null || !ridato.StartsWith(id + " "))
+        { Console.WriteLine($"  FALLITA: l'unico distrutto non si riottiene (risposta '{ridato}')"); ok = false; }
+        else ok &= ArrivatoATutti("riottenuto", WorldEventKind.UniqueObtained, rs0, ro0);
+
+        // Pulizia: le prove dopo trovano il catalogo libero come all'inizio.
+        s.Admin("clearinv");
+        s.Attendi(() => { o.Poll(); return false; }, 0.5);
+
+        if (ok) Console.WriteLine("  OK: ogni passaggio dell'unico arriva a tutti, e il distrutto torna disponibile");
+        return ok;
+    }
+
     // ---- zaino e creature ------------------------------------------------------
     //
     // Decisione di Tommaso (5 novembre, backlog A12): sbranati da una belva
