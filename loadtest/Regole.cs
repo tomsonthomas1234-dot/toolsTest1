@@ -2573,6 +2573,289 @@ static class Regole
         return ok;
     }
 
+    // ---- effetti a tempo (A14g1b) ----------------------------------------------
+    //
+    // Gli effetti che le abilita lasceranno sui bersagli, messi col comando di
+    // prova "effetto": stordimento (fermo, niente colpi ne abilita),
+    // immobilita (fermo ma colpisce), rallentamento (vale il piu' forte),
+    // danno nel tempo (un colpo al secondo, uccide come il colpo di chi l'ha
+    // inflitto), statistica a tempo (entra nei totali e va al client), danno
+    // subito a tempo; e su una creatura stordimento, rallentamento e danno nel
+    // tempo che uccide e da' il bottino a chi l'ha inflitto. A in fazione 1 con
+    // la spada di pietra (22 a colpo), B in fazione 2.
+
+    public static bool EffettiATempo(string tokenA, string tokenB, string host, int port)
+    {
+        Console.WriteLine("--- effetti a tempo: stordimento, immobilita, rallentamento, danno nel tempo, statistiche e danno subito");
+        bool ok = true;
+        void Male(string m) { Console.WriteLine("  FALLITA: " + m); ok = false; }
+
+        using var a = new Sonda(tokenA, host, port);
+        using var b = new Sonda(tokenB, host, port);
+        if (!a.AttendiPronta() || !b.AttendiPronta())
+        { Console.WriteLine("  FALLITA: le sonde non sono entrate in gioco"); return false; }
+
+        // Lontano da tutto, come le prove dell'armatura (e' mare: per misurare
+        // il passo si va a terra, vedi Passo).
+        const float PX = -150f, PZ = 250f;
+        static byte[] P<T>(T v) => MessagePack.MessagePackSerializer.Serialize(v);
+        bool Aspetta(Func<bool> cosa, double secondi) =>
+            a.Attendi(() => { b.Attendi(() => true, 0.01); return cosa(); }, secondi);
+        void Pausa(double secondi) => Aspetta(() => false, secondi);
+        float Vita(Sonda chi) => a.Stato(chi.Id).Vita;
+        void Tp(Sonda s, float x, float z)
+        {
+            s.Admin($"tp {x.ToString(Inv)} {z.ToString(Inv)}");
+            Aspetta(() => Dist(s.X, s.Z, x, z) < 0.5f, 6);
+            s.Cammina(0f, 0f, 0.1);
+        }
+        void Piena(params Sonda[] chi)
+        {
+            foreach (var s in chi) s.Admin("sethp 1000");
+            Aspetta(() => chi.All(s => Vita(s) >= 100f), 3);
+            Pausa(0.3);
+        }
+        float Perso(Sonda chi, float prima, double secondi = 1.5)
+        {
+            Aspetta(() => Vita(chi) < prima, secondi);
+            Pausa(0.3);
+            return prima - Vita(chi);
+        }
+        string Effetto(Sonda s, string riga) { Pausa(0.15); return s.ChiediAdmin("effetto " + riga, "effetto: ") ?? "(nessuna risposta)"; }
+        static string Campo(string riga, string nome)
+        {
+            int i = riga.IndexOf(nome + "=", StringComparison.Ordinal);
+            if (i < 0) return null;
+            int f = riga.IndexOf(' ', i);
+            return f < 0 ? riga[(i + nome.Length + 1)..] : riga[(i + nome.Length + 1)..f];
+        }
+        static (float X, float Z) Pos(string riga)
+        {
+            var p = Campo(riga, "pos")?.Split(',');
+            return p != null && p.Length == 2 && float.TryParse(p[0], System.Globalization.NumberStyles.Float, Inv, out var x)
+                   && float.TryParse(p[1], System.Globalization.NumberStyles.Float, Inv, out var z) ? (x, z) : (float.NaN, float.NaN);
+        }
+        /// Quanto si sposta s camminando verso +Z per un secondo. Si cammina
+        /// sullo spawn della fazione 1, terra di sicuro (il punto della prova
+        /// e' in mare: si nuoterebbe a 1 m/s), poi si torna al punto.
+        float Passo(Sonda s)
+        {
+            Tp(s, -400f, -400f);
+            float x0 = s.X, z0 = s.Z;
+            s.Cammina(0f, 1f, 1.0);
+            Pausa(0.3);
+            float d = Dist(s.X, s.Z, x0, z0);
+            Tp(s, PX, PZ);
+            return d;
+        }
+        CommandResultMsg Usa(Sonda s, AbilityId id, float yaw)
+        {
+            Pausa(0.15);
+            s.Comando(116, CommandType.UseAbility, P(new UseAbilityCommand { Ability = id, Yaw = yaw }));
+            CommandResultMsg r = null;
+            Aspetta(() => (r = s.Esito(116)) != null, 5);
+            return r;
+        }
+
+        a.Admin("setfaction 1"); b.Admin("setfaction 2");
+        foreach (var s in new[] { a, b }) { s.Admin("clearinv"); s.Admin("abilita azzera"); s.Admin("effetto azzera"); }
+        b.Dotazione(ItemType.None, ItemType.None, SideItemType.None);
+        Tp(a, PX, PZ); Tp(b, PX + 1f, PZ);
+        a.Admin("give StoneSword 1");
+        Aspetta(() => a.Istanze.Values.Any(v => v.Tipo == ItemType.StoneSword), 5);
+        a.Dotazione(ItemType.StoneSword, ItemType.None, SideItemType.None);
+        a.Posizione(0);
+        Pausa(0.4);
+        Piena(a, b);
+
+        // 0. il passo normale, come riferimento (avanti e indietro).
+        float normale = Passo(a);
+        Console.WriteLine($"  passo normale in un secondo: {normale:F2} m");
+        if (normale < 3f) Male("il passo normale misurato e' troppo corto per la prova");
+
+        // 1. stordimento: fermo, niente colpi ne abilita; dopo, tutto torna.
+        // 6 s: abilita, colpo e passo (col viaggio a terra) ci devono stare dentro tutti e tre (con
+        // 2,5 s il Fendente arrivava a stordimento finito).
+        string st = Effetto(a, "stordisci 6");
+        Console.WriteLine($"  stordisci: {st}");
+        if (!st.StartsWith("ok ") || !st.Contains("stordito")) Male("'effetto stordisci' non ha stordito A");
+        var usoStordito = Usa(a, AbilityId.SwordHeavySlash, 90f);
+        float prima = Vita(b);
+        a.Colpisci(0.3);
+        Pausa(0.3);
+        float colpoStordito = prima - Vita(b);
+        float fermo = Passo(a);
+        Console.WriteLine($"  da stordito: passo {fermo:F2} m (atteso 0), colpo su B {colpoStordito} (atteso 0), " +
+                          $"Fendente {(usoStordito == null ? "nessuna risposta" : usoStordito.Success ? "riuscito" : "rifiutato " + usoStordito.ErrorCode)} (atteso AbilityNotUsable)");
+        if (fermo > 0.2f) Male("chi e' stordito non deve muoversi");
+        if (colpoStordito != 0f) Male("chi e' stordito non deve colpire");
+        if (usoStordito == null || usoStordito.Success || usoStordito.ErrorCode != ErrorCode.AbilityNotUsable)
+            Male("chi e' stordito non deve usare abilita");
+        Aspetta(() => !(Effetto(a, "stato")).Contains("stordito"), 7);
+        Tp(a, PX, PZ);
+        prima = Vita(b);
+        a.Colpisci(0.2);
+        float colpoDopo = Perso(b, prima);
+        Console.WriteLine($"  finito lo stordimento: colpo su B {colpoDopo} (atteso 22)");
+        if (colpoDopo != 22f) Male("finito lo stordimento il colpo deve tornare a 22");
+
+        // 2. immobilita: fermo ma colpisce.
+        Piena(b);
+        st = Effetto(a, "immobile 4");
+        float immobile = Passo(a);
+        prima = Vita(b);
+        a.Colpisci(0.2);
+        float colpoImmobile = Perso(b, prima);
+        Console.WriteLine($"  immobile: {st}; passo {immobile:F2} m (atteso 0), colpo su B {colpoImmobile} (atteso 22)");
+        if (immobile > 0.2f) Male("chi e' immobile non deve muoversi");
+        if (colpoImmobile != 22f) Male("chi e' immobile deve poter colpire");
+        Aspetta(() => !(Effetto(a, "stato")).Contains("immobile"), 5);
+        Tp(a, PX, PZ);
+
+        // 3. rallentamento: 50% e 30% insieme, vale il 50%.
+        Effetto(a, "rallenta 30 4");
+        st = Effetto(a, "rallenta 50 4");
+        float lento = Passo(a);
+        double rapporto = lento / normale;
+        Console.WriteLine($"  rallentato 50% e 30%: {st}; passo {lento:F2} m, {rapporto:P0} del normale (atteso circa 50%)");
+        if (rapporto < 0.35 || rapporto > 0.65) Male("con un rallentamento del 50% e uno del 30% il passo deve essere circa la meta'");
+        Effetto(a, "azzera");
+        Tp(a, PX, PZ);
+
+        // 4. danno nel tempo da A su B: 30 in 6 s, 5 al secondo.
+        Piena(b);
+        prima = Vita(b);
+        st = Effetto(a, $"sanguina 30 6 {b.Id}");
+        Pausa(1.4);
+        float dopoUno = prima - Vita(b);
+        Aspetta(() => prima - Vita(b) >= 30f, 7);
+        Pausa(1.3);
+        float dopoTutto = prima - Vita(b);
+        string stB = Effetto(a, $"stato {b.Id}");
+        Console.WriteLine($"  sanguina 30 in 6 s: {st}; dopo un secondo e poco B ha perso {dopoUno} (atteso 5), alla fine {dopoTutto} (atteso 30); poi: {stB}");
+        if (dopoUno != 5f) Male("il danno nel tempo deve togliere 5 al primo secondo");
+        if (dopoTutto != 30f) Male("il danno nel tempo deve togliere 30 in tutto, non di piu'");
+        if (!stB.Contains("effetti=nessuno")) Male("finito il danno nel tempo non deve restare niente");
+
+        // 5. un danno nel tempo uccide come il colpo di chi l'ha inflitto, e la
+        //    morte toglie gli effetti.
+        b.Admin("sethp 8");
+        Aspetta(() => Vita(b) is > 0f and <= 8f, 3);
+        Effetto(a, $"stordisci 10 {b.Id}");
+        Effetto(a, $"sanguina 20 2 {b.Id}");
+        bool morto = Aspetta(() => a.Stato(b.Id).Morto, 4);
+        Console.WriteLine($"  B con 8 di vita e 20 da perdere in 2 s: {(morto ? "morto" : "vivo")} (atteso morto)");
+        if (!morto) Male("il danno nel tempo deve poter uccidere");
+        // Rinasce allo stendardo, magari fuori dalla vista di A: si guarda con
+        // gli occhi di B.
+        Aspetta(() => { var v = b.Stato(b.Id); return !v.Morto && v.Vita > 0f; }, 6);
+        Pausa(0.5);
+        stB = Effetto(a, $"stato {b.Id}");
+        Console.WriteLine($"  B rinato: {stB}");
+        if (!stB.Contains("effetti=nessuno")) Male("morendo gli effetti devono andare via (lo stordimento di 10 s compreso)");
+        Tp(b, PX + 1f, PZ);
+
+        // 6. statistica a tempo: danno +15% per 2 s, 22 -> 25, al client
+        //    nell'elenco dei modificatori; poi torna 22.
+        Piena(b);
+        st = Effetto(a, "stat Damage 15 2");
+        bool alClient = Aspetta(() => a.Statistiche?.DamagePercent == 15
+            && a.Statistiche.Modifiers?.Any(m => m.Origin == "prova" && m.Stat == StatKind.Damage && m.SecondsLeft is >= 1 and <= 2) == true, 3);
+        prima = Vita(b);
+        a.Colpisci(0.2);
+        float conBuff = Perso(b, prima);
+        bool scaduto = Aspetta(() => a.Statistiche?.DamagePercent == 0
+            && a.Statistiche.Modifiers?.Any(m => m.Origin == "prova") != true, 4);
+        Pausa(0.3);
+        prima = Vita(b);
+        a.Colpisci(0.2);
+        float senzaBuff = Perso(b, prima);
+        Console.WriteLine($"  danno +15% per 2 s: {st}; al client {(alClient ? "si" : "no")}, colpo {conBuff} (atteso 25), " +
+                          $"scaduto {(scaduto ? "si" : "no")}, colpo dopo {senzaBuff} (atteso 22)");
+        if (!alClient) Male("la statistica a tempo deve arrivare al client, nei totali e nell'elenco con i secondi");
+        if (conBuff != 25f) Male("con danno +15% la spada di pietra deve fare 25");
+        if (!scaduto) Male("la statistica a tempo deve scadere e il client saperlo");
+        if (senzaBuff != 22f) Male("scaduta la statistica il colpo deve tornare a 22");
+
+        // 7. danno subito a tempo: B +50% per 3 s, 22 -> 33; azzerato, 22.
+        Piena(b);
+        st = Effetto(b, "subito 50 3");
+        prima = Vita(b);
+        a.Colpisci(0.2);
+        float subito = Perso(b, prima);
+        Effetto(b, "azzera");
+        Pausa(0.3);
+        prima = Vita(b);
+        a.Colpisci(0.2);
+        float azzerato = Perso(b, prima);
+        Console.WriteLine($"  B prende +50%: {st}; colpo {subito} (atteso 33), dopo 'azzera' {azzerato} (atteso 22)");
+        if (subito != 33f) Male("con danno subito +50% il colpo da 22 deve fare 33");
+        if (azzerato != 22f) Male("'effetto azzera' deve togliere il danno subito");
+
+        // 8. su una creatura: un lupo stordito non si muove e non morde; un
+        //    lupo rallentato del 90% quasi non si muove; un danno nel tempo
+        //    inflitto da A lo uccide e il bottino va ad A.
+        Tp(b, PX + 40f, PZ);
+        Piena(a);
+        a.Admin("spawn wolf");
+        Pausa(0.5);
+        string lupo = Effetto(a, "stato vicino");
+        string idLupo = Campo(lupo, "id");
+        Console.WriteLine($"  il lupo: {lupo}");
+        if (Campo(lupo, "tipo") != "Wolf" || idLupo == null) { Male("il lupo fatto nascere non si trova"); idLupo = "0"; }
+        a.ChiediAdmin("segnoprova no", "segno di prova: ");
+        st = Effetto(a, $"stordisci 3 {idLupo}");
+        var l0 = Pos(Effetto(a, $"stato {idLupo}"));
+        prima = Vita(a);
+        Pausa(2.0);
+        var l1 = Pos(Effetto(a, $"stato {idLupo}"));
+        float morsoStordito = prima - Vita(a);
+        float spostoStordito = Dist(l0.X, l0.Z, l1.X, l1.Z);
+        Console.WriteLine($"  lupo stordito 3 s: {st}; in 2 s si sposta {spostoStordito:F2} m (atteso 0), A perde {morsoStordito} (atteso 0)");
+        if (!(spostoStordito < 0.05f)) Male("un lupo stordito non deve muoversi");
+        if (morsoStordito != 0f) Male("un lupo stordito non deve mordere");
+        bool morde = Aspetta(() => Vita(a) < prima, 5);
+        Console.WriteLine($"  finito lo stordimento il lupo morde: {(morde ? "si" : "no")}");
+        if (!morde) Male("finito lo stordimento il lupo deve tornare a mordere");
+
+        // rallentato: A si allontana di 10 m, il lupo la insegue.
+        Piena(a);
+        Tp(a, l1.X + 10f, l1.Z);
+        Effetto(a, $"rallenta 90 3 {idLupo}");
+        var r0 = Pos(Effetto(a, $"stato {idLupo}"));
+        Pausa(1.0);
+        var r1 = Pos(Effetto(a, $"stato {idLupo}"));
+        float spostoLento = Dist(r0.X, r0.Z, r1.X, r1.Z);
+        Aspetta(() => !Effetto(a, $"stato {idLupo}").Contains("rallentato"), 4);
+        Tp(a, r1.X + 10f, r1.Z);
+        var n0 = Pos(Effetto(a, $"stato {idLupo}"));
+        Pausa(1.0);
+        var n1 = Pos(Effetto(a, $"stato {idLupo}"));
+        float spostoNormale = Dist(n0.X, n0.Z, n1.X, n1.Z);
+        Console.WriteLine($"  lupo rallentato del 90%: in un secondo circa {spostoLento:F2} m; senza rallentamento {spostoNormale:F2} m");
+        if (!(spostoLento < 1.5f)) Male("un lupo rallentato del 90% deve muoversi appena");
+        if (!(spostoNormale > 2.5f)) Male("finito il rallentamento il lupo deve tornare al suo passo");
+
+        // danno nel tempo che uccide: il bottino del lupo va ad A.
+        a.ChiediAdmin("segnoprova si", "segno di prova: ");
+        int pelliPrima = a.Quanti(ItemType.RawHide);
+        Effetto(a, $"sanguina 1000 2 {idLupo}");
+        bool lupoMorto = Aspetta(() => Effetto(a, $"stato {idLupo}").StartsWith("errore"), 4);
+        bool pelli = Aspetta(() => a.Quanti(ItemType.RawHide) > pelliPrima, 3);
+        Console.WriteLine($"  lupo con 1000 da perdere: {(lupoMorto ? "morto" : "vivo")} (atteso morto), pelli ad A {pelliPrima} -> {a.Quanti(ItemType.RawHide)}");
+        if (!lupoMorto) Male("il danno nel tempo deve poter uccidere una creatura");
+        if (!pelli) Male("il bottino della creatura uccisa dal danno nel tempo deve andare a chi l'ha inflitto");
+        if (idLupo != "0") a.Admin($"remove {idLupo}");   // vivo o morto, non resta nel mondo di prova
+
+        // Si lascia tutto pulito.
+        foreach (var s in new[] { a, b }) { s.Admin("effetto azzera"); s.Admin("abilita azzera"); s.Admin("clearinv"); s.Admin("sethp 1000"); }
+        a.Dotazione(ItemType.None, ItemType.None, SideItemType.None);
+        Pausa(0.5);
+
+        if (ok) Console.WriteLine("  OK: stordimento, immobilita, rallentamento, danno nel tempo, statistiche e danno subito a tempo fanno cio' che devono, su giocatori e creature");
+        return ok;
+    }
+
     // ---- 8. mangiare cura ------------------------------------------------------
 
     public static bool MangiareCura(string token, string host, int port)
