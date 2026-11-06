@@ -142,7 +142,9 @@ Push-Location "$root\tools\loadtest"
 $esito = $LASTEXITCODE
 Pop-Location
 
-Select-String -Path "$log\regole-server.log" -Pattern "\[LIMITI\]|\[ADMIN\] rifiutato" |
+# "oltre il limite": il server ha scartato in silenzio i messaggi di una sonda
+# oltre i 30 al secondo (P3). Se compare, una prova fallita puo' venire da li'.
+Select-String -Path "$log\regole-server.log" -Pattern "\[LIMITI\]|\[ADMIN\] rifiutato|oltre il limite|eccesso di messaggi" |
     Select-Object -Last 4 | ForEach-Object { "  log server: " + $_.Line }
 
 # ---- persistenza attraverso un riavvio -------------------------------------

@@ -1641,6 +1641,12 @@ static class Regole
         };
         string Mano(ItemType arma, byte posizione)
         {
+            // Tre comandi per arma, dieci armi di fila: senza una pausa si
+            // arriva a 30 comandi in due terzi di secondo, e il server scarta
+            // in silenzio dal 31esimo nella stessa finestra (MaxCommandsPerSecond).
+            // E' quello che e' successo al giro 1 di A14d con la posizione 4,
+            // non il numero del comando (P3, riprodotto il 6 novembre).
+            s.Attendi(() => false, 0.15);
             s.Dotazione(arma, ItemType.None, SideItemType.Shield);
             s.Posizione(posizione);
             CommandResultMsg esito = null;
@@ -2446,7 +2452,10 @@ static class Regole
                 float spostataDopo = Dist(s.X, s.Z, cadeX, cadeZ);
                 Console.WriteLine($"  dopo mezzo minuto: rialzata={rialzata}, vita {su.Vita}, morta={su.Morto}, " +
                                   $"spostata di {spostataDopo:F1} m, legno {s.Quanti(ItemType.Wood)}");
-                if (!rialzata || su.Vita != 50f || su.Morto)
+                // Si rialza a 50; la rigenerazione (un punto ogni 10 secondi, a
+                // orologio fisso, da sazi) puo' cadere nel mezzo secondo dopo e
+                // portarla a 51 (P3: giro 1 di A14d). Non e' un difetto.
+                if (!rialzata || (su.Vita != 50f && su.Vita != 51f) || su.Morto)
                 { Console.WriteLine($"  FALLITA ({nome}): dopo 30 secondi doveva rialzarsi con 50 di vita"); ok = false; }
                 if (spostataDopo > 1.5f) { Console.WriteLine($"  FALLITA ({nome}): non si e' rialzata dove era caduta"); ok = false; }
             }
@@ -3610,7 +3619,9 @@ static class Regole
             Console.WriteLine($"  colpo a terra d'ufficio: colpi {Sonda.Numero(colpo, "colpi a terra")}; " +
                               $"vicina (4,5 m) vita {vaPrima} -> {va.Vita}, lontana (7 m) vita {vbPrima} -> {vb.Vita}");
             if (Sonda.Numero(colpo, "colpi a terra") != 1) { Console.WriteLine("  FALLITA: il colpo a terra non e' partito"); ok = false; }
-            if (va.Vita > vaPrima - 35f) { Console.WriteLine("  FALLITA: il colpo a terra non ha preso la sonda a 4,5 metri"); ok = false; }
+            // Il colpo toglie 35; un punto di rigenerazione puo' cadere nei 0,4
+            // secondi dopo (P3), quindi basta che ne manchino 34.
+            if (va.Vita > vaPrima - 34f) { Console.WriteLine("  FALLITA: il colpo a terra non ha preso la sonda a 4,5 metri"); ok = false; }
             if (vb.Vita < vbPrima) { Console.WriteLine("  FALLITA: il colpo a terra ha preso la sonda a 7 metri"); ok = false; }
 
             // --- carica: la sonda A lo picchia, poi va lontano; la B gli sta
