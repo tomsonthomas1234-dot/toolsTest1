@@ -3083,6 +3083,245 @@ static class Regole
         return ok;
     }
 
+    // ---- la lancia (A14g3) -----------------------------------------------------
+    //
+    // Le dodici abilita della lancia, con una lancia di legno Epica (20 a
+    // colpo, portata 2,5 m), sguardo verso +X. A in fazione 1, B e C in 2; per
+    // la Falange C passa per un momento in fazione 1.
+
+    public static bool Lancia(string tokenA, string tokenB, string tokenC, string host, int port)
+    {
+        Console.WriteLine("--- lancia: base, Comuni, Rare ed Epiche");
+        bool ok = true;
+        void Male(string m) { Console.WriteLine("  FALLITA: " + m); ok = false; }
+
+        using var a = new Sonda(tokenA, host, port);
+        using var b = new Sonda(tokenB, host, port);
+        using var c = new Sonda(tokenC, host, port);
+        if (!a.AttendiPronta() || !b.AttendiPronta() || !c.AttendiPronta())
+        { Console.WriteLine("  FALLITA: le sonde non sono entrate in gioco"); return false; }
+
+        const float PX = -150f, PZ = 250f;   // lo stesso punto delle prove della spada
+        static byte[] P<T>(T v) => MessagePack.MessagePackSerializer.Serialize(v);
+        bool Aspetta(Func<bool> cosa, double secondi) =>
+            a.Attendi(() => { b.Attendi(() => true, 0.01); c.Attendi(() => true, 0.01); return cosa(); }, secondi);
+        void Pausa(double secondi) => Aspetta(() => false, secondi);
+        static string Visto(CommandResultMsg r) => r == null ? "nessuna risposta" : r.Success ? "riuscito" : "rifiutato " + r.ErrorCode;
+        float Vita(Sonda chi) => a.Stato(chi.Id).Vita;
+        void Tp(Sonda s, float x, float z)
+        {
+            s.Admin($"tp {x.ToString(Inv)} {z.ToString(Inv)}");
+            Aspetta(() => Dist(s.X, s.Z, x, z) < 0.5f, 6);
+            s.Cammina(0f, 0f, 0.1);
+        }
+        void Piena(params Sonda[] chi)
+        {
+            foreach (var s in chi) s.Admin("sethp 1000");
+            Aspetta(() => chi.All(s => Vita(s) >= 100f), 3);
+            Pausa(0.3);
+        }
+        float Perso(Sonda chi, float prima, double secondi = 1.5)
+        {
+            Aspetta(() => Vita(chi) < prima, secondi);
+            Pausa(0.3);
+            return prima - Vita(chi);
+        }
+        string Effetto(Sonda s, string riga) { Pausa(0.15); return s.ChiediAdmin("effetto " + riga, "effetto: ") ?? "(nessuna risposta)"; }
+        static (float X, float Z) Pos(string riga)
+        {
+            int i = riga.IndexOf("pos=", StringComparison.Ordinal);
+            if (i < 0) return (float.NaN, float.NaN);
+            int f = riga.IndexOf(' ', i);
+            var p = (f < 0 ? riga[(i + 4)..] : riga[(i + 4)..f]).Split(',');
+            return p.Length == 2 && float.TryParse(p[0], System.Globalization.NumberStyles.Float, Inv, out var x)
+                   && float.TryParse(p[1], System.Globalization.NumberStyles.Float, Inv, out var z) ? (x, z) : (float.NaN, float.NaN);
+        }
+        CommandResultMsg Prova(Sonda s, AbilityId id, float yaw = 90f)
+        {
+            Pausa(0.15);
+            s.Comando(118, CommandType.SetAbilitySlot, P(new SetAbilitySlotCommand
+                { Kind = AbilitySlotKind.Weapon, Family = WeaponFamily.Spear, Slot = 0, Ability = id }));
+            CommandResultMsg r = null;
+            Aspetta(() => (r = s.Esito(118)) != null, 5);
+            if (r == null || !r.Success) Male($"{id} nello slot: {Visto(r)}");
+            Pausa(0.15); s.Admin("ricarica");
+            Pausa(0.15);
+            s.Comando(117, CommandType.UseAbility, P(new UseAbilityCommand { Ability = id, Yaw = yaw }));
+            r = null;
+            Aspetta(() => (r = s.Esito(117)) != null, 5);
+            return r;
+        }
+        void Atteso(string cosa, CommandResultMsg r, ErrorCode atteso)
+        {
+            bool giusto = r != null && (atteso == ErrorCode.None ? r.Success : !r.Success && r.ErrorCode == atteso);
+            Console.WriteLine($"  {cosa}: {Visto(r)}{(giusto ? "" : $" (atteso {(atteso == ErrorCode.None ? "riuscito" : atteso.ToString())})")}");
+            if (!giusto) Male($"{cosa}: atteso {(atteso == ErrorCode.None ? "riuscito" : "rifiutato " + atteso)}");
+        }
+        void Pulisci(params Sonda[] chi) { foreach (var s in chi) Effetto(a, $"azzera {s.Id}"); }
+        void Controlla(string cosa, float visto, float atteso)
+        {
+            Console.WriteLine($"  {cosa}: {visto} (atteso {atteso})");
+            if (visto != atteso) Male($"{cosa}: {visto} invece di {atteso}");
+        }
+
+        a.Admin("setfaction 1"); b.Admin("setfaction 2"); c.Admin("setfaction 2");
+        foreach (var s in new[] { a, b, c }) { s.Admin("clearinv"); s.Admin("abilita azzera"); s.Admin("effetto azzera"); }
+        b.Dotazione(ItemType.None, ItemType.None, SideItemType.None);
+        c.Dotazione(ItemType.None, ItemType.None, SideItemType.None);
+        Tp(a, PX, PZ); Tp(b, PX + 6f, PZ); Tp(c, PX - 20f, PZ);
+        {
+            Pausa(0.15);
+            var r = a.ChiediAdmin("dai WoodSpear epico", "dai: ");
+            ulong id = r != null && ulong.TryParse(r.Split("id=").Last(), out var n) ? n : 0;
+            if (id == 0 || !Aspetta(() => { lock (a.Zaino) return a.Istanze.ContainsKey(id); }, 5))
+                Male($"'dai WoodSpear epico' non ha dato la lancia ({r ?? "nessuna risposta"})");
+            a.Dotazione(ItemType.WoodSpear, ItemType.None, SideItemType.None);
+            a.Posizione(0);
+            Pausa(0.15); a.Admin("abilita sblocca lancia");
+            Pausa(0.4);
+        }
+        Piena(a, b, c);
+
+        // 1. Stoccata lunga: B a 6 m no, a 3,5 m (oltre la portata della lancia) 20.
+        Atteso("Stoccata lunga su B a 6 m", Prova(a, AbilityId.SpearLongThrust), ErrorCode.AbilityNotUsable);
+        Tp(b, PX + 3.5f, PZ);
+        float prima = Vita(b);
+        Atteso("Stoccata lunga su B a 3,5 m", Prova(a, AbilityId.SpearLongThrust), ErrorCode.None);
+        Controlla("Stoccata lunga, B perde", Perso(b, prima, 1.0), 20f);
+
+        // 2. Lancio: B a 10 m, 150% = 30.
+        Tp(b, PX + 10f, PZ);
+        prima = Vita(b);
+        Atteso("Lancio su B a 10 m", Prova(a, AbilityId.SpearThrow), ErrorCode.None);
+        Controlla("Lancio, B perde", Perso(b, prima, 1.0), 30f);
+
+        // 3. Balzo indietro: A da PX a PX - 4.
+        Atteso("Balzo indietro", Prova(a, AbilityId.SpearBackstep), ErrorCode.None);
+        Pausa(0.2);
+        var (ax, az) = Pos(Effetto(a, "stato"));
+        Console.WriteLine($"  Balzo indietro: A a ({ax:F2}, {az:F2}) (atteso {PX - 4f}, {PZ})");
+        if (float.IsNaN(ax) || Dist(ax, az, PX - 4f, PZ) > 0.4f) Male("il Balzo indietro deve portare A 4 m indietro");
+        Tp(a, PX, PZ);
+
+        // 4. Tenere a distanza: B a 1,5 m prende 10 (meta' di 20) e va oltre i 2 m.
+        Tp(b, PX + 1.5f, PZ);
+        Piena(b);
+        prima = Vita(b);
+        Atteso("Tenere a distanza", Prova(a, AbilityId.SpearKeepAtBay), ErrorCode.None);
+        float tenere = Perso(b, prima, 1.0);
+        var (bx, bz) = Pos(Effetto(a, $"stato {b.Id}"));
+        Controlla("Tenere a distanza, B perde", tenere, 10f);
+        Console.WriteLine($"  Tenere a distanza: B a ({bx:F2}, {bz:F2}) (atteso {PX + 3.5f}, {PZ})");
+        if (float.IsNaN(bx) || Dist(bx, bz, PX + 3.5f, PZ) > 0.4f) Male("Tenere a distanza deve spingere B di 2 m");
+        Pausa(3.2);
+
+        // 5. Perforare: B a 1,5 m e C dietro a 3 m, 20 a tutti e due.
+        Tp(b, PX + 1.5f, PZ); Tp(c, PX + 3f, PZ);
+        Piena(b, c);
+        float pb = Vita(b), pc = Vita(c);
+        Atteso("Perforare", Prova(a, AbilityId.SpearPierce), ErrorCode.None);
+        Aspetta(() => Vita(b) < pb && Vita(c) < pc, 1.5);
+        Pausa(0.3);
+        Controlla("Perforare, B perde", pb - Vita(b), 20f);
+        Controlla("Perforare, C dietro perde", pc - Vita(c), 20f);
+        Tp(c, PX - 20f, PZ);
+
+        // 6. Inchiodare: B perde 20 ed e' rallentato del 70%.
+        Piena(b);
+        prima = Vita(b);
+        Atteso("Inchiodare", Prova(a, AbilityId.SpearPinDown), ErrorCode.None);
+        Controlla("Inchiodare, B perde", Perso(b, prima, 1.0), 20f);
+        string stB = Effetto(a, $"stato {b.Id}");
+        Console.WriteLine($"  Inchiodare: {stB}");
+        if (!stB.Contains("rallentato 70%")) Male("Inchiodare deve rallentare del 70%");
+        Pulisci(b);
+
+        // 7. Carica: B a 6 m, A corre fino a 1,5 m da lui, B perde 40 ed e' stordito.
+        Tp(b, PX + 6f, PZ);
+        Piena(b);
+        prima = Vita(b);
+        Atteso("Carica", Prova(a, AbilityId.SpearCharge), ErrorCode.None);
+        Controlla("Carica, B perde", Perso(b, prima, 1.0), 40f);
+        stB = Effetto(a, $"stato {b.Id}");
+        (ax, az) = Pos(Effetto(a, "stato"));
+        Console.WriteLine($"  Carica: A a ({ax:F2}, {az:F2}) (atteso fra {PX + 4.2f} e {PX + 4.8f}); {stB}");
+        if (float.IsNaN(ax) || ax < PX + 4.2f || ax > PX + 4.8f) Male("la Carica deve fermarsi a 1,5 m da B");
+        if (!stB.Contains("stordito")) Male("la Carica deve stordire chi prende");
+        Pulisci(b);
+        Tp(a, PX, PZ);
+
+        // 8. Raffica: tre stoccate da 20 su B.
+        Tp(b, PX + 1.5f, PZ);
+        Piena(b);
+        prima = Vita(b);
+        Atteso("Raffica", Prova(a, AbilityId.SpearFlurry), ErrorCode.None);
+        Aspetta(() => prima - Vita(b) >= 60f, 3);
+        Pausa(0.5);
+        Controlla("Raffica, B perde", prima - Vita(b), 60f);
+
+        // 9. Spazzata: B davanti e C dietro a 3 m, 20 e stordimento a tutti e due.
+        Tp(c, PX - 3f, PZ);
+        Piena(b, c);
+        pb = Vita(b); pc = Vita(c);
+        Atteso("Spazzata", Prova(a, AbilityId.SpearSweep), ErrorCode.None);
+        Aspetta(() => Vita(b) < pb && Vita(c) < pc, 1.5);
+        Pausa(0.1);
+        string stC = Effetto(a, $"stato {c.Id}");
+        stB = Effetto(a, $"stato {b.Id}");
+        Controlla("Spazzata, B perde", pb - Vita(b), 20f);
+        Controlla("Spazzata, C perde", pc - Vita(c), 20f);
+        if (!stB.Contains("stordito") || !stC.Contains("stordito")) Male($"la Spazzata deve stordire tutti e due ({stB} / {stC})");
+        Pulisci(b, c);
+
+        // 10. Lancio passante: B a 5 m e C a 12 m sulla linea, 20 a tutti e due.
+        Tp(b, PX + 5f, PZ); Tp(c, PX + 12f, PZ);
+        Piena(b, c);
+        pb = Vita(b); pc = Vita(c);
+        Atteso("Lancio passante", Prova(a, AbilityId.SpearPiercingThrow), ErrorCode.None);
+        Aspetta(() => Vita(b) < pb && Vita(c) < pc, 1.5);
+        Pausa(0.3);
+        Controlla("Lancio passante, B perde", pb - Vita(b), 20f);
+        Controlla("Lancio passante, C perde", pc - Vita(c), 20f);
+        Tp(c, PX - 20f, PZ);
+
+        // 11. Impalare: B perde 20, immobile, poi 8 di sanguinamento (40%) in 3 s.
+        Tp(b, PX + 1.5f, PZ);
+        Piena(b);
+        prima = Vita(b);
+        Atteso("Impalare", Prova(a, AbilityId.SpearImpale), ErrorCode.None);
+        float impala = Perso(b, prima, 1.0);
+        stB = Effetto(a, $"stato {b.Id}");
+        Aspetta(() => prima - Vita(b) >= 28f, 5);
+        Pausa(1.3);
+        Controlla("Impalare, B perde subito", impala, 20f);
+        Controlla("Impalare, B perde in tutto", prima - Vita(b), 28f);
+        Console.WriteLine($"  Impalare: {stB}");
+        if (!stB.Contains("immobile")) Male("Impalare deve immobilizzare");
+        Pulisci(b);
+
+        // 12. Falange: A e C (passata in fazione 1, a 3 m) a -25% danno subito,
+        //     B nemico a 1,5 m no.
+        c.Admin("setfaction 1");
+        Tp(c, PX - 3f, PZ);
+        Pausa(0.3);
+        Atteso("Falange", Prova(a, AbilityId.SpearPhalanx), ErrorCode.None);
+        string stA = Effetto(a, "stato");
+        stC = Effetto(a, $"stato {c.Id}");
+        stB = Effetto(a, $"stato {b.Id}");
+        Console.WriteLine($"  Falange: A {stA}; C {stC}; B {stB}");
+        if (!stA.Contains("danno subito -25%") || !stC.Contains("danno subito -25%")) Male("la Falange deve dare -25% danno subito a chi la usa e agli alleati vicini");
+        if (stB.Contains("Falange")) Male("la Falange non deve andare ai nemici");
+
+        // Si lascia tutto pulito.
+        c.Admin("setfaction 2");
+        foreach (var s in new[] { a, b, c }) { s.Admin("effetto azzera"); s.Admin("abilita azzera"); s.Admin("clearinv"); s.Admin("sethp 1000"); }
+        a.Dotazione(ItemType.None, ItemType.None, SideItemType.None);
+        Pausa(0.5);
+
+        if (ok) Console.WriteLine("  OK: le dodici abilita della lancia fanno cio' che devono");
+        return ok;
+    }
+
     // ---- 8. mangiare cura ------------------------------------------------------
 
     public static bool MangiareCura(string token, string host, int port)

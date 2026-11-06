@@ -178,6 +178,7 @@ if (modoRegole)
         ("abilita della spada",     () => Regole.AbilitaDellaSpada(tokens[1], tokens[0], tokens[4], host, port)),
         ("effetti a tempo",         () => Regole.EffettiATempo(tokens[1], tokens[0], host, port)),
         ("resto della spada",       () => Regole.RestoDellaSpada(tokens[1], tokens[0], tokens[4], host, port)),
+        ("lancia",                  () => Regole.Lancia(tokens[1], tokens[0], tokens[4], host, port)),
         ("silenzio",                () => Regole.Silenzio(tokens[0], TokenBersaglio(), host, port)),
         ("bando",                   () => Regole.Bando(tokens[0], TokenBersaglio, host, port)),
     };
