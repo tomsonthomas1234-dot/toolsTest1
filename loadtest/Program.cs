@@ -186,6 +186,7 @@ if (modoRegole)
         ("guerriero",               () => Regole.Guerriero(tokens[1], tokens[0], tokens[4], host, port)),
         ("passive del guerriero",   () => Regole.PassiveDelGuerriero(tokens[1], tokens[0], host, port)),
         ("sfida e provocazione",    () => Regole.SfidaEProvocazione(tokens[1], tokens[0], host, port)),
+        ("provocazione sui giocatori", () => Regole.ProvocazioneSuiGiocatori(tokens[1], tokens[0], host, port)),
         ("silenzio",                () => Regole.Silenzio(tokens[0], TokenBersaglio(), host, port)),
         ("bando",                   () => Regole.Bando(tokens[0], TokenBersaglio, host, port)),
     };

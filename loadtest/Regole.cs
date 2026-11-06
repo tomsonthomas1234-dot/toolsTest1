@@ -7004,7 +7004,9 @@ static class Regole
         Console.WriteLine($"  Robusto dalla secondaria: vita massima {vitaSecondaria} (attesa {vitaBase + 13}); {Slots()}");
         if (vitaSecondaria != vitaBase + 13) Male("Robusto dalla secondaria deve valere come dalla principale");
         // Sfida senza creature attorno non parte (A14j1c) e non va in ricarica.
-        Atteso("Sfida senza creature attorno", Manda(CommandType.UseAbility, P(new UseAbilityCommand { Ability = AbilityId.WarriorChallenge })),
+        // B, nemica, va lontana: entro 1 m la Sfida prenderebbe lei (A14j2).
+        Tp(b, PX + 40f, PZ);
+        Atteso("Sfida senza creature ne nemici attorno", Manda(CommandType.UseAbility, P(new UseAbilityCommand { Ability = AbilityId.WarriorChallenge })),
                ErrorCode.AbilityNotUsable);
         if (a.Abilita?.Cooldowns?.Length > 0) Male("un'attiva senza effetto non deve andare in ricarica");
         Atteso("togliere la secondaria", Scegli(ClassId.None, true), ErrorCode.None);
@@ -7022,8 +7024,8 @@ static class Regole
     /// <summary>
     /// A14j1a: le attive del Guerriero. A e il Guerriero (fazione 1, spada di
     /// pietra), B il nemico (fazione 2, spada di pietra: il suo colpo fa 22),
-    /// C l'alleata di A (fazione 1, a mani nude). Sfida e Provocazione non
-    /// hanno ancora effetto (A14j1c, A14j2).
+    /// C l'alleata di A (fazione 1, a mani nude). Sfida e Provocazione hanno
+    /// le loro prove (A14j1c, A14j2).
     /// </summary>
     public static bool Guerriero(string tokenA, string tokenB, string tokenC, string host, int port)
     {
@@ -7379,7 +7381,7 @@ static class Regole
     /// ad A non morde finche A non lo sfida; sfidato, per 4 s insegue e morde
     /// solo A, poi torna libero. La Provocazione prende tutte le creature
     /// entro 8 m. Un Eco dell'orda (vede tutti) che caccia B passa ad A con la
-    /// Provocazione. La Sfida su un giocatore (A14j2) e senza creature attorno
+    /// Provocazione. La Sfida su un'alleata e senza creature attorno
     /// non parte. Il Custode non e provato qui (codice letto).
     /// </summary>
     public static bool SfidaEProvocazione(string tokenA, string tokenB, string host, int port)
@@ -7485,11 +7487,11 @@ static class Regole
             Atteso("Provocazione senza creature attorno", Usa(AbilityId.WarriorTaunt), ErrorCode.AbilityNotUsable);
 
             // 1. Un lupo accanto ad A: col segno di prova non lo vede. Sfida
-            //    su B, un giocatore, non parte (e A14j2) nemmeno col lupo li.
+            //    su B, un'alleata, non parte nemmeno col lupo li.
             ulong lupo = Nasce(a, "spawn wolf", EntityType.Wolf);
             if (lupo == 0) return false;
             Tp(b, PX + 1f, PZ - 1f);
-            Atteso("Sfida su B, un giocatore (A14j2)", Usa(AbilityId.WarriorChallenge, b.Id), ErrorCode.AbilityNotUsable);
+            Atteso("Sfida su B, un'alleata", Usa(AbilityId.WarriorChallenge, b.Id), ErrorCode.AbilityNotUsable);
             Tp(b, PX - 40f, PZ);
             float prima = Vita(a);
             Pausa(1.5);
@@ -7501,6 +7503,7 @@ static class Regole
             if (Vista(lupo) is { } lu) Tp(a, lu.X - 1.5f, lu.Z);
             prima = Vita(a);
             Atteso("Sfida sul lupo", Usa(AbilityId.WarriorChallenge, lupo), ErrorCode.None);
+            var daSfida = System.Diagnostics.Stopwatch.StartNew();
             st = StatoDi(lupo);
             Uguale("Sfida, lupo provocato da", Campo(st, "provocata"), ida);
             Uguale("Sfida, lupo caccia", Campo(st, "caccia"), ida);
@@ -7508,8 +7511,10 @@ static class Regole
             Console.WriteLine($"  Sfida, il lupo morde A: {morso} (vita {prima} -> {Vita(a)})");
             if (!morso) Male("sfidato, il lupo doveva mordere A");
 
-            // 3. Finiti i 4 s torna libero: non caccia piu e non morde.
-            Pausa(3.5);
+            // 3. Finiti i 4 s torna libero: non caccia piu e non morde. Si
+            //    contano dalla Sfida (giro di A14j2: col morso subito, 3,5 s
+            //    dopo il morso erano meno di 4 dalla Sfida).
+            Pausa(Math.Max(0.1, 4.4 - daSfida.Elapsed.TotalSeconds));
             st = StatoDi(lupo);
             Uguale("dopo 4 s, lupo provocato da", Campo(st, "provocata"), "0");
             Pausa(0.5);
@@ -7523,6 +7528,10 @@ static class Regole
             Pausa(0.3);
             // Il primo lupo vaga (giro 1: era a 18 m): A gli va accanto prima
             // che nasca il secondo, cosi tutti e due restano entro 8 m.
+            // Giro di A14j2: anche cosi era andato a 5,4 m e poi fuori dagli 8
+            // m durante l'uso; ora sta fermo finche non e provocato.
+            a.ChiediAdmin($"effetto immobile 6 {lupo}", "effetto: ");
+            Pausa(0.2);
             if (Vista(lupo) is { } l1) Tp(a, l1.X - 1.5f, l1.Z);
             ulong lupo2 = Nasce(a, "spawn wolf", EntityType.Wolf);
             if (Vista(lupo) is { } l1b && Vista(lupo2) is { } l2)
@@ -7565,6 +7574,163 @@ static class Regole
         }
 
         if (ok) Console.WriteLine("  OK: Sfida e Provocazione portano belve ed Echi sul Guerriero per 4 s, poi tornano liberi");
+        return ok;
+    }
+
+    /// <summary>
+    /// A14j2: Sfida e Provocazione sui giocatori. A e il Guerriero (fazione 1,
+    /// a mani vuote), B una nemica (fazione 2) con la spada di pietra che non
+    /// preme niente: provocata si gira e da ad A il suo colpo base, una volta,
+    /// poi torna libera. Sfida mirata entro 1 m, Sfida senza bersaglio sul
+    /// nemico piu vicino, Provocazione entro 2 m; oltre la portata e su
+    /// un'alleata non parte. Con l'arco in mano il colpo e il pugno.
+    /// </summary>
+    public static bool ProvocazioneSuiGiocatori(string tokenA, string tokenB, string host, int port)
+    {
+        Console.WriteLine("--- provocazione sui giocatori: il nemico provocato si gira e colpisce il Guerriero");
+        bool ok = true;
+        void Male(string m) { Console.WriteLine("  FALLITA: " + m); ok = false; }
+
+        using var a = new Sonda(tokenA, host, port);
+        using var b = new Sonda(tokenB, host, port);
+        if (!a.AttendiPronta() || !b.AttendiPronta())
+        { Console.WriteLine("  FALLITA: le sonde non sono entrate in gioco"); return false; }
+
+        const float PX = -150f, PZ = 250f;   // lo stesso punto delle prove delle armi
+        static byte[] P<T>(T v) => MessagePack.MessagePackSerializer.Serialize(v);
+        bool Aspetta(Func<bool> cosa, double secondi) =>
+            a.Attendi(() => { b.Attendi(() => true, 0.01); return cosa(); }, secondi);
+        void Pausa(double secondi) => Aspetta(() => false, secondi);
+        static string Visto(CommandResultMsg r) => r == null ? "nessuna risposta" : r.Success ? "riuscito" : "rifiutato " + r.ErrorCode;
+        float Vita(Sonda chi) => a.Stato(chi.Id).Vita;
+        void Tp(Sonda s, float x, float z)
+        {
+            s.Admin($"tp {x.ToString(Inv)} {z.ToString(Inv)}");
+            Aspetta(() => Dist(s.X, s.Z, x, z) < 0.3f, 6);
+            s.Cammina(0f, 0f, 0.1);
+        }
+        void Piene()
+        {
+            a.Admin("sethp 1000"); b.Admin("sethp 1000");
+            Aspetta(() => Vita(a) >= 100f && Vita(b) >= 100f, 3);
+            Pausa(0.2);
+        }
+        uint idComando = 300;
+        CommandResultMsg Usa(AbilityId id, ulong bersaglio = 0, float yaw = 90f)
+        {
+            uint idSlot = idComando++, idUso = idComando++;
+            Pausa(0.15);
+            a.Comando(idSlot, CommandType.SetAbilitySlot, P(new SetAbilitySlotCommand
+                { Kind = AbilitySlotKind.ClassActive, Slot = 0, Ability = id }));
+            CommandResultMsg r = null;
+            Aspetta(() => (r = a.Esito(idSlot)) != null, 5);
+            if (r == null || !r.Success) Male($"{id} nello slot: {Visto(r)}");
+            Pausa(0.15); a.Admin("ricarica");
+            Pausa(0.15);
+            a.Comando(idUso, CommandType.UseAbility, P(new UseAbilityCommand { Ability = id, TargetEntityId = bersaglio, Yaw = yaw }));
+            r = null;
+            Aspetta(() => (r = a.Esito(idUso)) != null, 5);
+            return r;
+        }
+        void Atteso(string cosa, CommandResultMsg r, ErrorCode atteso)
+        {
+            bool giusto = r != null && (atteso == ErrorCode.None ? r.Success : !r.Success && r.ErrorCode == atteso);
+            Console.WriteLine($"  {cosa}: {Visto(r)}{(giusto ? "" : $" (atteso {(atteso == ErrorCode.None ? "riuscito" : atteso.ToString())})")}");
+            if (!giusto) Male($"{cosa}: atteso {(atteso == ErrorCode.None ? "riuscito" : "rifiutato " + atteso)}");
+        }
+        // Quanto perde A dopo un uso: aspetta il colpo, poi ancora un poco.
+        float PersoDaA(float prima)
+        {
+            Aspetta(() => Vita(a) < prima, 1.5);
+            Pausa(0.3);
+            return prima - Vita(a);
+        }
+        // Un uso che deve riuscire e far colpire A da B una volta sola.
+        float ColpoSuA(string cosa, AbilityId id, ulong bersaglio = 0)
+        {
+            Piene();
+            float pa = Vita(a), pb = Vita(b);
+            Atteso(cosa, Usa(id, bersaglio), ErrorCode.None);
+            float perso = PersoDaA(pa);
+            Console.WriteLine($"  {cosa}: A perde {perso}, B perde {pb - Vita(b)}");
+            if (perso <= 0f) Male($"{cosa}: B doveva girarsi e colpire A");
+            if (Vita(b) < pb) Male($"{cosa}: B non doveva perdere vita");
+            return perso;
+        }
+        // Un uso che non deve partire, ne far colpire A.
+        void Rifiutato(string cosa, AbilityId id, ulong bersaglio = 0)
+        {
+            Piene();
+            float pa = Vita(a);
+            Atteso(cosa, Usa(id, bersaglio), ErrorCode.AbilityNotUsable);
+            Pausa(0.5);
+            if (Vita(a) < pa) Male($"{cosa}: rifiutata, ma A ha perso vita");
+        }
+
+        a.Admin("setfaction 1"); b.Admin("setfaction 2");
+        foreach (var s in new[] { a, b })
+        {
+            s.Admin("clearinv"); s.Admin("abilita azzera"); s.Admin("effetto azzera");
+            s.Dotazione(ItemType.None, ItemType.None, SideItemType.None);
+            s.Posizione(0);
+        }
+        b.Admin("give StoneSword 1");
+        Aspetta(() => b.Istanze.Values.Any(v => v.Tipo == ItemType.StoneSword), 5);
+        b.Dotazione(ItemType.StoneSword, ItemType.None, SideItemType.None);
+        b.Posizione(0);
+        Tp(a, PX, PZ); Tp(b, PX + 3f, PZ);
+        Pausa(0.15); Console.WriteLine($"  {a.ChiediAdmin("classe guerriero", "classe: ")}");
+        Pausa(0.15); Console.WriteLine($"  {a.ChiediAdmin("classe sblocca", "classe: ")}");
+        Pausa(0.15); a.Admin("abilita sblocca guerriero");
+        Pausa(0.4);
+
+        try
+        {
+            // 0. B nemica a 3 m: fuori portata per tutte e due.
+            Rifiutato("Sfida su B a 3 m", AbilityId.WarriorChallenge, b.Id);
+            Rifiutato("Provocazione con B a 3 m", AbilityId.WarriorTaunt);
+
+            // 1. B a 0,6 m: la Sfida mirata la fa girare e colpire una volta,
+            //    poi torna libera (non preme niente: A non perde piu).
+            Tp(b, PX + 0.6f, PZ);
+            float spada = ColpoSuA("Sfida su B a 0,6 m", AbilityId.WarriorChallenge, b.Id);
+            float dopo = Vita(a);
+            Pausa(1.5);
+            Console.WriteLine($"  dopo la Sfida: vita di A {dopo} -> {Vita(a)}");
+            if (Vita(a) < dopo) Male("dopo il colpo B doveva tornare libera e non colpire piu");
+
+            // 2. Sfida senza bersaglio: il nemico piu vicino entro 1 m.
+            ColpoSuA("Sfida senza bersaglio, B a 0,6 m", AbilityId.WarriorChallenge);
+
+            // 3. B a 1,5 m: la Sfida no (1 m), la Provocazione si (2 m).
+            Tp(b, PX + 1.5f, PZ);
+            Rifiutato("Sfida su B a 1,5 m", AbilityId.WarriorChallenge, b.Id);
+            ColpoSuA("Provocazione con B a 1,5 m", AbilityId.WarriorTaunt);
+
+            // 4. Con l'arco in mano B colpisce col pugno: meno della spada.
+            b.Admin("give Bow 1");
+            Aspetta(() => b.Istanze.Values.Any(v => v.Tipo == ItemType.Bow), 5);
+            b.Dotazione(ItemType.Bow, ItemType.None, SideItemType.None);
+            b.Posizione(0);
+            Pausa(0.4);
+            float pugno = ColpoSuA("Provocazione, B con l'arco", AbilityId.WarriorTaunt);
+            Console.WriteLine($"  colpo con la spada {spada}, col pugno {pugno}");
+            if (pugno >= spada) Male("con l'arco in mano il colpo forzato doveva essere il pugno, piu debole della spada");
+
+            // 5. B alleata a 0,6 m: niente.
+            b.Admin("setfaction 1");
+            Tp(b, PX + 0.6f, PZ);
+            Pausa(0.3);
+            Rifiutato("Sfida su B alleata", AbilityId.WarriorChallenge, b.Id);
+            Rifiutato("Provocazione con B alleata", AbilityId.WarriorTaunt);
+        }
+        finally
+        {
+            foreach (var s in new[] { a, b }) { s.Admin("setfaction 1"); s.Admin("aterra rialza"); s.Admin("effetto azzera"); s.Admin("abilita azzera"); s.Admin("clearinv"); s.Admin("sethp 1000"); }
+            Pausa(0.5);
+        }
+
+        if (ok) Console.WriteLine("  OK: Sfida e Provocazione fanno girare il nemico vicino, che colpisce il Guerriero una volta");
         return ok;
     }
     static readonly System.Globalization.CultureInfo Inv =
