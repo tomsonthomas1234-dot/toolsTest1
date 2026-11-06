@@ -7583,7 +7583,9 @@ static class Regole
     /// preme niente: provocata si gira e da ad A il suo colpo base, una volta,
     /// poi torna libera. Sfida mirata entro 1 m, Sfida senza bersaglio sul
     /// nemico piu vicino, Provocazione entro 2 m; oltre la portata e su
-    /// un'alleata non parte. Con l'arco in mano il colpo e il pugno.
+    /// un'alleata non parte. A14j2b: il colpo arriva entro 1,5 s (il tempo di
+    /// caricare e scoccare una freccia); con l'arco e le frecce B scocca una
+    /// freccia vera alla fine della carica; senza frecce resta il pugno.
     /// </summary>
     public static bool ProvocazioneSuiGiocatori(string tokenA, string tokenB, string host, int port)
     {
@@ -7639,11 +7641,23 @@ static class Regole
             if (!giusto) Male($"{cosa}: atteso {(atteso == ErrorCode.None ? "riuscito" : "rifiutato " + atteso)}");
         }
         // Quanto perde A dopo un uso: aspetta il colpo, poi ancora un poco.
-        float PersoDaA(float prima)
+        // In `arrivo` quanti secondi dopo l'esito e arrivato il colpo.
+        double arrivo = double.NaN;
+        float PersoDaA(float prima, double secondi = 1.5)
         {
-            Aspetta(() => Vita(a) < prima, 1.5);
+            var orologio = System.Diagnostics.Stopwatch.StartNew();
+            arrivo = Aspetta(() => Vita(a) < prima, secondi) ? orologio.Elapsed.TotalSeconds : double.NaN;
             Pausa(0.3);
             return prima - Vita(a);
+        }
+        // La provocazione su un giocatore dura il tempo di caricare e
+        // scoccare una freccia: 1,5 s (A14j2b). Un poco di margine per la rete.
+        const double DurataProvocazione = 1.5, Margine = 0.25;
+        void DentroLaDurata(string cosa)
+        {
+            Console.WriteLine($"  {cosa}: colpo arrivato dopo {arrivo:F2} s");
+            if (double.IsNaN(arrivo) || arrivo > DurataProvocazione + Margine)
+                Male($"{cosa}: il colpo doveva arrivare entro {DurataProvocazione} s");
         }
         // Un uso che deve riuscire e far colpire A da B una volta sola.
         float ColpoSuA(string cosa, AbilityId id, ulong bersaglio = 0)
@@ -7694,6 +7708,7 @@ static class Regole
             //    poi torna libera (non preme niente: A non perde piu).
             Tp(b, PX + 0.6f, PZ);
             float spada = ColpoSuA("Sfida su B a 0,6 m", AbilityId.WarriorChallenge, b.Id);
+            DentroLaDurata("Sfida, B con la spada");
             float dopo = Vita(a);
             Pausa(1.5);
             Console.WriteLine($"  dopo la Sfida: vita di A {dopo} -> {Vita(a)}");
@@ -7706,18 +7721,46 @@ static class Regole
             Tp(b, PX + 1.5f, PZ);
             Rifiutato("Sfida su B a 1,5 m", AbilityId.WarriorChallenge, b.Id);
             ColpoSuA("Provocazione con B a 1,5 m", AbilityId.WarriorTaunt);
+            DentroLaDurata("Provocazione, B con la spada");
 
-            // 4. Con l'arco in mano B colpisce col pugno: meno della spada.
+            // 4. Con l'arco in mano ma senza frecce B colpisce col pugno: meno
+            //    della spada (scelta provvisoria dell'agente, A14j2b).
             b.Admin("give Bow 1");
             Aspetta(() => b.Istanze.Values.Any(v => v.Tipo == ItemType.Bow), 5);
             b.Dotazione(ItemType.Bow, ItemType.None, SideItemType.None);
             b.Posizione(0);
             Pausa(0.4);
-            float pugno = ColpoSuA("Provocazione, B con l'arco", AbilityId.WarriorTaunt);
+            float pugno = ColpoSuA("Provocazione, B con l'arco senza frecce", AbilityId.WarriorTaunt);
             Console.WriteLine($"  colpo con la spada {spada}, col pugno {pugno}");
-            if (pugno >= spada) Male("con l'arco in mano il colpo forzato doveva essere il pugno, piu debole della spada");
+            if (pugno >= spada) Male("con l'arco senza frecce il colpo forzato doveva essere il pugno, piu debole della spada");
+            Pausa(DurataProvocazione);   // che B torni libera
 
-            // 5. B alleata a 0,6 m: niente.
+            // 5. Con l'arco e le frecce B carica e scocca una freccia su A
+            //    (A14j2b): il colpo arriva alla fine della carica, non prima
+            //    di un secondo, e consuma una freccia. Una freccia a carica
+            //    piena (40) fa piu della spada (22). B sta a 1,9 m: dentro i 2 m
+            //    della Provocazione, fuori dagli 1,8 m da cui si raccoglie la
+            //    freccia che a volte cade accanto ad A (altrimenti B se la
+            //    riprende e il conto delle frecce non torna).
+            Tp(b, PX + 1.9f, PZ);
+            b.Admin("give Arrow 5");
+            Aspetta(() => b.Quanti(ItemType.Arrow) >= 5, 5);
+            int frecce = b.Quanti(ItemType.Arrow);
+            Piene();
+            float pa = Vita(a), pb = Vita(b);
+            Atteso("Provocazione, B con l'arco e le frecce", Usa(AbilityId.WarriorTaunt), ErrorCode.None);
+            float freccia = PersoDaA(pa, 3.0);
+            Console.WriteLine($"  Provocazione, B con l'arco: A perde {freccia} dopo {arrivo:F2} s, frecce di B {frecce} -> {b.Quanti(ItemType.Arrow)}");
+            if (freccia <= spada) Male($"con l'arco B doveva scoccare una freccia a carica piena, piu forte della spada (ha tolto {freccia})");
+            if (double.IsNaN(arrivo) || arrivo < 1.0 || arrivo > DurataProvocazione + Margine)
+                Male($"la freccia doveva partire alla fine della carica, fra 1 e {DurataProvocazione} s");
+            if (b.Quanti(ItemType.Arrow) != frecce - 1) Male("la freccia scoccata doveva consumare una freccia di B");
+            if (Vita(b) < pb) Male("B non doveva perdere vita");
+            float dopoFreccia = Vita(a);
+            Pausa(1.5);
+            if (Vita(a) < dopoFreccia) Male("dopo la freccia B doveva tornare libera e non tirare piu");
+
+            // 6. B alleata a 0,6 m: niente.
             b.Admin("setfaction 1");
             Tp(b, PX + 0.6f, PZ);
             Pausa(0.3);
