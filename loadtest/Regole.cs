@@ -1991,11 +1991,22 @@ static class Regole
 
         // 2. rigenerazione in combattimento: senza mangiare, circa 1,3 punti
         //    al secondo su 142. In cinque secondi almeno quattro punti.
+        //    Le sonde nascono con la rigenerazione ferma (P4): prima si guarda
+        //    che ferma lo sia davvero, poi la si accende per la misura e la si
+        //    spegne di nuovo, per le parti dopo che leggono la vita esatta.
+        if (a.ChiediAdmin("rigenerazione", "rigenerazione: ") != "no") Male("la sonda non nasce con la rigenerazione ferma");
         a.Admin("sethp 50");
         a.Attendi(() => VitaA() == 50f, 3);
+        float ferma0 = VitaA();
+        a.Attendi(() => false, 3.2);
+        float ferma1 = VitaA();
+        Console.WriteLine($"  rigenerazione ferma: vita {ferma0} -> {ferma1} in 3 secondi col ferro");
+        if (ferma1 != ferma0) Male("con la rigenerazione ferma la vita e' salita lo stesso");
+        if (a.ChiediAdmin("rigenerazione si", "rigenerazione: ") != "si") Male("'rigenerazione si' non accende la rigenerazione");
         float da = VitaA();
         a.Attendi(() => false, 5.2);
         float poi = VitaA();
+        if (a.ChiediAdmin("rigenerazione no", "rigenerazione: ") != "no") Male("'rigenerazione no' non ferma la rigenerazione");
         Console.WriteLine($"  rigenerazione: vita {da} -> {poi} in 5 secondi (attesi circa {vitaF * 9 / 1000.0 * 5:F1} punti)");
         if (poi - da < 4f || poi - da > 9f) Male("la rigenerazione del ferro non ha reso quello che deve");
 
@@ -2171,13 +2182,11 @@ static class Regole
                           $"  carne {carnePrima} → {s.Quanti(ItemType.Meat)}");
 
         bool rifiutaDaIntegro = !daIntegro.Success;
-        // 40 + 25 della carne. La rigenerazione (un punto ogni 10 secondi, da
-        // sazi e dissetati) va per conto suo e puo' cadere fra "sethp 40" e il
-        // pasto: allora la vita e' 66 (backlog P2, log a14c-giro-1). La cura
-        // la dice esatta il messaggio, che conta solo il pasto; la vita puo'
-        // avere al piu' un punto di rigenerazione in piu'.
+        // 40 + 25 della carne, esatti: le sonde nascono con la rigenerazione
+        // ferma (P4), che prima poteva cadere fra "sethp 40" e il pasto e dare
+        // 66 (P2, log a14c-giro-1).
         bool curaDaFerito     = daFerito.Success && daFerito.Message == "+25 vita"
-                                && daFerito.Hp >= 65 && daFerito.Hp <= 66;
+                                && daFerito.Hp == 65;
         bool consumata        = s.Quanti(ItemType.Meat) == carnePrima - 1;
 
         if (rifiutaDaIntegro && curaDaFerito && consumata)
@@ -2901,10 +2910,9 @@ static class Regole
                 float spostataDopo = Dist(s.X, s.Z, cadeX, cadeZ);
                 Console.WriteLine($"  dopo mezzo minuto: rialzata={rialzata}, vita {su.Vita}, morta={su.Morto}, " +
                                   $"spostata di {spostataDopo:F1} m, legno {s.Quanti(ItemType.Wood)}");
-                // Si rialza a 50; la rigenerazione (un punto ogni 10 secondi, a
-                // orologio fisso, da sazi) puo' cadere nel mezzo secondo dopo e
-                // portarla a 51 (P3: giro 1 di A14d). Non e' un difetto.
-                if (!rialzata || (su.Vita != 50f && su.Vita != 51f) || su.Morto)
+                // Si rialza a 50 esatti: con la rigenerazione ferma delle sonde
+                // (P4) non cade piu' il punto in piu' del giro 1 di A14d (P3).
+                if (!rialzata || su.Vita != 50f || su.Morto)
                 { Console.WriteLine($"  FALLITA ({nome}): dopo 30 secondi doveva rialzarsi con 50 di vita"); ok = false; }
                 if (spostataDopo > 1.5f) { Console.WriteLine($"  FALLITA ({nome}): non si e' rialzata dove era caduta"); ok = false; }
             }
@@ -4068,9 +4076,9 @@ static class Regole
             Console.WriteLine($"  colpo a terra d'ufficio: colpi {Sonda.Numero(colpo, "colpi a terra")}; " +
                               $"vicina (4,5 m) vita {vaPrima} -> {va.Vita}, lontana (7 m) vita {vbPrima} -> {vb.Vita}");
             if (Sonda.Numero(colpo, "colpi a terra") != 1) { Console.WriteLine("  FALLITA: il colpo a terra non e' partito"); ok = false; }
-            // Il colpo toglie 35; un punto di rigenerazione puo' cadere nei 0,4
-            // secondi dopo (P3), quindi basta che ne manchino 34.
-            if (va.Vita > vaPrima - 34f) { Console.WriteLine("  FALLITA: il colpo a terra non ha preso la sonda a 4,5 metri"); ok = false; }
+            // Il colpo toglie 35: con la rigenerazione ferma delle sonde (P4)
+            // nessun punto rigenerato nei 0,4 secondi dopo (P3).
+            if (va.Vita > vaPrima - 35f) { Console.WriteLine("  FALLITA: il colpo a terra non ha preso la sonda a 4,5 metri"); ok = false; }
             if (vb.Vita < vbPrima) { Console.WriteLine("  FALLITA: il colpo a terra ha preso la sonda a 7 metri"); ok = false; }
 
             // --- carica: la sonda A lo picchia, poi va lontano; la B gli sta
