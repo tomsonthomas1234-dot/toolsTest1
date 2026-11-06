@@ -1895,7 +1895,7 @@ static class Regole
     // d'osso, danno +21%; tre di cuoio, velocita d'attacco +21%.
     public static bool StatisticheInPartita(string tokenA, string tokenB, string host, int port)
     {
-        Console.WriteLine("--- statistiche in partita: l'armatura cambia vita, danno, colpi e rigenerazione");
+        Console.WriteLine("--- statistiche in partita: l'armatura cambia vita, danno, colpi, rigenerazione e passo");
         bool ok = true;
         void Male(string m) { Console.WriteLine("  FALLITA: " + m); ok = false; }
 
@@ -2074,6 +2074,46 @@ static class Regole
         if (Pausa(sC) >= Pausa(sN)) Male("col cuoio la pausa fra due colpi non si e' accorciata");
         if (colpiN <= 0 || colpiC <= colpiN) Male("col cuoio non si danno piu' colpi nello stesso tempo");
 
+        // 6. velocita di movimento (A14e3): quattro secondi di cammino verso
+        //    nord, misurati sulle istantanee, e ritorno al punto di partenza.
+        //    Col cuoio Epico addosso +21%, senza niente il passo di base, col
+        //    ferro Epico -6% (il malus del ferro non sale col grado). Il tempo
+        //    del cammino lo decide la sonda, quindi le distanze ballano di un
+        //    tick o due: si confrontano i rapporti con un margine.
+        //    Si cammina sullo spawn della fazione 1, terra di sicuro: il punto
+        //    della prova e' in mare (giro 1: 4 metri a nuoto invece di 20).
+        double Passo(Dictionary<string, string> d) => Molt(d, "passo");
+        const float CX = -400f, CZ = -400f;
+        float Cammino()
+        {
+            a.Admin($"tp {CX.ToString(Inv)} {CZ.ToString(Inv)}");
+            a.Attendi(() => Dist(a.X, a.Z, CX, CZ) < 2f, 5);
+            a.Attendi(() => false, 0.3);
+            float x0 = a.X, z0 = a.Z;
+            a.Cammina(0f, 1f, 4.0);
+            a.Attendi(() => false, 0.4);
+            return Dist(a.X, a.Z, x0, z0);
+        }
+        var sMC = Stat();
+        float mCuoio = Cammino();
+        SvestiA();
+        var sMN = Stat();
+        float mNudo = Cammino();
+        if (!Equip(elmo) || !Equip(corazza) || !Equip(gambali)) Male("indossare di nuovo il ferro e' stato rifiutato");
+        var sMF = Stat();
+        float mFerro = Cammino();
+        double rCuoio = mNudo > 0f ? mCuoio / mNudo : 0, rFerro = mNudo > 0f ? mFerro / mNudo : 0;
+        Console.WriteLine($"  movimento: nudo x{Molt(sMN, "movimento"):F2} passo {Passo(sMN):F2} -> {mNudo:F1} m; " +
+                          $"cuoio x{Molt(sMC, "movimento"):F2} -> {mCuoio:F1} m (x{rCuoio:F2}); " +
+                          $"ferro x{Molt(sMF, "movimento"):F2} -> {mFerro:F1} m (x{rFerro:F2}) in 4 secondi");
+        if (Math.Abs(Molt(sMC, "movimento") - Molt(sMN, "movimento") - 0.21) > 0.011) Male("con tre pezzi di cuoio epici il movimento deve salire del 21%");
+        if (Math.Abs(Molt(sMF, "movimento") - Molt(sMN, "movimento") + 0.06) > 0.011) Male("con tre pezzi di ferro il movimento deve scendere del 6%");
+        if (mNudo < 15f || mNudo > 25f) Male($"in 4 secondi a passo pieno si fanno circa 20 metri, non {mNudo:F1}");
+        if (rCuoio < 1.12 || rCuoio > 1.30) Male("col cuoio epico non si cammina il 21% piu' lontano");
+        if (rFerro < 0.86 || rFerro > 0.99) Male("col ferro non si cammina un po' meno lontano");
+        a.Admin($"tp {PX.ToString(Inv)} {PZ.ToString(Inv)}");
+        a.Attendi(() => Dist(a.X, a.Z, PX, PZ) < 2f, 5);
+
         // Si lascia tutto pulito.
         SvestiA();
         a.Dotazione(ItemType.None, ItemType.None, SideItemType.None);
@@ -2082,7 +2122,7 @@ static class Regole
         b.Admin("sethp 1000");
         a.Attendi(() => false, 0.5);
 
-        if (ok) Console.WriteLine("  OK: vita massima, rigenerazione, danno e velocita d'attacco dell'armatura contano in partita");
+        if (ok) Console.WriteLine("  OK: vita massima, rigenerazione, danno, velocita d'attacco e passo dell'armatura contano in partita");
         return ok;
     }
 
