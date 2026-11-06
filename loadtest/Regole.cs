@@ -7232,6 +7232,146 @@ static class Regole
         return ok;
     }
 
+
+    /// <summary>
+    /// A14j1b: le passive del Guerriero con un effetto loro. A e il Guerriero
+    /// (fazione 1, spada di pietra), B il nemico (fazione 2, spada di pietra):
+    /// un colpo di spada fa 22 in tutte e due le direzioni. Le passive si
+    /// mettono una alla volta nel primo slot passivo, il secondo resta vuoto
+    /// (cosi Robusto e Mano pesante non cambiano i conti). Livello 1.
+    /// </summary>
+    public static bool PassiveDelGuerriero(string tokenA, string tokenB, string host, int port)
+    {
+        Console.WriteLine("--- passive del guerriero: Sangue caldo, Inarrestabile, Sete di sangue, Bastione, Massacro");
+        bool ok = true;
+        void Male(string m) { Console.WriteLine("  FALLITA: " + m); ok = false; }
+
+        using var a = new Sonda(tokenA, host, port);
+        using var b = new Sonda(tokenB, host, port);
+        if (!a.AttendiPronta() || !b.AttendiPronta())
+        { Console.WriteLine("  FALLITA: le sonde non sono entrate in gioco"); return false; }
+
+        const float PX = -150f, PZ = 250f;   // lo stesso punto delle prove delle armi
+        static byte[] P<T>(T v) => MessagePack.MessagePackSerializer.Serialize(v);
+        bool Aspetta(Func<bool> cosa, double secondi) =>
+            a.Attendi(() => { b.Attendi(() => true, 0.01); return cosa(); }, secondi);
+        void Pausa(double secondi) => Aspetta(() => false, secondi);
+        static string Visto(CommandResultMsg r) => r == null ? "nessuna risposta" : r.Success ? "riuscito" : "rifiutato " + r.ErrorCode;
+        float Vita(Sonda chi) => a.Stato(chi.Id).Vita;
+        void Tp(Sonda s, float x, float z)
+        {
+            s.Admin($"tp {x.ToString(Inv)} {z.ToString(Inv)}");
+            Aspetta(() => Dist(s.X, s.Z, x, z) < 0.5f, 6);
+            s.Cammina(0f, 0f, 0.1);
+        }
+        void Imposta(Sonda s, int hp)
+        {
+            s.Admin($"sethp {hp}");
+            Aspetta(() => Vita(s) == Math.Min(hp, 100), 3);
+            Pausa(0.3);
+        }
+        string Effetto(string riga) { Pausa(0.15); return a.ChiediAdmin("effetto " + riga, "effetto: ") ?? "(nessuna risposta)"; }
+        uint idComando = 200;
+        void Passiva(AbilityId id)
+        {
+            foreach (var (slot, ab) in new[] { ((byte)0, id), ((byte)1, AbilityId.None) })
+            {
+                uint n = idComando++;
+                Pausa(0.15);
+                a.Comando(n, CommandType.SetAbilitySlot, P(new SetAbilitySlotCommand
+                    { Kind = AbilitySlotKind.ClassPassive, Slot = slot, Ability = ab }));
+                CommandResultMsg r = null;
+                Aspetta(() => (r = a.Esito(n)) != null, 5);
+                if (r == null || !r.Success) Male($"{(ab == AbilityId.None ? "svuotare" : ab.ToString())} nello slot passivo {slot}: {Visto(r)}");
+            }
+            Pausa(0.3);
+        }
+        void Controlla(string cosa, float visto, float atteso)
+        {
+            Console.WriteLine($"  {cosa}: {visto} (atteso {atteso})");
+            if (visto != atteso) Male($"{cosa}: {visto} invece di {atteso}");
+        }
+        void Contiene(string cosa, string riga, string pezzo)
+        {
+            Console.WriteLine($"  {cosa}: {riga}");
+            if (!riga.Contains(pezzo)) Male($"{cosa}: manca '{pezzo}'");
+        }
+        // Un colpo di spada di chi colpisce sul piu vicino: quanto perde chi.
+        float Colpo(Sonda da, Sonda chi)
+        {
+            float prima = Vita(chi);
+            da.Colpisci(0.1);
+            Aspetta(() => Vita(chi) < prima, 1.5);
+            Pausa(0.3);
+            return prima - Vita(chi);
+        }
+
+        a.Admin("setfaction 1"); b.Admin("setfaction 2");
+        foreach (var s in new[] { a, b })
+        {
+            s.Admin("clearinv"); s.Admin("abilita azzera"); s.Admin("effetto azzera");
+            s.Admin("give StoneSword 1");
+            Aspetta(() => s.Istanze.Values.Any(v => v.Tipo == ItemType.StoneSword), 5);
+            s.Dotazione(ItemType.StoneSword, ItemType.None, SideItemType.None);
+            s.Posizione(0);
+        }
+        Tp(a, PX, PZ); Tp(b, PX + 1.5f, PZ);
+        Pausa(0.15); Console.WriteLine($"  {a.ChiediAdmin("classe guerriero", "classe: ")}");
+        Pausa(0.15); Console.WriteLine($"  {a.ChiediAdmin("classe sblocca", "classe: ")}");
+        Pausa(0.15); a.Admin("abilita sblocca guerriero");
+        Pausa(0.4);
+
+        // 1. Bastione: a vita piena il colpo di B fa 22; sotto meta 18 (-20%).
+        Passiva(AbilityId.WarriorBulwark);
+        Imposta(a, 1000); Imposta(b, 1000);
+        Controlla("Bastione, colpo di B su A a vita piena", Colpo(b, a), 22f);
+        Imposta(a, 40);
+        Controlla("Bastione, colpo di B su A a 40 di vita", Colpo(b, a), 18f);
+
+        // 2. Sete di sangue: a vita piena il colpo di A fa 22; a 40 (60% che
+        //    manca, +12%) fa 25.
+        Passiva(AbilityId.WarriorBloodlust);
+        Imposta(a, 1000); Imposta(b, 1000);
+        Controlla("Sete di sangue, colpo di A a vita piena", Colpo(a, b), 22f);
+        Imposta(a, 40); Imposta(b, 1000);
+        Controlla("Sete di sangue, colpo di A a 40 di vita", Colpo(a, b), 25f);
+
+        // 3. Sangue caldo: a 50, un colpo dato cura 1 (1% di 100).
+        Passiva(AbilityId.WarriorHotBlood);
+        Imposta(a, 50); Imposta(b, 1000);
+        Controlla("Sangue caldo, colpo di A", Colpo(a, b), 22f);
+        Controlla("Sangue caldo, vita di A dopo il colpo", Vita(a), 51f);
+
+        // 4. Inarrestabile: senza, lo stordimento di 2 s dura 2; con, 1,2 (-40%).
+        Passiva(AbilityId.None);
+        Contiene("stordimento senza Inarrestabile", Effetto("stordisci 2"), "stordito 2.0s");
+        Effetto("azzera");
+        Passiva(AbilityId.WarriorUnstoppable);
+        Contiene("stordimento con Inarrestabile", Effetto("stordisci 2"), "stordito 1.2s");
+        Effetto("azzera");
+        Contiene("rallentamento con Inarrestabile", Effetto("rallenta 50 2"), "rallentato 50% 1.2s");
+        Effetto("azzera");
+
+        // 5. Massacro: A a 50 uccide B (a 1 di vita): +20% velocita d'attacco
+        //    per 5 s e 10 di vita.
+        Passiva(AbilityId.WarriorMassacre);
+        Imposta(a, 50); Imposta(b, 1);
+        a.Colpisci(0.1);
+        Aspetta(() => b.Stato(b.Id).Morto || Vita(b) <= 0f, 2);
+        Pausa(0.3);
+        Controlla("Massacro, vita di A dopo l'uccisione", Vita(a), 60f);
+        Contiene("Massacro, effetti di A", Effetto("stato"), "AttackSpeed +20%");
+        Aspetta(() => !b.Stato(b.Id).Morto && Vita(b) > 0f, 6);
+
+        // Si lascia pulito.
+        foreach (var s in new[] { a, b }) { s.Admin("effetto azzera"); s.Admin("abilita azzera"); s.Admin("clearinv"); s.Admin("sethp 1000"); }
+        a.Dotazione(ItemType.None, ItemType.None, SideItemType.None);
+        b.Dotazione(ItemType.None, ItemType.None, SideItemType.None);
+        Pausa(0.5);
+
+        if (ok) Console.WriteLine("  OK: Bastione, Sete di sangue, Sangue caldo, Inarrestabile e Massacro fanno quello che dice il catalogo");
+        return ok;
+    }
     static readonly System.Globalization.CultureInfo Inv =
         System.Globalization.CultureInfo.InvariantCulture;
 }
