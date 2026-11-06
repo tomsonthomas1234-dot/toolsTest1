@@ -7019,6 +7019,219 @@ static class Regole
         return ok;
     }
 
+    /// <summary>
+    /// A14j1a: le attive del Guerriero. A e il Guerriero (fazione 1, spada di
+    /// pietra), B il nemico (fazione 2, spada di pietra: il suo colpo fa 22),
+    /// C l'alleata di A (fazione 1, a mani nude). Sfida e Provocazione non
+    /// hanno ancora effetto (A14j1c, A14j2).
+    /// </summary>
+    public static bool Guerriero(string tokenA, string tokenB, string tokenC, string host, int port)
+    {
+        Console.WriteLine("--- guerriero: le attive (senza Sfida e Provocazione)");
+        bool ok = true;
+        void Male(string m) { Console.WriteLine("  FALLITA: " + m); ok = false; }
+
+        using var a = new Sonda(tokenA, host, port);
+        using var b = new Sonda(tokenB, host, port);
+        using var c = new Sonda(tokenC, host, port);
+        if (!a.AttendiPronta() || !b.AttendiPronta() || !c.AttendiPronta())
+        { Console.WriteLine("  FALLITA: le sonde non sono entrate in gioco"); return false; }
+
+        const float PX = -150f, PZ = 250f;   // lo stesso punto delle prove delle armi
+        static byte[] P<T>(T v) => MessagePack.MessagePackSerializer.Serialize(v);
+        bool Aspetta(Func<bool> cosa, double secondi) =>
+            a.Attendi(() => { b.Attendi(() => true, 0.01); c.Attendi(() => true, 0.01); return cosa(); }, secondi);
+        void Pausa(double secondi) => Aspetta(() => false, secondi);
+        static string Visto(CommandResultMsg r) => r == null ? "nessuna risposta" : r.Success ? "riuscito" : "rifiutato " + r.ErrorCode;
+        float Vita(Sonda chi) => a.Stato(chi.Id).Vita;
+        void Tp(Sonda s, float x, float z)
+        {
+            s.Admin($"tp {x.ToString(Inv)} {z.ToString(Inv)}");
+            Aspetta(() => Dist(s.X, s.Z, x, z) < 0.5f, 6);
+            s.Cammina(0f, 0f, 0.1);
+        }
+        void Piena(params Sonda[] chi)
+        {
+            foreach (var s in chi) s.Admin("sethp 1000");
+            Aspetta(() => chi.All(s => Vita(s) >= 100f), 3);
+            Pausa(0.3);
+        }
+        string Effetto(Sonda s, string riga) { Pausa(0.15); return s.ChiediAdmin("effetto " + riga, "effetto: ") ?? "(nessuna risposta)"; }
+        string StatoDi(Sonda s) => Effetto(a, s == a ? "stato" : $"stato {s.Id}");
+        static (float X, float Z) Pos(string riga)
+        {
+            int i = riga.IndexOf("pos=", StringComparison.Ordinal);
+            if (i < 0) return (float.NaN, float.NaN);
+            int f = riga.IndexOf(' ', i);
+            var p = (f < 0 ? riga[(i + 4)..] : riga[(i + 4)..f]).Split(',');
+            return p.Length == 2 && float.TryParse(p[0], System.Globalization.NumberStyles.Float, Inv, out var x)
+                   && float.TryParse(p[1], System.Globalization.NumberStyles.Float, Inv, out var z) ? (x, z) : (float.NaN, float.NaN);
+        }
+        uint idComando = 140;
+        CommandResultMsg Prova(AbilityId id, float yaw = 90f)
+        {
+            uint idSlot = idComando++, idUso = idComando++;
+            Pausa(0.15);
+            a.Comando(idSlot, CommandType.SetAbilitySlot, P(new SetAbilitySlotCommand
+                { Kind = AbilitySlotKind.ClassActive, Slot = 0, Ability = id }));
+            CommandResultMsg r = null;
+            Aspetta(() => (r = a.Esito(idSlot)) != null, 5);
+            if (r == null || !r.Success) Male($"{id} nello slot: {Visto(r)}");
+            Pausa(0.15); a.Admin("ricarica");
+            Pausa(0.15);
+            a.Comando(idUso, CommandType.UseAbility, P(new UseAbilityCommand { Ability = id, Yaw = yaw }));
+            r = null;
+            Aspetta(() => (r = a.Esito(idUso)) != null, 5);
+            Pausa(0.2);
+            return r;
+        }
+        void Atteso(string cosa, CommandResultMsg r, ErrorCode atteso)
+        {
+            bool giusto = r != null && (atteso == ErrorCode.None ? r.Success : !r.Success && r.ErrorCode == atteso);
+            Console.WriteLine($"  {cosa}: {Visto(r)}{(giusto ? "" : $" (atteso {(atteso == ErrorCode.None ? "riuscito" : atteso.ToString())})")}");
+            if (!giusto) Male($"{cosa}: atteso {(atteso == ErrorCode.None ? "riuscito" : "rifiutato " + atteso)}");
+        }
+        void Pulisci(params Sonda[] chi) { foreach (var s in chi) Effetto(a, $"azzera {s.Id}"); }
+        void Controlla(string cosa, float visto, float atteso)
+        {
+            Console.WriteLine($"  {cosa}: {visto} (atteso {atteso})");
+            if (visto != atteso) Male($"{cosa}: {visto} invece di {atteso}");
+        }
+        void Contiene(string cosa, string riga, string pezzo, bool deve = true)
+        {
+            Console.WriteLine($"  {cosa}: {riga}");
+            if (riga.Contains(pezzo) != deve) Male($"{cosa}: {(deve ? "manca" : "non doveva esserci")} '{pezzo}'");
+        }
+        // Un colpo di spada di B sul piu vicino: quanto perde chi.
+        float ColpoDiB(Sonda chi, params Sonda[] anche)
+        {
+            Piena(new[] { chi }.Concat(anche).ToArray());
+            float prima = Vita(chi);
+            b.Colpisci(0.1);
+            Aspetta(() => Vita(chi) < prima, 1.5);
+            Pausa(0.3);
+            return prima - Vita(chi);
+        }
+
+        a.Admin("setfaction 1"); b.Admin("setfaction 2"); c.Admin("setfaction 1");
+        foreach (var s in new[] { a, b, c }) { s.Admin("clearinv"); s.Admin("abilita azzera"); s.Admin("effetto azzera"); }
+        c.Dotazione(ItemType.None, ItemType.None, SideItemType.None);
+        foreach (var s in new[] { a, b })
+        {
+            s.Admin("give StoneSword 1");
+            Aspetta(() => s.Istanze.Values.Any(v => v.Tipo == ItemType.StoneSword), 5);
+            s.Dotazione(ItemType.StoneSword, ItemType.None, SideItemType.None);
+            s.Posizione(0);
+        }
+        Tp(a, PX, PZ); Tp(b, PX + 1.5f, PZ); Tp(c, PX - 30f, PZ);
+        Pausa(0.15); Console.WriteLine($"  {a.ChiediAdmin("classe guerriero", "classe: ")}");
+        Pausa(0.15); Console.WriteLine($"  {a.ChiediAdmin("classe sblocca", "classe: ")}");
+        Pausa(0.15); a.Admin("abilita sblocca guerriero");
+        Pausa(0.4);
+        Piena(a, b, c);
+
+        // 0. Sfida non ha ancora effetto: non parte e non va in ricarica.
+        Atteso("Sfida, effetto non ancora fatto", Prova(AbilityId.WarriorChallenge), ErrorCode.AbilityNotUsable);
+
+        // 1. Pelle dura: -30% danno subito per 4 s; il colpo di B da 22 a 15.
+        float base_ = ColpoDiB(a);
+        Controlla("colpo di B su A senza niente", base_, 22f);
+        Atteso("Pelle dura", Prova(AbilityId.WarriorToughSkin), ErrorCode.None);
+        Contiene("Pelle dura, effetti di A", StatoDi(a), "danno subito -30%");
+        Controlla("colpo di B con Pelle dura", ColpoDiB(a), 15f);
+        Pulisci(a);
+
+        // 2. Furia: +30% danno e velocita d'attacco, +15% danno subito (22 -> 25).
+        Atteso("Furia", Prova(AbilityId.WarriorFury), ErrorCode.None);
+        var furia = StatoDi(a);
+        Contiene("Furia, effetti di A", furia, "Damage +30%");
+        Contiene("Furia, effetti di A", furia, "AttackSpeed +30%");
+        Contiene("Furia, effetti di A", furia, "danno subito +15%");
+        Controlla("colpo di B con la Furia", ColpoDiB(a), 25f);
+        Pulisci(a);
+
+        // 3. Spallata: a 6 m non parte; a 1,5 m B e stordito, senza danno.
+        Tp(b, PX + 6f, PZ);
+        Atteso("Spallata senza nessuno a portata", Prova(AbilityId.WarriorShoulderBash), ErrorCode.AbilityNotUsable);
+        Tp(b, PX + 1.5f, PZ);
+        Piena(b);
+        float vb = Vita(b);
+        Atteso("Spallata", Prova(AbilityId.WarriorShoulderBash), ErrorCode.None);
+        Contiene("Spallata, effetti di B", StatoDi(b), "stordito");
+        Controlla("Spallata, B perde", vb - Vita(b), 0f);
+        Pulisci(b);
+
+        // 4. Resistere: per 5 s niente stordimento ne rallentamento.
+        Atteso("Resistere", Prova(AbilityId.WarriorEndure), ErrorCode.None);
+        Contiene("Resistere, stordire A", Effetto(a, "stordisci 2"), "non si stordisce");
+        Effetto(a, "rallenta 50 2");
+        var resiste = StatoDi(a);
+        Contiene("Resistere, effetti di A", resiste, "immune");
+        Contiene("Resistere, effetti di A", resiste, "rallentato", deve: false);
+        Pulisci(a);
+
+        // 5. Secondo fiato: a vita piena non parte; da 50 cura 20 in 5 s.
+        Piena(a);
+        Atteso("Secondo fiato a vita piena", Prova(AbilityId.WarriorSecondWind), ErrorCode.AbilityNotUsable);
+        a.Admin("sethp 50");
+        Aspetta(() => Vita(a) == 50f, 3);
+        Atteso("Secondo fiato", Prova(AbilityId.WarriorSecondWind), ErrorCode.None);
+        Contiene("Secondo fiato, effetti di A", StatoDi(a), "cura nel tempo 20 in 5 colpi");
+        Aspetta(() => Vita(a) >= 70f, 7);
+        Pausa(1.2);
+        Controlla("Secondo fiato, vita di A dopo 5 s", Vita(a), 70f);
+        Pulisci(a);
+
+        // 6. Balzo: 8 m avanti; B a un metro dall'atterraggio rallenta del 30%.
+        Tp(b, PX + 9f, PZ);
+        Atteso("Balzo", Prova(AbilityId.WarriorLeap), ErrorCode.None);
+        var (ax, az) = Pos(StatoDi(a));
+        Console.WriteLine($"  Balzo, A atterra a ({ax:F2}, {az:F2}) (atteso {PX + 8f}, {PZ})");
+        if (float.IsNaN(ax) || Dist(ax, az, PX + 8f, PZ) > 0.4f) Male("il Balzo deve portare A 8 m avanti");
+        Contiene("Balzo, effetti di B", StatoDi(b), "rallentato 30%");
+        Pulisci(a, b);
+
+        // 7. Grido di guerra: +15% danno ad A e a C alleata, non a B.
+        Tp(a, PX, PZ); Tp(b, PX + 1.5f, PZ); Tp(c, PX - 1.5f, PZ);
+        Atteso("Grido di guerra", Prova(AbilityId.WarriorWarCry), ErrorCode.None);
+        Contiene("Grido di guerra, effetti di A", StatoDi(a), "Damage +15%");
+        Contiene("Grido di guerra, effetti di C", StatoDi(c), "Damage +15%");
+        Contiene("Grido di guerra, effetti di B", StatoDi(b), "Damage", deve: false);
+        Pulisci(a, b, c);
+
+        // 8. Proteggere: B colpisce C; meta del colpo (11 di 22) va ad A.
+        Tp(b, PX - 3f, PZ);   // C e la piu vicina a B, A sta a 3 m
+        Controlla("colpo di B su C senza Proteggere", ColpoDiB(c, a), 22f);
+        Atteso("Proteggere", Prova(AbilityId.WarriorProtect), ErrorCode.None);
+        Piena(a, c);
+        float va = Vita(a), vc = Vita(c);
+        b.Colpisci(0.1);
+        Aspetta(() => Vita(c) < vc, 1.5);
+        Pausa(0.3);
+        Controlla("Proteggere, C perde", vc - Vita(c), 11f);
+        Controlla("Proteggere, A perde", va - Vita(a), 11f);
+        // Il danno preso al posto di altri non porta A sotto 1 (Proteggere di
+        // nuovo: i 6 s di prima possono essere finiti).
+        Atteso("Proteggere di nuovo", Prova(AbilityId.WarriorProtect), ErrorCode.None);
+        a.Admin("sethp 5");
+        Aspetta(() => Vita(a) == 5f, 3);
+        Piena(c);
+        b.Colpisci(0.1);
+        Pausa(0.5);
+        var dopo = a.Stato(a.Id);
+        Console.WriteLine($"  Proteggere con A a 5: vita di A {dopo.Vita}, a terra {dopo.ATerra}");
+        if (dopo.Vita != 1f || dopo.ATerra || dopo.Morto) Male("chi protegge non deve scendere sotto 1 per i colpi presi al posto di altri");
+
+        // Si lascia pulito.
+        foreach (var s in new[] { a, b, c }) { s.Admin("effetto azzera"); s.Admin("abilita azzera"); s.Admin("clearinv"); s.Admin("sethp 1000"); }
+        a.Dotazione(ItemType.None, ItemType.None, SideItemType.None);
+        b.Dotazione(ItemType.None, ItemType.None, SideItemType.None);
+        Pausa(0.5);
+
+        if (ok) Console.WriteLine("  OK: Pelle dura, Furia, Spallata, Resistere, Secondo fiato, Balzo, Grido di guerra e Proteggere fanno quello che dice il catalogo");
+        return ok;
+    }
+
     static readonly System.Globalization.CultureInfo Inv =
         System.Globalization.CultureInfo.InvariantCulture;
 }
