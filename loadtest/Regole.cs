@@ -1348,7 +1348,8 @@ static class Regole
         Console.WriteLine($"  andata e ritorno dei messaggi: {(andata ? "si" : "no")}");
         if (!andata) Male("un messaggio nuovo non torna uguale");
 
-        // Il server: i sei comandi nuovi si riconoscono e si rifiutano.
+        // Il server: i sei comandi nuovi si riconoscono e, per questa sonda che
+        // non ha niente, si rifiutano.
         using var s = new Sonda(token, host, port);
         if (!s.AttendiPronta()) { Console.WriteLine("  FALLITA: la sonda non e' entrata in gioco"); return false; }
         static byte[] P<T>(T v) => MessagePack.MessagePackSerializer.Serialize(v);
@@ -1368,7 +1369,10 @@ static class Regole
         foreach (var c in comandi)
         {
             var r = s.Esito(c.Id);
-            var atteso = c.Id == 107 ? ErrorCode.InvalidCommand : ErrorCode.NotAllowed;
+            // Da A14g1 uso e slot ci sono davvero: senza spada e senza abilita
+            // sbloccate la sonda riceve "non usabile". Gli altri restano NotAllowed.
+            var atteso = c.Id == 107 ? ErrorCode.InvalidCommand
+                       : c.Id is 101 or 102 ? ErrorCode.AbilityNotUsable : ErrorCode.NotAllowed;
             string visto = r == null ? "nessuna risposta" : $"{(r.Success ? "riuscito" : "rifiutato")} {r.ErrorCode}";
             Console.WriteLine($"  {c.Tipo,-15}{(c.Id == 107 ? " (rotto)" : "        ")} → {visto}");
             if (r == null || r.Success || r.ErrorCode != atteso) Male($"{c.Tipo}: atteso rifiutato {atteso}");
@@ -2312,6 +2316,260 @@ static class Regole
         a.Attendi(() => false, 0.5);
 
         if (ok) Console.WriteLine("  OK: sotto la meta dell'usura arma e armatura rendono meno, fino al 70%, e i colpi ricevuti consumano l'armatura");
+        return ok;
+    }
+
+    // ---- abilita della spada (A14g1) -------------------------------------------
+    //
+    // Il comando UseAbility nel tick, coi suoi controlli (sbloccata, nello
+    // slot, famiglia e grado dell'arma, ricarica), la ricarica accorciata dal
+    // livello e dall'osso, SetAbilitySlot, e le quattro base della spada:
+    // Fendente pesante (+50%), Taglio largo (tutti davanti entro 2,5 m), Affondo
+    // (4 m avanti e colpo), Parata (il prossimo colpo da davanti non fa niente).
+    // Tre sonde: A con la spada in fazione 1, B e C in fazione 2.
+
+    public static bool AbilitaDellaSpada(string tokenA, string tokenB, string tokenC, string host, int port)
+    {
+        Console.WriteLine("--- abilita della spada: uso, slot, ricariche e le quattro base");
+        bool ok = true;
+        void Male(string m) { Console.WriteLine("  FALLITA: " + m); ok = false; }
+
+        using var a = new Sonda(tokenA, host, port);
+        using var b = new Sonda(tokenB, host, port);
+        using var c = new Sonda(tokenC, host, port);
+        if (!a.AttendiPronta() || !b.AttendiPronta() || !c.AttendiPronta())
+        { Console.WriteLine("  FALLITA: le sonde non sono entrate in gioco"); return false; }
+        a.Attendi(() => a.Indossati != null, 10);
+
+        static byte[] P<T>(T v) => MessagePack.MessagePackSerializer.Serialize(v);
+        bool Aspetta(Func<bool> cosa, double secondi) =>
+            a.Attendi(() => { b.Attendi(() => true, 0.01); c.Attendi(() => true, 0.01); return cosa(); }, secondi);
+        void Pausa(double secondi) => Aspetta(() => false, secondi);
+        static string Visto(CommandResultMsg r) => r == null ? "nessuna risposta" : r.Success ? "riuscito" : "rifiutato " + r.ErrorCode;
+
+        CommandResultMsg Usa(Sonda s, AbilityId id, float yaw)
+        {
+            Pausa(0.15);
+            s.Comando(114, CommandType.UseAbility, P(new UseAbilityCommand { Ability = id, Yaw = yaw }));
+            CommandResultMsg r = null;
+            Aspetta(() => (r = s.Esito(114)) != null, 5);
+            return r;
+        }
+        CommandResultMsg Slot(Sonda s, WeaponFamily f, byte slot, AbilityId id)
+        {
+            Pausa(0.15);
+            s.Comando(115, CommandType.SetAbilitySlot, P(new SetAbilitySlotCommand
+                { Kind = AbilitySlotKind.Weapon, Family = f, Slot = slot, Ability = id }));
+            CommandResultMsg r = null;
+            Aspetta(() => (r = s.Esito(115)) != null, 5);
+            return r;
+        }
+        void Atteso(string cosa, CommandResultMsg r, ErrorCode atteso)
+        {
+            bool giusto = r != null && (atteso == ErrorCode.None ? r.Success : !r.Success && r.ErrorCode == atteso);
+            Console.WriteLine($"  {cosa}: {Visto(r)}{(giusto ? "" : $" (atteso {(atteso == ErrorCode.None ? "riuscito" : atteso.ToString())})")}");
+            if (!giusto) Male($"{cosa}: atteso {(atteso == ErrorCode.None ? "riuscito" : "rifiutato " + atteso)}");
+        }
+        string Stato(Sonda s) { Pausa(0.15); return SenzaRicariche(s.AbilitaInRiga()) ?? "(nessuna risposta)"; }
+        float Vita(Sonda chi) => a.Stato(chi.Id).Vita;
+        void Piena(params Sonda[] chi)
+        {
+            foreach (var s in chi) s.Admin("sethp 1000");
+            Aspetta(() => chi.All(s => Vita(s) >= 100f), 3);
+            Pausa(0.3);
+        }
+        /// Quanto ha perso chi, aspettando che il colpo si veda.
+        float Perso(Sonda chi, float prima, double secondi = 1.5)
+        {
+            Aspetta(() => Vita(chi) < prima, secondi);
+            Pausa(0.3);
+            return prima - Vita(chi);
+        }
+        /// I millisecondi di ricarica che lo stato mandato dice per id.
+        int MsRicarica(AbilityId id)
+        {
+            var st = a.Abilita;
+            return st?.Cooldowns?.FirstOrDefault(x => x.Id == id)?.MsLeft ?? -1;
+        }
+        double Danno()
+        {
+            Pausa(0.15);
+            var r = a.ChiediAdmin("statistiche", "statistiche: ") ?? "";
+            foreach (var p in r.Split(' '))
+                if (p.StartsWith("danno=") && double.TryParse(p[6..].TrimStart('x'), System.Globalization.NumberStyles.Float, Inv, out double x)) return x;
+            return -1;
+        }
+        void Tp(Sonda s, float x, float z)
+        {
+            s.Admin($"tp {x.ToString(Inv)} {z.ToString(Inv)}");
+            Aspetta(() => Dist(s.X, s.Z, x, z) < 0.5f, 6);
+            s.Cammina(0f, 0f, 0.1);
+        }
+        bool Equip(ulong id, EquipSlot? togli = null)
+        {
+            Pausa(0.15);
+            if (togli is EquipSlot sl) a.Togli(sl); else a.Indossa(id);
+            CommandResultMsg e = null;
+            Aspetta(() => (e = a.Esito(113)) != null, 5);
+            return e != null && e.Success;
+        }
+        void Svesti()
+        {
+            if (a.Indossati == null) return;
+            foreach (var sl in new[] { EquipSlot.Head, EquipSlot.Body, EquipSlot.Legs })
+                if (a.Indossati.Worn[(int)sl].Type != ItemType.None) Equip(0, sl);
+        }
+        ulong Dai(string riga)
+        {
+            Pausa(0.15);
+            var r = a.ChiediAdmin(riga, "dai: ");
+            ulong id = r != null && ulong.TryParse(r.Split("id=").Last(), out var n) ? n : 0;
+            if (id == 0 || !Aspetta(() => { lock (a.Zaino) return a.Istanze.ContainsKey(id); }, 5))
+                Male($"'{riga}' non ha dato il pezzo ({r ?? "nessuna risposta"})");
+            return id;
+        }
+
+        // Lontano da tutto: lo stesso punto delle prove dell'armatura. C sta
+        // lontano finche' non serve, cosi' il colpo singolo prende sempre B.
+        const float PX = -150f, PZ = 250f;
+        a.Admin("setfaction 1"); b.Admin("setfaction 2"); c.Admin("setfaction 2");
+        Svesti();
+        foreach (var s in new[] { a, b, c }) { s.Admin("clearinv"); s.Admin("abilita azzera"); }
+        a.Dotazione(ItemType.None, ItemType.None, SideItemType.None);
+        b.Dotazione(ItemType.None, ItemType.None, SideItemType.None);
+        Tp(a, PX, PZ); Tp(b, PX + 1f, PZ); Tp(c, PX - 8f, PZ);
+        a.Admin("give StoneSword 1");
+        Aspetta(() => a.Quanti(ItemType.StoneSword) >= 1 || a.Istanze.Values.Any(v => v.Tipo == ItemType.StoneSword), 5);
+        a.Dotazione(ItemType.StoneSword, ItemType.None, SideItemType.None);
+        a.Posizione(0);
+        Pausa(0.4);
+        Piena(b, c);
+
+        // 1. i rifiuti, e le quattro base che si sbloccano alla prima prova.
+        Atteso("Ferita (Comune) con una spada Base", Usa(a, AbilityId.SwordWound, 90f), ErrorCode.AbilityNotUsable);
+        string st1 = Stato(a);
+        Console.WriteLine($"  stato dopo il primo uso: {st1}");
+        if (!st1.StartsWith("sbloccate=100:1,101:1,102:1,103:1 arma=Sword:100/101/102 "))
+            Male("alla prima prova con la spada si devono sbloccare le quattro base, le prime tre negli slot");
+        Atteso("Lancio (lancia) con la spada", Usa(a, AbilityId.SpearThrow, 90f), ErrorCode.AbilityNotUsable);
+        Atteso("Taglio largo fuori dagli slot", Usa(a, AbilityId.SwordWideCut, 90f), ErrorCode.AbilityNotUsable);
+        if (Vita(b) < 100f) Male("un'abilita rifiutata ha fatto danno");
+
+        // 2. gli slot.
+        Atteso("Taglio largo nello slot 0", Slot(a, WeaponFamily.Sword, 0, AbilityId.SwordWideCut), ErrorCode.None);
+        Atteso("Fendente nello slot 1", Slot(a, WeaponFamily.Sword, 1, AbilityId.SwordHeavySlash), ErrorCode.None);
+        Atteso("Parata negli slot della lancia", Slot(a, WeaponFamily.Spear, 0, AbilityId.SwordParry), ErrorCode.AbilityNotUsable);
+        Atteso("slot numero 5", Slot(a, WeaponFamily.Sword, 5, AbilityId.SwordParry), ErrorCode.InvalidCommand);
+        Atteso("Fendente nello slot 2 (lascia l'1)", Slot(a, WeaponFamily.Sword, 2, AbilityId.SwordHeavySlash), ErrorCode.None);
+        Atteso("Affondo nello slot 1", Slot(a, WeaponFamily.Sword, 1, AbilityId.SwordLunge), ErrorCode.None);
+        string st2 = Stato(a);
+        Console.WriteLine($"  slot: {st2}");
+        if (!st2.Contains(" arma=Sword:103/102/100 ")) Male("gli slot della spada devono essere 103/102/100");
+        bool statoArrivato = Aspetta(() => a.Abilita?.WeaponSlots?.Any(w => w.Family == WeaponFamily.Sword
+            && w.Abilities.SequenceEqual(new[] { AbilityId.SwordWideCut, AbilityId.SwordLunge, AbilityId.SwordHeavySlash })) == true, 3);
+        if (!statoArrivato) Male("lo stato mandato al client non ha gli slot nuovi");
+
+        // 3. Fendente pesante: +50%, 22 -> 33; poi in ricarica 6 s.
+        Piena(b);
+        float prima = Vita(b);
+        Atteso("Fendente pesante su B", Usa(a, AbilityId.SwordHeavySlash, 90f), ErrorCode.None);
+        float f1 = Perso(b, prima);
+        int ms1 = -1; Aspetta(() => (ms1 = MsRicarica(AbilityId.SwordHeavySlash)) > 0, 2);
+        Console.WriteLine($"  Fendente livello 1: B perde {f1} (atteso 33), ricarica {ms1} ms (attesi 6000)");
+        if (f1 != 33f) Male("il Fendente pesante deve fare 33 (22 +50%)");
+        if (Math.Abs(ms1 - 6000) > 100) Male("la ricarica del Fendente al livello 1 deve essere 6 s");
+        Atteso("Fendente ancora in ricarica", Usa(a, AbilityId.SwordHeavySlash, 90f), ErrorCode.AbilityOnCooldown);
+
+        // 4. livello 3: +50% x1,3 = +65%, 22 -> 36; ricarica -20%, 4,8 s.
+        Pausa(0.15); a.Admin("abilita livello 100 3"); Pausa(0.15); a.Admin("ricarica");
+        Piena(b); prima = Vita(b);
+        Atteso("Fendente livello 3", Usa(a, AbilityId.SwordHeavySlash, 90f), ErrorCode.None);
+        float f3 = Perso(b, prima);
+        int ms3 = -1; Aspetta(() => (ms3 = MsRicarica(AbilityId.SwordHeavySlash)) is > 0 and < 5500, 2);
+        Console.WriteLine($"  Fendente livello 3: B perde {f3} (atteso 36), ricarica {ms3} ms (attesi 4800)");
+        if (f3 != 36f) Male("il Fendente al livello 3 deve fare 36 (22 +65%)");
+        if (Math.Abs(ms3 - 4800) > 100) Male("la ricarica del Fendente al livello 3 deve essere 4,8 s");
+
+        // 5. l'osso Epico: danno +21% e ricariche -21%. Livello 1: 6 x 0,79 = 4,74 s.
+        Pausa(0.15); a.Admin("abilita livello 100 1"); Pausa(0.15); a.Admin("ricarica");
+        ulong o1 = Dai("dai BoneHood epico"), o2 = Dai("dai BoneCuirass epico"), o3 = Dai("dai BoneGreaves epico");
+        if (!Equip(o1) || !Equip(o2) || !Equip(o3)) Male("indossare l'osso e' stato rifiutato");
+        bool cdr = Aspetta(() => a.Statistiche?.CooldownReductionPercent == 21, 3);
+        double molt = Danno();
+        Piena(b); prima = Vita(b);
+        Atteso("Fendente con l'osso", Usa(a, AbilityId.SwordHeavySlash, 90f), ErrorCode.None);
+        float fo = Perso(b, prima);
+        int mso = -1; Aspetta(() => (mso = MsRicarica(AbilityId.SwordHeavySlash)) is > 0 and < 5500, 2);
+        int attesoOsso = (int)Math.Round(22 * molt * 1.5, MidpointRounding.AwayFromZero);
+        Console.WriteLine($"  con l'osso epico (ricariche {a.Statistiche?.CooldownReductionPercent}%, danno x{molt:F2}): " +
+                          $"B perde {fo} (atteso {attesoOsso}), ricarica {mso} ms (attesi 4740)");
+        if (!cdr) Male("tre pezzi d'osso epici devono dare ricariche -21%");
+        if (fo != attesoOsso) Male($"il Fendente con l'osso deve fare {attesoOsso}");
+        if (Math.Abs(mso - 4740) > 100) Male("con l'osso epico la ricarica del Fendente deve essere 4,74 s");
+        Svesti();
+        Aspetta(() => a.Statistiche?.CooldownReductionPercent == 0, 3);
+
+        // 6. Taglio largo: B davanti a 1 m e C dietro a 1 m. Solo B, 22.
+        Tp(c, PX - 1f, PZ);
+        Piena(b, c);
+        float pb = Vita(b), pc = Vita(c);
+        Atteso("Taglio largo verso B", Usa(a, AbilityId.SwordWideCut, 90f), ErrorCode.None);
+        float tb = Perso(b, pb), tc = pc - Vita(c);
+        Console.WriteLine($"  Taglio largo: B davanti perde {tb} (atteso 22), C dietro perde {tc} (atteso 0)");
+        if (tb != 22f) Male("il Taglio largo deve fare 22 a chi sta davanti");
+        if (tc != 0f) Male("il Taglio largo non deve prendere chi sta dietro");
+        // ...e girandosi prende C e non B.
+        Pausa(0.15); a.Admin("ricarica");
+        Piena(b, c); pb = Vita(b); pc = Vita(c);
+        Atteso("Taglio largo verso C", Usa(a, AbilityId.SwordWideCut, 270f), ErrorCode.None);
+        tc = Perso(c, pc); tb = pb - Vita(b);
+        Console.WriteLine($"  Taglio largo girato: C perde {tc} (atteso 22), B perde {tb} (atteso 0)");
+        if (tc != 22f || tb != 0f) Male("il Taglio largo girato deve prendere C e non B");
+
+        // 7. Affondo: B a 5 m, A scatta di 4 m e lo colpisce. C resta dietro.
+        Tp(c, PX - 8f, PZ);
+        Tp(b, PX + 5f, PZ);
+        Piena(b); pb = Vita(b);
+        Atteso("Affondo verso B", Usa(a, AbilityId.SwordLunge, 90f), ErrorCode.None);
+        float lb = Perso(b, pb);
+        Aspetta(() => Dist(a.X, a.Z, PX + 4f, PZ) < 0.3f, 2);
+        Console.WriteLine($"  Affondo: A arriva a ({a.X:F2}, {a.Z:F2}) (attesa {PX + 4f}), B perde {lb} (atteso 22)");
+        if (Dist(a.X, a.Z, PX + 4f, PZ) >= 0.3f) Male("l'Affondo deve portare A 4 m avanti");
+        if (lb != 22f) Male("l'Affondo deve colpire B per 22");
+
+        // 8. Parata: B con la spada para il primo colpo di A, non il secondo; e
+        //    non para un colpo da dietro.
+        b.Admin("give StoneSword 1");
+        Aspetta(() => b.Istanze.Values.Any(v => v.Tipo == ItemType.StoneSword), 5);
+        b.Dotazione(ItemType.StoneSword, ItemType.None, SideItemType.None);
+        b.Posizione(0);
+        Pausa(0.4);
+        Piena(b); pb = Vita(b);
+        Atteso("Parata di B verso A", Usa(b, AbilityId.SwordParry, 270f), ErrorCode.None);
+        a.Colpisci(0.2);
+        Pausa(0.2);
+        float p1 = pb - Vita(b);
+        float dopoParata = Vita(b);   // prima del secondo colpo: Colpisci aspetta mezzo secondo
+        a.Colpisci(0.2);
+        float p2 = Perso(b, dopoParata);
+        Console.WriteLine($"  Parata: primo colpo di A toglie {p1} (atteso 0), il secondo {p2} (atteso 22)");
+        if (p1 != 0f) Male("la Parata deve fermare il primo colpo da davanti");
+        if (p2 != 22f) Male("la Parata ferma un colpo solo: il secondo deve fare 22");
+        Pausa(0.15); b.Admin("ricarica");
+        Piena(b); pb = Vita(b);
+        Atteso("Parata di B girato di spalle", Usa(b, AbilityId.SwordParry, 90f), ErrorCode.None);
+        a.Colpisci(0.2);
+        float p3 = Perso(b, pb);
+        Console.WriteLine($"  Parata di spalle: il colpo di A toglie {p3} (atteso 22)");
+        if (p3 != 22f) Male("la Parata non deve fermare un colpo da dietro");
+
+        // Si lascia tutto pulito.
+        foreach (var s in new[] { a, b, c }) { s.Admin("abilita azzera"); s.Admin("clearinv"); s.Admin("sethp 1000"); }
+        a.Dotazione(ItemType.None, ItemType.None, SideItemType.None);
+        b.Dotazione(ItemType.None, ItemType.None, SideItemType.None);
+        Pausa(0.5);
+
+        if (ok) Console.WriteLine("  OK: abilita della spada usate nel tick, coi controlli, gli slot e le ricariche; Fendente, Taglio largo, Affondo e Parata fanno cio' che devono");
         return ok;
     }
 
