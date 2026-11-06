@@ -2137,6 +2137,184 @@ static class Regole
         return ok;
     }
 
+    // ---- usura che rende meno (A14f) ---------------------------------------------------
+    //
+    // Sopra la meta dell'usura un oggetto rende pieno; sotto, danno dell'arma e
+    // bonus dell'armatura calano in linea retta fino al 70% vicino a zero
+    // (decisioni/abilita.md sezione 5). Il comando "usura N" porta armi e
+    // armatura di chi lo chiede a N% della loro usura massima. I colpi
+    // ricevuti consumano un uso di ogni pezzo indossato.
+    //
+    // Numeri attesi con la spada di pietra senza scudo (22) e la sua usura 55:
+    // al 60% (33) colpo pieno 22; al 25% (13) resa 0,84 e colpo 19; a 1 resa
+    // 0,71 e colpo 16. Tre pezzi d'osso Epici al 25%: danno +21% -> +18%.
+    static double ResaAttesa(int dur, int max)
+    {
+        double f = Math.Clamp((double)dur / max, 0, 1);
+        return f >= 0.5 ? 1.0 : 0.7 + 0.3 * (f / 0.5);
+    }
+
+    public static bool UsuraCheRendeMeno(string tokenA, string tokenB, string host, int port)
+    {
+        Console.WriteLine("--- usura che rende meno: sotto la meta l'arma colpisce meno e l'armatura da meno");
+        bool ok = true;
+        void Male(string m) { Console.WriteLine("  FALLITA: " + m); ok = false; }
+
+        using var a = new Sonda(tokenA, host, port);
+        using var b = new Sonda(tokenB, host, port);
+        if (!a.AttendiPronta() || !b.AttendiPronta()) { Console.WriteLine("  FALLITA: le sonde non sono entrate in gioco"); return false; }
+        if (!a.Attendi(() => a.Indossati != null, 10) || !b.Attendi(() => b.Indossati != null, 10))
+        { Console.WriteLine("  FALLITA: all'ingresso non e' arrivata l'armatura"); return false; }
+
+        Dictionary<string, string> Righe(Sonda s, string comando, string testa)
+        {
+            s.Attendi(() => false, 0.15);
+            var r = s.ChiediAdmin(comando, testa);
+            var d = new Dictionary<string, string>();
+            if (r == null) return d;
+            foreach (var p in r.Split(' ')) { int i = p.IndexOf('='); if (i > 0) d[p[..i]] = p[(i + 1)..]; }
+            d["riga"] = r;
+            return d;
+        }
+        // "StoneSword=13/55:x0.84" -> (13, 55)
+        (int Dur, int Max) Usura(Dictionary<string, string> d, string tipo)
+        {
+            if (!d.TryGetValue(tipo, out var v)) return (-1, -1);
+            var parti = v.Split(':')[0].Split('/');
+            return parti.Length == 2 && int.TryParse(parti[0], out int u) && int.TryParse(parti[1], out int m) ? (u, m) : (-1, -1);
+        }
+        double Molt(Dictionary<string, string> d, string k) => d.TryGetValue(k, out var v) && double.TryParse(v.TrimStart('x'), System.Globalization.NumberStyles.Float, Inv, out double x) ? x : -1;
+        float VitaB() => a.Stato(b.Id).Vita;
+        void Piena()
+        {
+            a.Attendi(() => { b.Attendi(() => true, 0.01); return VitaB() >= 100f; }, 3);
+            a.Attendi(() => { b.Attendi(() => true, 0.01); return false; }, 0.3);
+        }
+        float UnColpo()
+        {
+            b.Admin("sethp 1000");
+            Piena();
+            float prima = VitaB();
+            a.Colpisci(0.2);
+            a.Attendi(() => { b.Attendi(() => true, 0.01); return VitaB() < prima; }, 2);
+            a.Attendi(() => { b.Attendi(() => true, 0.01); return false; }, 0.4);
+            return prima - VitaB();
+        }
+        ulong Dai(Sonda s, string riga)
+        {
+            s.Attendi(() => false, 0.15);
+            var r = s.ChiediAdmin(riga, "dai: ");
+            ulong id = r != null && ulong.TryParse(r.Split("id=").Last(), out var n) ? n : 0;
+            bool arrivato = id != 0 && s.Attendi(() => { lock (s.Zaino) return s.Istanze.ContainsKey(id); }, 5);
+            if (!arrivato) Male($"'{riga}' non ha dato il pezzo ({r ?? "nessuna risposta"})");
+            return id;
+        }
+        bool Equip(Sonda s, ulong id, EquipSlot? togli = null)
+        {
+            s.Attendi(() => false, 0.15);
+            if (togli is EquipSlot sl) s.Togli(sl); else s.Indossa(id);
+            CommandResultMsg e = null;
+            s.Attendi(() => (e = s.Esito(113)) != null, 5);
+            return e != null && e.Success;
+        }
+        void Svesti(Sonda s)
+        {
+            foreach (var slot in new[] { EquipSlot.Head, EquipSlot.Body, EquipSlot.Legs })
+                if (s.Indossati.Worn[(int)slot].Type != ItemType.None) Equip(s, 0, slot);
+        }
+
+        // Le due sonde una accanto all'altra, lontane da tutto, in fazioni diverse.
+        const float PX = -150f, PZ = 250f;
+        a.Admin("setfaction 1");
+        b.Admin("setfaction 2");
+        Svesti(a); Svesti(b);
+        a.Admin("clearinv");
+        b.Admin("clearinv");
+        a.Admin($"tp {PX.ToString(Inv)} {PZ.ToString(Inv)}");
+        b.Admin($"tp {(PX + 1f).ToString(Inv)} {PZ.ToString(Inv)}");
+        if (!a.Attendi(() => Dist(a.X, a.Z, PX, PZ) < 2f, 8) || !b.Attendi(() => Dist(b.X, b.Z, PX + 1f, PZ) < 2f, 8))
+        { Console.WriteLine("  FALLITA: le sonde non sono arrivate al punto della prova"); return false; }
+        a.Cammina(0f, 0f, 0.1);
+        b.Cammina(0f, 0f, 0.1);
+
+        a.Admin("give StoneSword 1");
+        a.Attendi(() => a.Quanti(ItemType.StoneSword) >= 1, 5);
+        a.Dotazione(ItemType.StoneSword, ItemType.None, SideItemType.None);
+        a.Posizione(0);
+        a.Attendi(() => false, 0.4);
+
+        // 1. l'arma: piena, al 60% ancora piena, al 25% e a 1 meno.
+        float colpoPieno = UnColpo();
+        double danno0 = Molt(Righe(a, "statistiche", "statistiche: "), "danno");
+        Console.WriteLine($"  spada nuova: colpo {colpoPieno} (danno x{danno0:F2})");
+        if (colpoPieno <= 0f || danno0 <= 0) { Console.WriteLine("  FALLITA: il colpo di prova non e' arrivato"); return false; }
+        foreach (int perc in new[] { 60, 25, 0 })
+        {
+            var u = Righe(a, $"usura {perc}", "usura: ");
+            var (dur, max) = Usura(u, "StoneSword");
+            double resaServer = Molt(Righe(a, "statistiche", "statistiche: "), "resa");
+            double resa = ResaAttesa(dur, max);
+            float colpo = UnColpo();
+            int atteso = Math.Max(1, (int)Math.Round(22 * danno0 * resa, MidpointRounding.AwayFromZero));
+            Console.WriteLine($"  'usura {perc}': spada {dur}/{max}, resa x{resaServer:F2} (attesa x{resa:F2}), colpo {colpo} (atteso {atteso})");
+            if (dur < 0) { Male($"'usura {perc}' non dice l'usura della spada ({u.GetValueOrDefault("riga", "nessuna risposta")})"); continue; }
+            if (Math.Abs(resaServer - resa) > 0.011) Male($"al {perc}% la resa della spada deve essere x{resa:F2}");
+            if (colpo != atteso) Male($"al {perc}% il colpo di spada deve fare {atteso}");
+        }
+
+        // 2. l'armatura: tre pezzi d'osso Epici danno +21% di danno; al 25%
+        //    della loro usura +18% (21 x 0,85 = 17,85). La spada torna nuova.
+        a.Admin("usura 100");
+        ulong cOsso = Dai(a, "dai BoneHood epico"), kOsso = Dai(a, "dai BoneCuirass epico"), gOsso = Dai(a, "dai BoneGreaves epico");
+        if (!ok) return false;
+        if (!Equip(a, cOsso) || !Equip(a, kOsso) || !Equip(a, gOsso)) Male("indossare l'osso e' stato rifiutato");
+        var arm0 = Righe(a, "armatura", "armatura: ");
+        double dannoOsso = Molt(Righe(a, "statistiche", "statistiche: "), "danno");
+        a.Admin("usura 25");
+        var arm1 = Righe(a, "armatura", "armatura: ");
+        double dannoLogoro = Molt(Righe(a, "statistiche", "statistiche: "), "danno");
+        Console.WriteLine($"  osso epico nuovo: {arm0.GetValueOrDefault("bonus", "?")} danno x{dannoOsso:F2}; " +
+                          $"al 25%: {arm1.GetValueOrDefault("bonus", "?")} danno x{dannoLogoro:F2}");
+        if (!arm0.GetValueOrDefault("bonus", "").Contains("Damage+21")) Male("tre pezzi d'osso epici nuovi devono dare Damage+21");
+        if (!arm1.GetValueOrDefault("bonus", "").Contains("Damage+18")) Male("tre pezzi d'osso epici al 25% devono dare Damage+18");
+        if (Math.Abs(dannoOsso - danno0 - 0.21) > 0.011 || Math.Abs(dannoLogoro - danno0 - 0.18) > 0.011)
+            Male("il moltiplicatore del danno non segue i bonus dell'armatura logora");
+        // il colpo con spada e osso al 25%: un arrotondamento solo, alla fine.
+        var uS = Usura(Righe(a, "usura", "usura: "), "StoneSword");
+        float colpoLogoro = UnColpo();
+        int attesoLogoro = Math.Max(1, (int)Math.Round(22 * dannoLogoro * ResaAttesa(uS.Dur, uS.Max), MidpointRounding.AwayFromZero));
+        Console.WriteLine($"  spada e osso al 25%: colpo {colpoLogoro} (atteso {attesoLogoro})");
+        if (colpoLogoro != attesoLogoro) Male($"con spada e osso al 25% il colpo deve fare {attesoLogoro}");
+        a.Admin("usura 100");
+        var arm2 = Righe(a, "armatura", "armatura: ");
+        if (!arm2.GetValueOrDefault("bonus", "").Contains("Damage+21")) Male("riportata l'usura piena, l'osso deve tornare a Damage+21");
+        Svesti(a);
+
+        // 3. un colpo ricevuto consuma un uso di ogni pezzo indossato.
+        ulong elmo = Dai(b, "dai IronHelm comune"), gamb = Dai(b, "dai LeatherBoots comune");
+        if (!ok) return false;
+        if (!Equip(b, elmo) || !Equip(b, gamb)) Male("indossare elmo e stivali su B e' stato rifiutato");
+        var ub0 = Righe(b, "usura", "usura: ");
+        UnColpo();
+        var ub1 = Righe(b, "usura", "usura: ");
+        var (e0, _) = Usura(ub0, "IronHelm"); var (e1, _) = Usura(ub1, "IronHelm");
+        var (s0, _) = Usura(ub0, "LeatherBoots"); var (s1, _) = Usura(ub1, "LeatherBoots");
+        Console.WriteLine($"  un colpo ricevuto: elmo {e0} -> {e1}, stivali {s0} -> {s1}");
+        if (e0 <= 0 || e1 != e0 - 1 || s0 <= 0 || s1 != s0 - 1) Male("un colpo ricevuto deve consumare un uso di ogni pezzo indossato");
+
+        // Si lascia tutto pulito.
+        Svesti(a); Svesti(b);
+        a.Dotazione(ItemType.None, ItemType.None, SideItemType.None);
+        a.Admin("clearinv");
+        b.Admin("clearinv");
+        a.Admin("sethp 1000");
+        b.Admin("sethp 1000");
+        a.Attendi(() => false, 0.5);
+
+        if (ok) Console.WriteLine("  OK: sotto la meta dell'usura arma e armatura rendono meno, fino al 70%, e i colpi ricevuti consumano l'armatura");
+        return ok;
+    }
+
     // ---- 8. mangiare cura ------------------------------------------------------
 
     public static bool MangiareCura(string token, string host, int port)

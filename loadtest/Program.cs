@@ -174,6 +174,7 @@ if (modoRegole)
         // In fondo: l'era rigogliosa conta il tempo dall'avvio, e queste due
         // non devono spostarla.
         ("statistiche in partita",  () => Regole.StatisticheInPartita(tokens[1], tokens[0], host, port)),
+        ("usura che rende meno",    () => Regole.UsuraCheRendeMeno(tokens[1], tokens[0], host, port)),
         ("silenzio",                () => Regole.Silenzio(tokens[0], TokenBersaglio(), host, port)),
         ("bando",                   () => Regole.Bando(tokens[0], TokenBersaglio, host, port)),
     };
