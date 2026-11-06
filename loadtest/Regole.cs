@@ -2856,6 +2856,233 @@ static class Regole
         return ok;
     }
 
+    // ---- il resto della spada (A14g2) ------------------------------------------
+    //
+    // Le tre Comuni, le tre Rare e le due Epiche della spada, con una spada di
+    // pietra Epica (22 a colpo, il grado non cambia il danno): Grido di
+    // battaglia (+15% danno), Ferita (colpo e sanguinamento del 30%), Colpo di
+    // pomo (colpo e stordimento), Spinta (3 m indietro e rallentato del 50%),
+    // Vortice (tre colpi a tutti attorno), Contrattacco (chi colpisce prende
+    // il doppio), Esecuzione (solo sotto il 30% di vita, triplo danno), Lama
+    // assetata (cura del 25% del danno inflitto). A in fazione 1, B e C in 2.
+
+    public static bool RestoDellaSpada(string tokenA, string tokenB, string tokenC, string host, int port)
+    {
+        Console.WriteLine("--- resto della spada: Comuni, Rare ed Epiche");
+        bool ok = true;
+        void Male(string m) { Console.WriteLine("  FALLITA: " + m); ok = false; }
+
+        using var a = new Sonda(tokenA, host, port);
+        using var b = new Sonda(tokenB, host, port);
+        using var c = new Sonda(tokenC, host, port);
+        if (!a.AttendiPronta() || !b.AttendiPronta() || !c.AttendiPronta())
+        { Console.WriteLine("  FALLITA: le sonde non sono entrate in gioco"); return false; }
+
+        const float PX = -150f, PZ = 250f;   // lo stesso punto delle altre prove della spada
+        static byte[] P<T>(T v) => MessagePack.MessagePackSerializer.Serialize(v);
+        bool Aspetta(Func<bool> cosa, double secondi) =>
+            a.Attendi(() => { b.Attendi(() => true, 0.01); c.Attendi(() => true, 0.01); return cosa(); }, secondi);
+        void Pausa(double secondi) => Aspetta(() => false, secondi);
+        static string Visto(CommandResultMsg r) => r == null ? "nessuna risposta" : r.Success ? "riuscito" : "rifiutato " + r.ErrorCode;
+        float Vita(Sonda chi) => a.Stato(chi.Id).Vita;
+        void Tp(Sonda s, float x, float z)
+        {
+            s.Admin($"tp {x.ToString(Inv)} {z.ToString(Inv)}");
+            Aspetta(() => Dist(s.X, s.Z, x, z) < 0.5f, 6);
+            s.Cammina(0f, 0f, 0.1);
+        }
+        void Piena(params Sonda[] chi)
+        {
+            foreach (var s in chi) s.Admin("sethp 1000");
+            Aspetta(() => chi.All(s => Vita(s) >= 100f), 3);
+            Pausa(0.3);
+        }
+        float Perso(Sonda chi, float prima, double secondi = 1.5)
+        {
+            Aspetta(() => Vita(chi) < prima, secondi);
+            Pausa(0.3);
+            return prima - Vita(chi);
+        }
+        string Effetto(Sonda s, string riga) { Pausa(0.15); return s.ChiediAdmin("effetto " + riga, "effetto: ") ?? "(nessuna risposta)"; }
+        static (float X, float Z) Pos(string riga)
+        {
+            int i = riga.IndexOf("pos=", StringComparison.Ordinal);
+            if (i < 0) return (float.NaN, float.NaN);
+            int f = riga.IndexOf(' ', i);
+            var p = (f < 0 ? riga[(i + 4)..] : riga[(i + 4)..f]).Split(',');
+            return p.Length == 2 && float.TryParse(p[0], System.Globalization.NumberStyles.Float, Inv, out var x)
+                   && float.TryParse(p[1], System.Globalization.NumberStyles.Float, Inv, out var z) ? (x, z) : (float.NaN, float.NaN);
+        }
+        CommandResultMsg Usa(Sonda s, AbilityId id, float yaw)
+        {
+            Pausa(0.15);
+            s.Comando(117, CommandType.UseAbility, P(new UseAbilityCommand { Ability = id, Yaw = yaw }));
+            CommandResultMsg r = null;
+            Aspetta(() => (r = s.Esito(117)) != null, 5);
+            return r;
+        }
+        /// Mette id nello slot 0 della spada di s, azzera le ricariche, e lo usa.
+        CommandResultMsg Prova(Sonda s, AbilityId id, float yaw)
+        {
+            Pausa(0.15);
+            s.Comando(118, CommandType.SetAbilitySlot, P(new SetAbilitySlotCommand
+                { Kind = AbilitySlotKind.Weapon, Family = WeaponFamily.Sword, Slot = 0, Ability = id }));
+            CommandResultMsg r = null;
+            Aspetta(() => (r = s.Esito(118)) != null, 5);
+            if (r == null || !r.Success) Male($"{id} nello slot: {Visto(r)}");
+            Pausa(0.15); s.Admin("ricarica");
+            return Usa(s, id, yaw);
+        }
+        void Atteso(string cosa, CommandResultMsg r, ErrorCode atteso)
+        {
+            bool giusto = r != null && (atteso == ErrorCode.None ? r.Success : !r.Success && r.ErrorCode == atteso);
+            Console.WriteLine($"  {cosa}: {Visto(r)}{(giusto ? "" : $" (atteso {(atteso == ErrorCode.None ? "riuscito" : atteso.ToString())})")}");
+            if (!giusto) Male($"{cosa}: atteso {(atteso == ErrorCode.None ? "riuscito" : "rifiutato " + atteso)}");
+        }
+        void Spada(Sonda s, string grado)
+        {
+            Pausa(0.15);
+            var r = s.ChiediAdmin($"dai StoneSword {grado}", "dai: ");
+            ulong id = r != null && ulong.TryParse(r.Split("id=").Last(), out var n) ? n : 0;
+            if (id == 0 || !Aspetta(() => { lock (s.Zaino) return s.Istanze.ContainsKey(id); }, 5))
+                Male($"'dai StoneSword {grado}' non ha dato la spada ({r ?? "nessuna risposta"})");
+            s.Dotazione(ItemType.StoneSword, ItemType.None, SideItemType.None);
+            s.Posizione(0);
+            Pausa(0.15); s.Admin("abilita sblocca spada");
+            Pausa(0.4);
+        }
+
+        a.Admin("setfaction 1"); b.Admin("setfaction 2"); c.Admin("setfaction 2");
+        foreach (var s in new[] { a, b, c }) { s.Admin("clearinv"); s.Admin("abilita azzera"); s.Admin("effetto azzera"); }
+        b.Dotazione(ItemType.None, ItemType.None, SideItemType.None);
+        c.Dotazione(ItemType.None, ItemType.None, SideItemType.None);
+        Tp(a, PX, PZ); Tp(b, PX + 1f, PZ); Tp(c, PX - 8f, PZ);
+        Spada(a, "epico");
+        Piena(a, b, c);
+
+        // 1. Grido di battaglia: +15% danno per 8 s, il colpo normale 22 -> 25.
+        Atteso("Grido di battaglia", Prova(a, AbilityId.SwordBattleCry, 90f), ErrorCode.None);
+        bool grido = Aspetta(() => a.Statistiche?.DamagePercent == 15, 3);
+        float prima = Vita(b);
+        a.Colpisci(0.2);
+        float conGrido = Perso(b, prima);
+        Console.WriteLine($"  Grido: danno al client {(grido ? "+15%" : "non arrivato")}, colpo su B {conGrido} (atteso 25)");
+        if (!grido) Male("il Grido di battaglia deve dare +15% danno, e il client saperlo");
+        if (conGrido != 25f) Male("col Grido di battaglia la spada di pietra deve fare 25");
+        Effetto(a, "azzera");
+        Aspetta(() => a.Statistiche?.DamagePercent == 0, 3);
+
+        // 2. Ferita: 22 subito, poi il 30% di 22 (7) in 6 s.
+        Piena(b);
+        prima = Vita(b);
+        Atteso("Ferita su B", Prova(a, AbilityId.SwordWound, 90f), ErrorCode.None);
+        float ferita = Perso(b, prima, 1.0);
+        string stB = Effetto(a, $"stato {b.Id}");
+        Aspetta(() => prima - Vita(b) >= 29f, 8);
+        Pausa(1.3);
+        float feritaTutto = prima - Vita(b);
+        Console.WriteLine($"  Ferita: B perde {ferita} subito (atteso 22), {feritaTutto} in tutto (atteso 29); {stB}");
+        if (ferita != 22f) Male("la Ferita deve colpire per 22");
+        if (!stB.Contains("Ferita")) Male("la Ferita deve far sanguinare");
+        if (feritaTutto != 29f) Male("la Ferita deve togliere 22 + 7 di sanguinamento");
+
+        // 3. Colpo di pomo: 22 e B stordito.
+        Piena(b);
+        prima = Vita(b);
+        Atteso("Colpo di pomo su B", Prova(a, AbilityId.SwordPommelStrike, 90f), ErrorCode.None);
+        float pomo = Perso(b, prima, 1.0);
+        stB = Effetto(a, $"stato {b.Id}");
+        Console.WriteLine($"  Colpo di pomo: B perde {pomo} (atteso 22); {stB}");
+        if (pomo != 22f) Male("il Colpo di pomo deve colpire per 22");
+        if (!stB.Contains("stordito")) Male("il Colpo di pomo deve stordire");
+        Effetto(a, $"azzera {b.Id}");
+
+        // 4. Spinta: B da 1 m a 4 m, rallentato del 50%, senza danno.
+        Tp(b, PX + 1f, PZ);
+        Piena(b);
+        prima = Vita(b);
+        Atteso("Spinta su B", Prova(a, AbilityId.SwordShove, 90f), ErrorCode.None);
+        Pausa(0.3);
+        stB = Effetto(a, $"stato {b.Id}");
+        var (sx, sz) = Pos(stB);
+        Console.WriteLine($"  Spinta: B a ({sx:F2}, {sz:F2}) (atteso {PX + 4f}, {PZ}), perde {prima - Vita(b)} (atteso 0); {stB}");
+        if (float.IsNaN(sx) || Dist(sx, sz, PX + 4f, PZ) > 0.4f) Male("la Spinta deve portare B 3 m piu' in la'");
+        if (!stB.Contains("rallentato 50%")) Male("la Spinta deve rallentare del 50%");
+        if (Vita(b) != prima) Male("la Spinta non deve fare danno");
+        Effetto(a, $"azzera {b.Id}");
+
+        // 5. Vortice: tre colpi da 22 a B davanti e a C dietro, entro 3 m.
+        Tp(b, PX + 1f, PZ); Tp(c, PX - 1.5f, PZ);
+        Piena(b, c);
+        float pb = Vita(b), pc = Vita(c);
+        Atteso("Vortice", Prova(a, AbilityId.SwordWhirlwind, 90f), ErrorCode.None);
+        Aspetta(() => pb - Vita(b) >= 66f && pc - Vita(c) >= 66f, 3);
+        Pausa(0.6);
+        float vb = pb - Vita(b), vc = pc - Vita(c);
+        Console.WriteLine($"  Vortice: B perde {vb}, C perde {vc} (attesi 66 e 66)");
+        if (vb != 66f || vc != 66f) Male("il Vortice deve dare tre colpi da 22 a tutti entro 3 m");
+        Tp(c, PX - 8f, PZ);
+
+        // 6. Contrattacco di B: A colpisce B per 22 e perde 44; finito, niente.
+        Spada(b, "raro");
+        Piena(a, b);
+        Atteso("Contrattacco di B", Prova(b, AbilityId.SwordRiposte, 270f), ErrorCode.None);
+        float pa = Vita(a); pb = Vita(b);
+        a.Colpisci(0.2);
+        float cb = Perso(b, pb, 1.0), ca = Perso(a, pa, 1.0);
+        Console.WriteLine($"  Contrattacco: B perde {cb} (atteso 22), A perde {ca} (atteso 44)");
+        if (cb != 22f) Male("col Contrattacco B prende lo stesso il colpo");
+        if (ca != 44f) Male("col Contrattacco chi colpisce deve prendere il doppio");
+        Pausa(2.2);
+        Piena(a, b);
+        pa = Vita(a); pb = Vita(b);
+        a.Colpisci(0.2);
+        cb = Perso(b, pb, 1.0); ca = pa - Vita(a);
+        Console.WriteLine($"  dopo 2 s: B perde {cb} (atteso 22), A perde {ca} (atteso 0)");
+        if (ca != 0f) Male("finito il Contrattacco non si rimanda piu' niente");
+        b.Admin("abilita azzera"); b.Admin("clearinv");
+        b.Dotazione(ItemType.None, ItemType.None, SideItemType.None);
+        Pausa(0.3);
+
+        // 7. Esecuzione: B a 50 no; B a 25 si', triplo danno (66), con danno
+        //    subito -75% perche' non muoia: 17.
+        Piena(b);
+        b.Admin("sethp 50");
+        Aspetta(() => Vita(b) is > 0f and <= 50f, 3);
+        Atteso("Esecuzione su B a 50", Prova(a, AbilityId.SwordExecution, 90f), ErrorCode.AbilityNotUsable);
+        b.Admin("sethp 25");
+        Aspetta(() => Vita(b) is > 0f and <= 25f, 3);
+        Effetto(b, "subito -75 6");
+        prima = Vita(b);
+        Atteso("Esecuzione su B a 25", Prova(a, AbilityId.SwordExecution, 90f), ErrorCode.None);
+        float es = Perso(b, prima, 1.0);
+        Console.WriteLine($"  Esecuzione: B a 25 perde {es} (atteso 17: 66 con -75%)");
+        if (es != 17f) Male("l'Esecuzione deve fare il triplo del danno sotto il 30% di vita");
+        Effetto(b, "azzera");
+
+        // 8. Lama assetata: A a 50, colpisce B per 22 e torna a 56.
+        Piena(b);
+        a.Admin("sethp 50");
+        Aspetta(() => Vita(a) is > 0f and <= 50f, 3);
+        Atteso("Lama assetata", Prova(a, AbilityId.SwordThirstyBlade, 90f), ErrorCode.None);
+        pa = Vita(a); pb = Vita(b);
+        a.Colpisci(0.2);
+        float lb = Perso(b, pb, 1.0);
+        Aspetta(() => Vita(a) > pa, 1.5);
+        Pausa(0.2);
+        float la = Vita(a) - pa;
+        Console.WriteLine($"  Lama assetata: B perde {lb} (atteso 22), A guadagna {la} (atteso 6)");
+        if (lb != 22f || la != 6f) Male("con la Lama assetata un colpo da 22 deve curare 6");
+
+        // Si lascia tutto pulito.
+        foreach (var s in new[] { a, b, c }) { s.Admin("effetto azzera"); s.Admin("abilita azzera"); s.Admin("clearinv"); s.Admin("sethp 1000"); }
+        a.Dotazione(ItemType.None, ItemType.None, SideItemType.None);
+        Pausa(0.5);
+
+        if (ok) Console.WriteLine("  OK: Grido di battaglia, Ferita, Colpo di pomo, Spinta, Vortice, Contrattacco, Esecuzione e Lama assetata fanno cio' che devono");
+        return ok;
+    }
+
     // ---- 8. mangiare cura ------------------------------------------------------
 
     public static bool MangiareCura(string token, string host, int port)
