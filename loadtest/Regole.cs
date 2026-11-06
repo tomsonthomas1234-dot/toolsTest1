@@ -7003,8 +7003,8 @@ static class Regole
         Atteso("una seconda attiva dalla secondaria", Slot(AbilitySlotKind.ClassActive, 1, AbilityId.WarriorToughSkin), ErrorCode.AbilityNotUsable);
         Console.WriteLine($"  Robusto dalla secondaria: vita massima {vitaSecondaria} (attesa {vitaBase + 13}); {Slots()}");
         if (vitaSecondaria != vitaBase + 13) Male("Robusto dalla secondaria deve valere come dalla principale");
-        // un'attiva di classe senza effetto (arrivano con A14j) non va in ricarica.
-        Atteso("Sfida, effetto non ancora fatto", Manda(CommandType.UseAbility, P(new UseAbilityCommand { Ability = AbilityId.WarriorChallenge })),
+        // Sfida senza creature attorno non parte (A14j1c) e non va in ricarica.
+        Atteso("Sfida senza creature attorno", Manda(CommandType.UseAbility, P(new UseAbilityCommand { Ability = AbilityId.WarriorChallenge })),
                ErrorCode.AbilityNotUsable);
         if (a.Abilita?.Cooldowns?.Length > 0) Male("un'attiva senza effetto non deve andare in ricarica");
         Atteso("togliere la secondaria", Scegli(ClassId.None, true), ErrorCode.None);
@@ -7130,8 +7130,8 @@ static class Regole
         Pausa(0.4);
         Piena(a, b, c);
 
-        // 0. Sfida non ha ancora effetto: non parte e non va in ricarica.
-        Atteso("Sfida, effetto non ancora fatto", Prova(AbilityId.WarriorChallenge), ErrorCode.AbilityNotUsable);
+        // 0. Sfida senza creature attorno (A14j1c): non parte e non va in ricarica.
+        Atteso("Sfida senza creature attorno", Prova(AbilityId.WarriorChallenge), ErrorCode.AbilityNotUsable);
 
         // 1. Pelle dura: -30% danno subito per 4 s; il colpo di B da 22 a 15.
         float base_ = ColpoDiB(a);
@@ -7370,6 +7370,201 @@ static class Regole
         Pausa(0.5);
 
         if (ok) Console.WriteLine("  OK: Bastione, Sete di sangue, Sangue caldo, Inarrestabile e Massacro fanno quello che dice il catalogo");
+        return ok;
+    }
+
+    /// <summary>
+    /// A14j1c: Sfida e Provocazione sui mob. A e il Guerriero, B un'alleata.
+    /// Le belve normali non vedono le sonde (segno di prova): un lupo accanto
+    /// ad A non morde finche A non lo sfida; sfidato, per 4 s insegue e morde
+    /// solo A, poi torna libero. La Provocazione prende tutte le creature
+    /// entro 8 m. Un Eco dell'orda (vede tutti) che caccia B passa ad A con la
+    /// Provocazione. La Sfida su un giocatore (A14j2) e senza creature attorno
+    /// non parte. Il Custode non e provato qui (codice letto).
+    /// </summary>
+    public static bool SfidaEProvocazione(string tokenA, string tokenB, string host, int port)
+    {
+        Console.WriteLine("--- sfida e provocazione: belve ed Echi inseguono solo il Guerriero per 4 s");
+        bool ok = true;
+        void Male(string m) { Console.WriteLine("  FALLITA: " + m); ok = false; }
+
+        using var a = new Sonda(tokenA, host, port);
+        using var b = new Sonda(tokenB, host, port);
+        if (!a.AttendiPronta() || !b.AttendiPronta())
+        { Console.WriteLine("  FALLITA: le sonde non sono entrate in gioco"); return false; }
+
+        const float PX = -150f, PZ = 250f;   // lo stesso punto delle prove delle armi
+        static byte[] P<T>(T v) => MessagePack.MessagePackSerializer.Serialize(v);
+        bool Aspetta(Func<bool> cosa, double secondi) =>
+            a.Attendi(() => { b.Attendi(() => true, 0.01); return cosa(); }, secondi);
+        void Pausa(double secondi) => Aspetta(() => false, secondi);
+        static string Visto(CommandResultMsg r) => r == null ? "nessuna risposta" : r.Success ? "riuscito" : "rifiutato " + r.ErrorCode;
+        float Vita(Sonda chi) => a.Stato(chi.Id).Vita;
+        void Tp(Sonda s, float x, float z)
+        {
+            s.Admin($"tp {x.ToString(Inv)} {z.ToString(Inv)}");
+            Aspetta(() => Dist(s.X, s.Z, x, z) < 0.5f, 6);
+            s.Cammina(0f, 0f, 0.1);
+        }
+        string StatoDi(ulong id) { Pausa(0.15); return a.ChiediAdmin($"effetto stato {id}", "effetto: ") ?? "(nessuna risposta)"; }
+        static string Campo(string riga, string nome)
+        {
+            int i = riga.IndexOf(" " + nome + "=", StringComparison.Ordinal);
+            if (i < 0) return "?";
+            i += nome.Length + 2;
+            int f = riga.IndexOf(' ', i);
+            return f < 0 ? riga[i..] : riga[i..f];
+        }
+        EntityState Vista(ulong id) { lock (a.Mondo) return a.Mondo.GetValueOrDefault(id); }
+        uint idComando = 260;
+        CommandResultMsg Usa(AbilityId id, ulong bersaglio = 0, float yaw = 90f)
+        {
+            uint idSlot = idComando++, idUso = idComando++;
+            Pausa(0.15);
+            a.Comando(idSlot, CommandType.SetAbilitySlot, P(new SetAbilitySlotCommand
+                { Kind = AbilitySlotKind.ClassActive, Slot = 0, Ability = id }));
+            CommandResultMsg r = null;
+            Aspetta(() => (r = a.Esito(idSlot)) != null, 5);
+            if (r == null || !r.Success) Male($"{id} nello slot: {Visto(r)}");
+            Pausa(0.15); a.Admin("ricarica");
+            Pausa(0.15);
+            a.Comando(idUso, CommandType.UseAbility, P(new UseAbilityCommand { Ability = id, TargetEntityId = bersaglio, Yaw = yaw }));
+            r = null;
+            Aspetta(() => (r = a.Esito(idUso)) != null, 5);
+            return r;
+        }
+        void Atteso(string cosa, CommandResultMsg r, ErrorCode atteso)
+        {
+            bool giusto = r != null && (atteso == ErrorCode.None ? r.Success : !r.Success && r.ErrorCode == atteso);
+            Console.WriteLine($"  {cosa}: {Visto(r)}{(giusto ? "" : $" (atteso {(atteso == ErrorCode.None ? "riuscito" : atteso.ToString())})")}");
+            if (!giusto) Male($"{cosa}: atteso {(atteso == ErrorCode.None ? "riuscito" : "rifiutato " + atteso)}");
+        }
+        void Uguale(string cosa, string visto, string atteso)
+        {
+            Console.WriteLine($"  {cosa}: {visto} (atteso {atteso})");
+            if (visto != atteso) Male($"{cosa}: {visto} invece di {atteso}");
+        }
+        // Una creatura nata d'ufficio accanto a chi la chiede: il suo id, 0 se
+        // non compare.
+        var nate = new List<ulong>();
+        ulong Nasce(Sonda chi, string comando, EntityType tipo)
+        {
+            float x = chi.X + 2f, z = chi.Z;
+            chi.Admin(comando);
+            EntityState l = null;
+            Aspetta(() =>
+            {
+                lock (a.Mondo) l = a.Mondo.Values.FirstOrDefault(e => e.Type == tipo && !nate.Contains(e.EntityId) && Dist(e.X, e.Z, x, z) < 2.5f);
+                return l != null;
+            }, 5);
+            if (l == null) { Male($"'{comando}' non ha fatto nascere niente accanto a chi lo chiede"); return 0; }
+            nate.Add(l.EntityId);
+            return l.EntityId;
+        }
+        string ida = a.Id.ToString(), idb = b.Id.ToString();
+
+        a.Admin("setfaction 1"); b.Admin("setfaction 1");
+        foreach (var s in new[] { a, b })
+        {
+            s.Admin("clearinv"); s.Admin("abilita azzera"); s.Admin("effetto azzera");
+            s.Dotazione(ItemType.None, ItemType.None, SideItemType.None);
+            s.Posizione(0);
+        }
+        Tp(a, PX, PZ); Tp(b, PX - 40f, PZ);
+        Pausa(0.15); Console.WriteLine($"  {a.ChiediAdmin("classe guerriero", "classe: ")}");
+        Pausa(0.15); Console.WriteLine($"  {a.ChiediAdmin("classe sblocca", "classe: ")}");
+        Pausa(0.15); a.Admin("abilita sblocca guerriero");
+        Pausa(0.4);
+        a.Admin("sethp 1000"); b.Admin("sethp 1000");
+        Aspetta(() => Vita(a) >= 100f && Vita(b) >= 100f, 3);
+
+        try
+        {
+            // 0. Senza creature attorno non parte.
+            Atteso("Sfida senza creature attorno", Usa(AbilityId.WarriorChallenge), ErrorCode.AbilityNotUsable);
+            Atteso("Provocazione senza creature attorno", Usa(AbilityId.WarriorTaunt), ErrorCode.AbilityNotUsable);
+
+            // 1. Un lupo accanto ad A: col segno di prova non lo vede. Sfida
+            //    su B, un giocatore, non parte (e A14j2) nemmeno col lupo li.
+            ulong lupo = Nasce(a, "spawn wolf", EntityType.Wolf);
+            if (lupo == 0) return false;
+            Tp(b, PX + 1f, PZ - 1f);
+            Atteso("Sfida su B, un giocatore (A14j2)", Usa(AbilityId.WarriorChallenge, b.Id), ErrorCode.AbilityNotUsable);
+            Tp(b, PX - 40f, PZ);
+            float prima = Vita(a);
+            Pausa(1.5);
+            string st = StatoDi(lupo);
+            Console.WriteLine($"  lupo prima della Sfida: {st}; vita di A {prima} -> {Vita(a)}");
+            if (Campo(st, "caccia") != "0" || Vita(a) < prima) Male("prima della Sfida il lupo non doveva cacciare A");
+
+            // 2. Sfida: per 4 s il lupo insegue e morde A.
+            if (Vista(lupo) is { } lu) Tp(a, lu.X - 1.5f, lu.Z);
+            prima = Vita(a);
+            Atteso("Sfida sul lupo", Usa(AbilityId.WarriorChallenge, lupo), ErrorCode.None);
+            st = StatoDi(lupo);
+            Uguale("Sfida, lupo provocato da", Campo(st, "provocata"), ida);
+            Uguale("Sfida, lupo caccia", Campo(st, "caccia"), ida);
+            bool morso = Aspetta(() => Vita(a) < prima, 3);
+            Console.WriteLine($"  Sfida, il lupo morde A: {morso} (vita {prima} -> {Vita(a)})");
+            if (!morso) Male("sfidato, il lupo doveva mordere A");
+
+            // 3. Finiti i 4 s torna libero: non caccia piu e non morde.
+            Pausa(3.5);
+            st = StatoDi(lupo);
+            Uguale("dopo 4 s, lupo provocato da", Campo(st, "provocata"), "0");
+            Pausa(0.5);
+            float dopo = Vita(a);
+            Pausa(3);
+            Console.WriteLine($"  dopo la Sfida: {StatoDi(lupo)}; vita di A {dopo} -> {Vita(a)}");
+            if (Vita(a) < dopo) Male("finita la Sfida il lupo non doveva piu mordere A");
+
+            // 4. Provocazione: due lupi entro 8 m, tutti e due su A.
+            a.Admin("sethp 1000");
+            Pausa(0.3);
+            // Il primo lupo vaga (giro 1: era a 18 m): A gli va accanto prima
+            // che nasca il secondo, cosi tutti e due restano entro 8 m.
+            if (Vista(lupo) is { } l1) Tp(a, l1.X - 1.5f, l1.Z);
+            ulong lupo2 = Nasce(a, "spawn wolf", EntityType.Wolf);
+            if (Vista(lupo) is { } l1b && Vista(lupo2) is { } l2)
+                Console.WriteLine($"  prima della Provocazione: primo lupo a {Dist(l1b.X, l1b.Z, a.X, a.Z):F1} m, secondo a {Dist(l2.X, l2.Z, a.X, a.Z):F1} m");
+            Atteso("Provocazione", Usa(AbilityId.WarriorTaunt), ErrorCode.None);
+            foreach (var (nome, id) in new[] { ("primo lupo", lupo), ("secondo lupo", lupo2) })
+            {
+                st = StatoDi(id);
+                Uguale($"Provocazione, {nome} provocato da", Campo(st, "provocata"), ida);
+                a.ChiediAdmin($"effetto azzera {id}", "effetto: ");   // due lupi per 4 s metterebbero A a terra
+            }
+            foreach (var id in nate) a.Admin($"remove {id}");
+            nate.Clear();
+            a.Admin("sethp 1000");
+            Pausa(0.5);
+
+            // 5. Un Eco dell'orda nasce accanto a B e la caccia; la
+            //    Provocazione di A, a 3 m, lo porta su A.
+            Tp(a, PX, PZ); Tp(b, PX - 5f, PZ);
+            b.Admin("sethp 1000");
+            ulong eco = Nasce(b, "spawn orda", EntityType.Echo);
+            if (eco != 0)
+            {
+                bool suB = Aspetta(() => Campo(StatoDi(eco), "caccia") == idb, 4);
+                Console.WriteLine($"  l'Eco caccia B: {suB} ({StatoDi(eco)})");
+                if (!suB) Male("l'Eco dell'orda doveva cacciare B, la piu vicina");
+                Atteso("Provocazione sull'Eco", Usa(AbilityId.WarriorTaunt), ErrorCode.None);
+                st = StatoDi(eco);
+                Uguale("Provocazione, Eco provocato da", Campo(st, "provocata"), ida);
+                Uguale("Provocazione, Eco caccia", Campo(st, "caccia"), ida);
+            }
+        }
+        finally
+        {
+            foreach (var id in nate) a.Admin($"remove {id}");
+            a.Admin("santuario orda uccidi");   // un Eco dell'orda vivo terrebbe il santuario a riposo
+            Pausa(0.3);
+            foreach (var s in new[] { a, b }) { s.Admin("aterra rialza"); s.Admin("effetto azzera"); s.Admin("abilita azzera"); s.Admin("clearinv"); s.Admin("sethp 1000"); }
+            Pausa(0.5);
+        }
+
+        if (ok) Console.WriteLine("  OK: Sfida e Provocazione portano belve ed Echi sul Guerriero per 4 s, poi tornano liberi");
         return ok;
     }
     static readonly System.Globalization.CultureInfo Inv =
