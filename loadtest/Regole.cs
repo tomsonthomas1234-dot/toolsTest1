@@ -1714,7 +1714,8 @@ static class Regole
     // pezzo esce dallo zaino, quello che c'era nello slot ci torna. I bonus
     // vanno nelle statistiche mandate al client, col moltiplicatore del grado
     // (decisioni/abilita.md sezione 4). Morendo l'armatura segue lo zaino.
-    // Che le statistiche cambino davvero la partita e' A14e2: qui no.
+    // Che le statistiche cambino davvero la partita lo prova "statistiche in
+    // partita" (A14e2).
     public static bool Armature(string token, string host, int port)
     {
         Console.WriteLine("--- armature: si creano al banco, si indossano, danno bonus col grado");
@@ -1878,6 +1879,210 @@ static class Regole
         s.Admin("clearinv");
 
         if (ok) Console.WriteLine("  OK: le armature si creano al banco, si indossano e si tolgono, danno i bonus del loro grado");
+        return ok;
+    }
+
+    // ---- statistiche in partita (A14e2) ----------------------------------------------
+    //
+    // Le statistiche dell'armatura (e dei rituali) ora cambiano la partita:
+    // vita massima, danno, velocita d'attacco, rigenerazione in combattimento.
+    // Si misurano sui fatti, con due sonde di fazioni diverse: la vita vista
+    // nell'istantanea, i colpi che una da all'altra. Il comando "statistiche"
+    // dice i numeri che il server usa, per confrontarli.
+    //
+    // Numeri attesi (decisioni/abilita.md sezione 4, grado Epico x3): tre
+    // pezzi di ferro, vita +42% e rigenerazione 9 millesimi al secondo; tre
+    // d'osso, danno +21%; tre di cuoio, velocita d'attacco +21%.
+    public static bool StatisticheInPartita(string tokenA, string tokenB, string host, int port)
+    {
+        Console.WriteLine("--- statistiche in partita: l'armatura cambia vita, danno, colpi e rigenerazione");
+        bool ok = true;
+        void Male(string m) { Console.WriteLine("  FALLITA: " + m); ok = false; }
+
+        using var a = new Sonda(tokenA, host, port);
+        using var b = new Sonda(tokenB, host, port);
+        if (!a.AttendiPronta() || !b.AttendiPronta()) { Console.WriteLine("  FALLITA: le sonde non sono entrate in gioco"); return false; }
+        if (!a.Attendi(() => a.Statistiche != null && a.Indossati != null, 10))
+        { Console.WriteLine("  FALLITA: all'ingresso non sono arrivate statistiche e armatura"); return false; }
+
+        Dictionary<string, string> Stat()
+        {
+            a.Attendi(() => false, 0.15);
+            var r = a.ChiediAdmin("statistiche", "statistiche: ");
+            var d = new Dictionary<string, string>();
+            if (r == null) return d;
+            foreach (var p in r.Split(' ')) { int i = p.IndexOf('='); if (i > 0) d[p[..i]] = p[(i + 1)..]; }
+            d["riga"] = r;
+            return d;
+        }
+        int VitaMax(Dictionary<string, string> d) => d.TryGetValue("vita", out var v) && int.TryParse(v.Split('/').Last(), out int n) ? n : -1;
+        double Molt(Dictionary<string, string> d, string k) => d.TryGetValue(k, out var v) && double.TryParse(v.TrimStart('x'), System.Globalization.NumberStyles.Float, Inv, out double x) ? x : -1;
+        int Pausa(Dictionary<string, string> d) => d.TryGetValue("pausa", out var v) && int.TryParse(v.Split("->").Last(), out int n) ? n : -1;
+        float VitaB() => a.Stato(b.Id).Vita;
+        float VitaA() => a.Stato(a.Id).Vita;
+        // Dopo "sethp" su B si aspetta che A veda B a vita piena, ascoltando
+        // tutte e due: aspettando solo su B, A non legge la rete e la vita di B
+        // che vede resta quella vecchia (giro 1: un colpo da 27 misurato 5).
+        void Piena()
+        {
+            a.Attendi(() => { b.Attendi(() => true, 0.01); return VitaB() >= 100f; }, 3);
+            a.Attendi(() => { b.Attendi(() => true, 0.01); return false; }, 0.3);
+        }
+
+        ulong Dai(string riga)
+        {
+            a.Attendi(() => false, 0.15);
+            var r = a.ChiediAdmin(riga, "dai: ");
+            ulong id = r != null && ulong.TryParse(r.Split("id=").Last(), out var n) ? n : 0;
+            bool arrivato = id != 0 && a.Attendi(() => { lock (a.Zaino) return a.Istanze.ContainsKey(id); }, 5);
+            if (!arrivato) Male($"'{riga}' non ha dato il pezzo ({r ?? "nessuna risposta"})");
+            return id;
+        }
+        bool Equip(ulong id, EquipSlot? togli = null)
+        {
+            a.Attendi(() => false, 0.15);
+            if (togli is EquipSlot sl) a.Togli(sl); else a.Indossa(id);
+            CommandResultMsg e = null;
+            a.Attendi(() => (e = a.Esito(113)) != null, 5);
+            return e != null && e.Success;
+        }
+        void SvestiA()
+        {
+            foreach (var slot in new[] { EquipSlot.Head, EquipSlot.Body, EquipSlot.Legs })
+                if (a.Indossati.Worn[(int)slot].Type != ItemType.None) Equip(0, slot);
+        }
+
+        // Le due sonde una accanto all'altra, lontane da tutto, in fazioni diverse.
+        const float PX = -150f, PZ = 250f;
+        a.Admin("setfaction 1");
+        b.Admin("setfaction 2");
+        SvestiA();
+        a.Admin("clearinv");
+        b.Admin("clearinv");
+        a.Dotazione(ItemType.None, ItemType.None, SideItemType.None);
+        a.Posizione(0);
+        a.Admin($"tp {PX.ToString(Inv)} {PZ.ToString(Inv)}");
+        b.Admin($"tp {(PX + 1f).ToString(Inv)} {PZ.ToString(Inv)}");
+        if (!a.Attendi(() => Dist(a.X, a.Z, PX, PZ) < 2f, 8) || !b.Attendi(() => Dist(b.X, b.Z, PX + 1f, PZ) < 2f, 8))
+        { Console.WriteLine("  FALLITA: le sonde non sono arrivate al punto della prova"); return false; }
+        a.Cammina(0f, 0f, 0.1);
+        b.Cammina(0f, 0f, 0.1);
+
+        var s0 = Stat();
+        int vita0 = VitaMax(s0);
+        double danno0 = Molt(s0, "danno"), attacco0 = Molt(s0, "attacco");
+        Console.WriteLine($"  di partenza: {(s0.TryGetValue("riga", out var r0) ? r0 : "(nessuna risposta)")}");
+        if (vita0 <= 0 || danno0 <= 0 || attacco0 <= 0) { Console.WriteLine("  FALLITA: il comando 'statistiche' non risponde"); return false; }
+
+        // 1. vita massima: col ferro Epico addosso si sale oltre la vita di
+        //    prima, e l'istantanea lo vede.
+        ulong elmo = Dai("dai IronHelm epico"), corazza = Dai("dai IronCuirass epico"), gambali = Dai("dai IronGreaves epico");
+        if (!ok) return false;
+        if (!Equip(elmo) || !Equip(corazza) || !Equip(gambali)) Male("indossare il ferro e' stato rifiutato");
+        var sF = Stat();
+        int vitaF = VitaMax(sF);
+        Console.WriteLine($"  col ferro epico: {(sF.TryGetValue("riga", out var rF) ? rF : "?")}");
+        if (sF.GetValueOrDefault("rigenerazione") != "9") Male("col ferro epico la rigenerazione deve essere 9 millesimi al secondo");
+        if (vitaF <= vita0) Male($"col ferro la vita massima non e' salita ({vita0} -> {vitaF})");
+        a.Admin("sethp 1000");
+        bool piena = a.Attendi(() => VitaA() == vitaF, 4);
+        Console.WriteLine($"  'sethp 1000' col ferro: vita vista {VitaA()}, massima {vitaF}");
+        if (!piena) Male($"la vita non arriva alla massima nuova ({vitaF})");
+
+        // 2. rigenerazione in combattimento: senza mangiare, circa 1,3 punti
+        //    al secondo su 142. In cinque secondi almeno quattro punti.
+        a.Admin("sethp 50");
+        a.Attendi(() => VitaA() == 50f, 3);
+        float da = VitaA();
+        a.Attendi(() => false, 5.2);
+        float poi = VitaA();
+        Console.WriteLine($"  rigenerazione: vita {da} -> {poi} in 5 secondi (attesi circa {vitaF * 9 / 1000.0 * 5:F1} punti)");
+        if (poi - da < 4f || poi - da > 9f) Male("la rigenerazione del ferro non ha reso quello che deve");
+
+        // 3. togliendo la corazza la vita massima scende, e la vita con lei.
+        a.Admin("sethp 1000");
+        a.Attendi(() => VitaA() == vitaF, 3);
+        if (!Equip(0, EquipSlot.Body)) Male("togliere la corazza e' stato rifiutato");
+        var sT = Stat();
+        int vitaT = VitaMax(sT);
+        bool scesa = a.Attendi(() => VitaA() == vitaT, 3);
+        Console.WriteLine($"  tolta la corazza: vita massima {vitaF} -> {vitaT}, vita vista {VitaA()}");
+        if (vitaT >= vitaF || !scesa) Male("tolta la corazza la vita non e' scesa alla massima nuova");
+        SvestiA();
+
+        // 4. danno: un colpo di spada di pietra (22, senza scudo) prima e dopo
+        //    l'osso Epico. La differenza e quella del moltiplicatore.
+        a.Admin("give StoneSword 1");
+        a.Attendi(() => a.Quanti(ItemType.StoneSword) >= 1, 5);
+        a.Dotazione(ItemType.StoneSword, ItemType.None, SideItemType.None);
+        a.Posizione(0);
+        a.Attendi(() => false, 0.4);
+        float UnColpo()
+        {
+            b.Admin("sethp 1000");
+            Piena();
+            float prima = VitaB();
+            a.Colpisci(0.2);
+            a.Attendi(() => VitaB() < prima, 2);
+            a.Attendi(() => false, 0.4);
+            return prima - VitaB();
+        }
+        float colpo0 = UnColpo();
+        ulong cOsso = Dai("dai BoneHood epico"), kOsso = Dai("dai BoneCuirass epico"), gOsso = Dai("dai BoneGreaves epico");
+        if (!Equip(cOsso) || !Equip(kOsso) || !Equip(gOsso)) Male("indossare l'osso e' stato rifiutato");
+        var sO = Stat();
+        double dannoO = Molt(sO, "danno");
+        float colpoO = UnColpo();
+        int attesa = (int)Math.Round(22 * dannoO, MidpointRounding.AwayFromZero) - (int)Math.Round(22 * danno0, MidpointRounding.AwayFromZero);
+        Console.WriteLine($"  danno: x{danno0:F2} -> x{dannoO:F2}, colpo di spada {colpo0} -> {colpoO} (differenza attesa {attesa})");
+        if (Math.Abs(dannoO - danno0 - 0.21) > 0.011) Male("con tre pezzi d'osso epici il danno deve salire del 21%");
+        if (colpo0 <= 0f || colpoO - colpo0 != attesa) Male("il colpo di spada non e' cresciuto come il moltiplicatore del danno");
+        SvestiA();
+
+        // 5. velocita d'attacco: a mani nude (pausa 20 tick) per sei secondi,
+        //    prima e col cuoio Epico (+21%, pausa 17). Si contano i colpi dalla
+        //    vita persa da B, colpo per colpo dello stesso valore.
+        a.Dotazione(ItemType.None, ItemType.None, SideItemType.None);
+        a.Posizione(0);
+        a.Attendi(() => false, 0.4);
+        int Colpi(double secondi)
+        {
+            b.Admin("sethp 1000");
+            Piena();
+            float prima = VitaB();
+            a.Colpisci(0.2);   // un colpo solo, per sapere quanto vale
+            a.Attendi(() => VitaB() < prima, 2);
+            a.Attendi(() => false, 0.8);
+            float uno = prima - VitaB();
+            b.Admin("sethp 1000");
+            Piena();
+            prima = VitaB();
+            a.Colpisci(secondi);
+            a.Attendi(() => false, 0.5);
+            float persa = prima - VitaB();
+            return uno > 0f ? (int)Math.Round(persa / uno) : -1;
+        }
+        var sN = Stat();
+        int colpiN = Colpi(6.0);
+        ulong cCuoio = Dai("dai LeatherHood epico"), kCuoio = Dai("dai LeatherJacket epico"), gCuoio = Dai("dai LeatherBoots epico");
+        if (!Equip(cCuoio) || !Equip(kCuoio) || !Equip(gCuoio)) Male("indossare il cuoio e' stato rifiutato");
+        var sC = Stat();
+        int colpiC = Colpi(6.0);
+        Console.WriteLine($"  velocita d'attacco: x{Molt(sN, "attacco"):F2} pausa {Pausa(sN)} -> x{Molt(sC, "attacco"):F2} pausa {Pausa(sC)}; " +
+                          $"colpi in 6 secondi {colpiN} -> {colpiC}");
+        if (Math.Abs(Molt(sC, "attacco") - Molt(sN, "attacco") - 0.21) > 0.011) Male("con tre pezzi di cuoio epici la velocita d'attacco deve salire del 21%");
+        if (Pausa(sC) >= Pausa(sN)) Male("col cuoio la pausa fra due colpi non si e' accorciata");
+        if (colpiN <= 0 || colpiC <= colpiN) Male("col cuoio non si danno piu' colpi nello stesso tempo");
+
+        // Si lascia tutto pulito.
+        SvestiA();
+        a.Dotazione(ItemType.None, ItemType.None, SideItemType.None);
+        a.Admin("clearinv");
+        a.Admin("sethp 1000");
+        b.Admin("sethp 1000");
+        a.Attendi(() => false, 0.5);
+
+        if (ok) Console.WriteLine("  OK: vita massima, rigenerazione, danno e velocita d'attacco dell'armatura contano in partita");
         return ok;
     }
 
