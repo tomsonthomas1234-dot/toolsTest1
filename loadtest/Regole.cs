@@ -1601,7 +1601,13 @@ static class Regole
                           $"  carne {carnePrima} → {s.Quanti(ItemType.Meat)}");
 
         bool rifiutaDaIntegro = !daIntegro.Success;
-        bool curaDaFerito     = daFerito.Success && daFerito.Hp == 65;   // 40 + 25 della carne
+        // 40 + 25 della carne. La rigenerazione (un punto ogni 10 secondi, da
+        // sazi e dissetati) va per conto suo e puo' cadere fra "sethp 40" e il
+        // pasto: allora la vita e' 66 (backlog P2, log a14c-giro-1). La cura
+        // la dice esatta il messaggio, che conta solo il pasto; la vita puo'
+        // avere al piu' un punto di rigenerazione in piu'.
+        bool curaDaFerito     = daFerito.Success && daFerito.Message == "+25 vita"
+                                && daFerito.Hp >= 65 && daFerito.Hp <= 66;
         bool consumata        = s.Quanti(ItemType.Meat) == carnePrima - 1;
 
         if (rifiutaDaIntegro && curaDaFerito && consumata)
@@ -3588,6 +3594,31 @@ static class Regole
     // prove che vengono dopo. Quantita attese: quelle di Keeper.Loot, tutte
     // provvisorie: se si tarano, qui si cambiano insieme.
 
+    /// Toglie le pile che "pile" vede, e ricomincia finche' ne compaiono: il
+    /// server manda solo le 32 entita' piu' vicine, e togliendo quelle in vista
+    /// si fa posto a quelle che erano nascoste. Restituisce quante ne ha tolte.
+    static int SvuotaSantuario(Sonda s, Func<List<EntityState>> pile)
+    {
+        int tolte = 0;
+        for (int giro = 0; giro < 8; giro++)
+        {
+            var viste = pile();
+            if (viste.Count == 0)
+            {
+                // Mezzo secondo per lasciar arrivare quelle che erano fuori
+                // dal tetto: se non ne arrivano, il santuario e' vuoto.
+                s.Attendi(() => false, 0.5);
+                if (pile().Count == 0) break;
+                continue;
+            }
+            foreach (var p in viste) s.Admin($"remove {p.EntityId}");
+            tolte += viste.Count;
+            var ids = viste.Select(p => p.EntityId).ToHashSet();
+            s.Attendi(() => !pile().Any(e => ids.Contains(e.EntityId)), 5);
+        }
+        return tolte;
+    }
+
     public static bool BottinoDelCustode(string tokenA, string tokenB, string host, int port)
     {
         Console.WriteLine("--- bottino del Custode: cresce quando la terra e' povera, mai Precursori, non raddoppia, e il mondo sa chi l'ha vinto");
@@ -3629,9 +3660,16 @@ static class Regole
             a.Attendi(() => false, 1.5);
             if (!Dentro(a)) { Console.WriteLine("  FALLITA: la sonda non e' dentro il santuario"); ok = false; }
 
-            // Pile gia' a terra nel santuario (di prove di prima): non contano.
+            // Pile gia' a terra nel santuario (di prove di prima): si tolgono
+            // prima di cominciare. Prima si mettevano solo da parte, ma erano
+            // una ventina e il server manda solo le 32 entita' piu' vicine: le
+            // pile nuove non ci stavano tutte, una restava nascosta e veniva
+            // contata nella fascia dopo (backlog P2, log a14c-giro-2: carestia
+            // senza il legno 80, terra viva con legno 100 = 80 + 20).
+            int vecchie = SvuotaSantuario(a, PileDentro);
+            if (vecchie > 0) Console.WriteLine($"  pile gia' a terra nel santuario prima della prova: {vecchie}, tolte");
             var giaLi = PileDentro().Select(e => e.EntityId).ToHashSet();
-            if (giaLi.Count > 0) Console.WriteLine($"  pile gia' a terra nel santuario prima della prova: {giaLi.Count}, non contano");
+            if (giaLi.Count > 0) Console.WriteLine($"  attenzione: {giaLi.Count} pile vecchie non si tolgono, non contano");
 
             foreach (var (vit, fascia, nome, legno, comuni, rari, epMin, epMax) in fasce)
             {
@@ -3680,10 +3718,10 @@ static class Regole
                 if ((!string.IsNullOrWhiteSpace(nomeA) && testoA.Contains(nomeA)) || (!string.IsNullOrWhiteSpace(nomeB) && testoA.Contains(nomeB)))
                 { Console.WriteLine($"  FALLITA: {nome}: la voce dice il nome di un giocatore"); ok = false; }
 
-                // Via le pile, e si aspetta che non si vedano piu'.
-                foreach (var p in nuove) a.Admin($"remove {p.EntityId}");
-                var tolte = nuove.Select(p => p.EntityId).ToHashSet();
-                if (!a.Attendi(() => !PileDentro().Any(e => tolte.Contains(e.EntityId)), 5))
+                // Via le pile, comprese quelle che fossero rimaste nascoste,
+                // perche' non finiscano nel conto della fascia dopo.
+                SvuotaSantuario(a, () => PileDentro().Where(e => !giaLi.Contains(e.EntityId)).ToList());
+                if (PileDentro().Any(e => !giaLi.Contains(e.EntityId)))
                     Console.WriteLine("  attenzione: alcune pile del bottino sono ancora a terra");
             }
         }
