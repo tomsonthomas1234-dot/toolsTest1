@@ -46,6 +46,23 @@ sealed class Sonda : IDisposable
     public RitualResultMsg UltimoRituale;
     public SanctuaryStateMsg UltimoSantuario;
 
+    /// Le ultime statistiche mandate dal server, e l'armatura indossata
+    /// (A14e1), con quanti ne sono arrivati.
+    public volatile PlayerStatsMsg Statistiche;
+    public int StatisticheRicevute;
+    public volatile EquipmentStateMsg Indossati;
+    public int IndossatiRicevuti;
+
+    /// Indossare un esemplare dello zaino (l'esito si legge con Esito(113)).
+    public void Indossa(ulong istanza) =>
+        Comando(113, CommandType.Equip,
+            MessagePack.MessagePackSerializer.Serialize(new EquipCommand { InstanceId = istanza }));
+
+    /// Togliere il pezzo di uno slot (l'esito si legge con Esito(113)).
+    public void Togli(EquipSlot slot) =>
+        Comando(113, CommandType.Equip,
+            MessagePack.MessagePackSerializer.Serialize(new EquipCommand { Slot = slot, InstanceId = 0 }));
+
     /// Gli eventi del mondo ricevuti, in ordine di arrivo.
     public readonly List<WorldEventMsg> Eventi = new();
 
@@ -457,6 +474,16 @@ sealed class Sonda : IDisposable
                     case NetMsgType.AbilityState:
                         Abilita = MessagePack.MessagePackSerializer.Deserialize<AbilityStateMsg>(env.Payload);
                         Interlocked.Increment(ref AbilitaRicevute);
+                        break;
+
+                    case NetMsgType.PlayerStats:
+                        Statistiche = MessagePack.MessagePackSerializer.Deserialize<PlayerStatsMsg>(env.Payload);
+                        Interlocked.Increment(ref StatisticheRicevute);
+                        break;
+
+                    case NetMsgType.EquipmentState:
+                        Indossati = MessagePack.MessagePackSerializer.Deserialize<EquipmentStateMsg>(env.Payload);
+                        Interlocked.Increment(ref IndossatiRicevuti);
                         break;
 
                     case NetMsgType.ConsumeResult:
@@ -1553,7 +1580,10 @@ static class Regole
         else if (Grado(Id(scudi)) != (byte)Grade.Epic) Male("lo scudo dato non e' arrivato nello zaino come Epico");
         Rifiutato("dai IronSword torak", "dai");                          // uno al mondo: passa dal registro
         Rifiutato("dai Wood comune", "dai");                              // non ha gradi
-        Rifiutato("dai LeatherHood comune", "dai");                       // non ancora un esemplare (A14e)
+        // Le armature sono esemplari da A14e1: ora si danno.
+        var cappuccio = Chiedi("dai LeatherHood comune", "dai");
+        if (!cappuccio.StartsWith("1x LeatherHood Common id=")) Male("'dai LeatherHood comune' non ha dato un cappuccio di cuoio Comune");
+        else if (Grado(Id(cappuccio)) != (byte)Grade.Common) Male("il cappuccio dato non e' arrivato nello zaino come Comune");
         Rifiutato("dai IronSword leggendario", "dai");
 
         // Si lascia l'account pulito per chi viene dopo.
@@ -1674,6 +1704,180 @@ static class Regole
         s.Admin("clearinv");
 
         if (ok) Console.WriteLine("  OK: il bastone si crea e si da, lo scudo vale solo con spada, bastone o a mani vuote");
+        return ok;
+    }
+
+    // ---- armature (A14e1) --------------------------------------------------------
+    //
+    // Nove pezzi (cuoio, ferro, osso; testa, busto, gambe), ricette al banco da
+    // lavoro, esemplari con grado e usura. Si indossano col comando Equip: il
+    // pezzo esce dallo zaino, quello che c'era nello slot ci torna. I bonus
+    // vanno nelle statistiche mandate al client, col moltiplicatore del grado
+    // (decisioni/abilita.md sezione 4). Morendo l'armatura segue lo zaino.
+    // Che le statistiche cambino davvero la partita e' A14e2: qui no.
+    public static bool Armature(string token, string host, int port)
+    {
+        Console.WriteLine("--- armature: si creano al banco, si indossano, danno bonus col grado");
+        bool ok = true;
+        void Male(string m) { Console.WriteLine("  FALLITA: " + m); ok = false; }
+
+        using var s = new Sonda(token, host, port);
+        if (!s.AttendiPronta()) { Console.WriteLine("  FALLITA: la sonda non e' entrata in gioco"); return false; }
+        if (!s.Attendi(() => s.Ricette.Length > 0 && s.StatisticheRicevute > 0 && s.IndossatiRicevuti > 0, 10))
+        { Console.WriteLine("  FALLITA: all'ingresso non sono arrivati catalogo, statistiche e armatura indossata"); return false; }
+
+        // Da zero: niente indosso, zaino vuoto.
+        foreach (var slot in new[] { EquipSlot.Head, EquipSlot.Body, EquipSlot.Legs })
+        { s.Togli(slot); s.Attendi(() => s.Esito(113) != null, 3); }
+        s.Admin("clearinv");
+        s.Attendi(() => false, 0.5);
+        if (!s.Attendi(() => s.Indossati?.Worn.Length == 3 && s.Indossati.Worn.All(w => w.Type == ItemType.None), 5))
+        { Console.WriteLine("  FALLITA: non sono riuscito a togliermi tutto"); return false; }
+
+        // 1. il catalogo.
+        var attese = new Dictionary<ItemType, string>
+        {
+            [ItemType.LeatherHood] = "3xLeather", [ItemType.LeatherBoots] = "4xLeather", [ItemType.LeatherJacket] = "6xLeather",
+            [ItemType.IronHelm] = "2xIronIngot+1xLeather", [ItemType.IronGreaves] = "3xIronIngot+1xLeather", [ItemType.IronCuirass] = "4xIronIngot+2xLeather",
+            [ItemType.BoneHood] = "3xBone+1xLeather", [ItemType.BoneGreaves] = "4xBone+1xLeather", [ItemType.BoneCuirass] = "6xBone+2xLeather",
+        };
+        foreach (var (tipo, ingAtt) in attese)
+        {
+            var ric = s.Ricette.FirstOrDefault(r => r.ResultType == tipo);
+            if (ric == null) { Male($"nel catalogo non c'e' {tipo}"); continue; }
+            string ing = string.Join("+", ric.Ingredients.OrderBy(g => g.Type).Select(g => $"{(g.Count <= 0 ? 1 : g.Count)}x{g.Type}"));
+            if (ing != ingAtt) Male($"{tipo}: ingredienti {ing}, attesi {ingAtt}");
+            if (!ric.RequiresWorkbench || ric.RequiresConstructorTable || ric.RequiresFurnace)
+                Male($"{tipo}: deve chiedere il banco da lavoro e basta");
+            if (ric.Category != CraftCategory.Weapon) Male($"{tipo}: categoria {ric.Category}, attesa Weapon");
+        }
+        Console.WriteLine($"  catalogo: {attese.Count(a => s.Ricette.Any(r => r.ResultType == a.Key))}/9 armature");
+
+        // 2. creare: lontano dal banco no, accanto si', e gli ingredienti si consumano.
+        int iHood = s.Ricette.ToList().FindIndex(r => r.ResultType == ItemType.LeatherHood);
+        const float LX = -140f, LZ = 250f;   // lontano da ogni stazione (vedi bastone e scudo)
+        const float BX = -140f, BZ = 280f;   // qui si mette un banco
+        s.Admin("setfaction 3");
+        s.Admin($"tp {LX.ToString(Inv)} {LZ.ToString(Inv)}");
+        s.Admin("give Leather 3");
+        if (!s.Attendi(() => s.Quanti(ItemType.Leather) == 3 && Dist(s.X, s.Z, LX, LZ) < 2f, 10))
+        { Console.WriteLine("  FALLITA: preparazione non riuscita"); return false; }
+        s.ChiediRicetta(iHood, LX, LZ);
+        s.Attendi(() => s.UltimoCraft != null, 6);
+        Console.WriteLine($"  lontano dal banco: {(s.UltimoCraft == null ? "nessuna risposta" : $"Success={s.UltimoCraft.Success} \"{s.UltimoCraft.ResultName}\"")}");
+        if (s.UltimoCraft == null || s.UltimoCraft.Success) Male("lontano dal banco il cappuccio non si deve poter creare");
+
+        s.Admin($"build Workbench {(BX + 2f).ToString(Inv)} {BZ.ToString(Inv)}");
+        s.Admin($"tp {BX.ToString(Inv)} {BZ.ToString(Inv)}");
+        s.Attendi(() => Dist(s.X, s.Z, BX, BZ) < 2f, 6);
+        s.Attendi(() => false, 0.5);
+        s.ChiediRicetta(iHood, BX, BZ);
+        bool creato = s.Attendi(() => s.Quanti(ItemType.LeatherHood) >= 1 && s.Quanti(ItemType.Leather) == 0, 15);
+        Console.WriteLine($"  accanto al banco: cappucci={s.Quanti(ItemType.LeatherHood)} cuoio={s.Quanti(ItemType.Leather)}");
+        if (!creato) Male("accanto al banco il cappuccio non e' stato creato, o il cuoio non e' stato consumato");
+
+        // 3. esemplari col grado, dal comando di prova.
+        ulong Dai(string riga, ItemType tipo, Grade grado)
+        {
+            s.Attendi(() => false, 0.15);
+            var r = s.ChiediAdmin(riga, "dai: ");
+            ulong id = r != null && ulong.TryParse(r.Split("id=").Last(), out var n) ? n : 0;
+            byte g = 0;
+            (ItemType Tipo, int Usura) es = default;
+            bool arrivato = id != 0 && s.Attendi(() => { lock (s.Zaino) return s.Istanze.TryGetValue(id, out es) && s.GradiIstanze.TryGetValue(id, out g); }, 5);
+            Console.WriteLine($"  {riga} -> {r ?? "(nessuna risposta)"} usura={es.Usura}");
+            if (!arrivato || es.Tipo != tipo || g != (byte)grado) { Male($"'{riga}' non ha dato un {tipo} {grado}"); return 0; }
+            return id;
+        }
+        ulong hood    = Dai("dai LeatherHood base", ItemType.LeatherHood, Grade.Base);
+        ulong jacket  = Dai("dai LeatherJacket comune", ItemType.LeatherJacket, Grade.Common);
+        ulong greaves = Dai("dai BoneGreaves epico", ItemType.BoneGreaves, Grade.Epic);
+        ulong helm    = Dai("dai IronHelm raro", ItemType.IronHelm, Grade.Rare);
+        ulong staff   = Dai("dai Staff base", ItemType.Staff, Grade.Base);
+        if (!ok) return false;
+
+        // Le statistiche di partenza: tutto quello che cambia, cambia da qui.
+        var b = s.Statistiche;
+        int hpPct = b.Modifiers.Where(m => m.Stat == StatKind.MaxHp).Sum(m => m.Percent);
+        Console.WriteLine($"  di partenza: vita={b.MaxHp} danno={b.DamagePercent} movimento={b.MoveSpeedPercent} " +
+                          $"attacco={b.AttackSpeedPercent} ricariche={b.CooldownReductionPercent} rigenerazione={b.CombatRegenPerMille}");
+
+        bool Equip(ulong id, EquipSlot? togli = null)
+        {
+            s.Attendi(() => false, 0.15);
+            if (togli is EquipSlot sl) s.Togli(sl); else s.Indossa(id);
+            CommandResultMsg e = null;
+            s.Attendi(() => (e = s.Esito(113)) != null, 5);
+            return e != null && e.Success;
+        }
+        string Indosso() => s.Indossati == null ? "?" : string.Join(",", s.Indossati.Worn.Select(w => w.Type == ItemType.None ? "-" : $"{w.Type}:{w.InstanceId}"));
+        bool NelloZaino(ulong id) { lock (s.Zaino) return s.Istanze.ContainsKey(id); }
+        void Statistiche(string quando, int vita, int danno, int movimento, int attacco, int ricariche, int rigenerazione)
+        {
+            int vitaAtt = Math.Max(10, (int)Math.Round(100 * (1 + (hpPct + vita) / 100.0)));
+            bool giuste = s.Attendi(() =>
+            {
+                var t = s.Statistiche;
+                return t.MaxHp == vitaAtt && t.DamagePercent == b.DamagePercent + danno
+                    && t.MoveSpeedPercent == b.MoveSpeedPercent + movimento
+                    && t.AttackSpeedPercent == b.AttackSpeedPercent + attacco
+                    && t.CooldownReductionPercent == b.CooldownReductionPercent + ricariche
+                    && t.CombatRegenPerMille == b.CombatRegenPerMille + rigenerazione;
+            }, 5);
+            var t = s.Statistiche;
+            Console.WriteLine($"  {quando}: indosso [{Indosso()}] vita={t.MaxHp} danno={t.DamagePercent} movimento={t.MoveSpeedPercent} " +
+                              $"attacco={t.AttackSpeedPercent} ricariche={t.CooldownReductionPercent} rigenerazione={t.CombatRegenPerMille}");
+            if (!giuste) Male($"{quando}: attese vita {vitaAtt}, danno +{danno}, movimento {movimento:+0;-0}, attacco +{attacco}, ricariche +{ricariche}, rigenerazione +{rigenerazione}");
+        }
+
+        // 4. indossare. Cuoio Base in testa (+2 movimento e attacco), cuoio
+        // Comune sul busto (+3 x1,5), osso Epico alle gambe (+2 x3 danno e
+        // ricariche). Movimento e attacco 2 + 4,5 = 6,5 -> 7.
+        if (!Equip(hood) || !Equip(jacket) || !Equip(greaves)) Male("indossare tre pezzi dello zaino e' stato rifiutato");
+        if (NelloZaino(hood) || NelloZaino(jacket) || NelloZaino(greaves)) Male("un pezzo indossato e' rimasto nello zaino");
+        if (Indosso() != $"LeatherHood:{hood},LeatherJacket:{jacket},BoneGreaves:{greaves}") Male($"indossati [{Indosso()}], non i tre pezzi nei loro slot");
+        Statistiche("cuoio base, cuoio comune, osso epico", 0, 6, 7, 7, 6, 0);
+
+        // Il ferro Raro in testa al posto del cuoio: il cuoio torna nello
+        // zaino, lo stesso esemplare. Vita +4 x2, rigenerazione 1 x2, e -2 di
+        // movimento che non sale col grado: movimento 4,5 - 2 = 2,5 -> 3.
+        if (!Equip(helm)) Male("indossare l'elmo sopra il cappuccio e' stato rifiutato");
+        if (!s.Attendi(() => NelloZaino(hood), 5)) Male("il cappuccio tolto dalla testa non e' tornato nello zaino");
+        Statistiche("ferro raro al posto del cuoio", 8, 6, 3, 5, 6, 2);
+
+        // Togliere le gambe.
+        if (!Equip(0, EquipSlot.Legs)) Male("togliere i gambali e' stato rifiutato");
+        if (!s.Attendi(() => NelloZaino(greaves), 5)) Male("i gambali tolti non sono tornati nello zaino");
+        else if (!s.GradiIstanze.TryGetValue(greaves, out var gg) || gg != (byte)Grade.Epic) Male("i gambali sono tornati senza il loro grado");
+        Statistiche("tolti i gambali", 8, 0, 3, 5, 0, 2);
+
+        // Quello che non si fa.
+        if (Equip(staff)) Male("un bastone non si indossa");
+        if (Equip(987654321)) Male("un esemplare che non c'e' non si indossa");
+        if (Equip(0, EquipSlot.Legs)) Male("togliere da uno slot vuoto deve essere rifiutato");
+
+        // Il comando admin.
+        var riga = s.ChiediAdmin("armatura", "armatura: ");
+        Console.WriteLine($"  armatura -> {riga ?? "(nessuna risposta)"}");
+        if (riga == null || !riga.StartsWith($"testa=IronHelm:Rare:{helm}:") || !riga.Contains($" busto=LeatherJacket:Common:{jacket}:")
+            || !riga.Contains(" gambe=vuoto ") || !riga.EndsWith("bonus=MaxHp+8,MoveSpeed+3,AttackSpeed+5,CombatRegen+2"))
+            Male("il comando 'armatura' non dice quello che si indossa");
+
+        // 5. morendo l'armatura segue lo zaino: non resta indosso, e lo zaino si perde.
+        int prima = s.IndossatiRicevuti;
+        s.Admin("kill");
+        bool svestito = s.Attendi(() => s.IndossatiRicevuti > prima && s.Indossati.Worn.All(w => w.Type == ItemType.None), 8);
+        s.Attendi(() => false, 1.0);
+        Console.WriteLine($"  dopo la morte: indosso [{Indosso()}], elmo nello zaino={NelloZaino(helm)}, giacca={NelloZaino(jacket)}");
+        if (!svestito) Male("morendo l'armatura e' rimasta indosso");
+        if (NelloZaino(helm) || NelloZaino(jacket)) Male("morendo l'armatura e' tornata nello zaino invece di perdersi con lui");
+        Statistiche("dopo la morte", 0, 0, 0, 0, 0, 0);
+
+        // Si lascia l'account pulito per chi viene dopo.
+        s.Attendi(() => false, 4);
+        s.Admin("clearinv");
+
+        if (ok) Console.WriteLine("  OK: le armature si creano al banco, si indossano e si tolgono, danno i bonus del loro grado");
         return ok;
     }
 
@@ -4250,6 +4454,10 @@ static class Regole
         // le quantita' si accumulano: la prova diventava "passa o fallisce a
         // seconda di quante volte l'hai lanciata", che e' il difetto che avevamo
         // gia' tolto dal mondo e ci era rientrato dall'inventario.
+        // L'armatura indossata non sta nello zaino (A14e1): prima si toglie,
+        // cosi' clearinv porta via anche quella del giro di prima.
+        foreach (var slot in new[] { EquipSlot.Head, EquipSlot.Body, EquipSlot.Legs })
+        { s.Togli(slot); s.Attendi(() => s.Esito(113) != null, 3); }
         s.Admin("clearinv");
         if (!s.Attendi(() => s.Quanti(ItemType.Wood) == 0 &&
                              s.Quanti(ItemType.Stone) == 0 &&
@@ -4341,8 +4549,27 @@ static class Regole
             return false;
         }
 
+        // L'armatura indossata (A14e1): un elmo di ferro Raro e una corazza
+        // d'osso Epica, che al rientro devono essere ancora indosso, gli
+        // stessi esemplari col loro grado, e non nello zaino.
+        foreach (var riga in new[] { "dai IronHelm raro", "dai BoneCuirass epico" })
+        {
+            var r = s.ChiediAdmin(riga, "dai: ");
+            ulong id = r != null && ulong.TryParse(r.Split("id=").Last(), out var n) ? n : 0;
+            s.Attendi(() => { lock (s.Zaino) return s.Istanze.ContainsKey(id); }, 5);
+            s.Indossa(id);
+            CommandResultMsg e = null;
+            if (id == 0 || !s.Attendi(() => (e = s.Esito(113)) != null, 5) || !e.Success)
+            {
+                Console.WriteLine($"  FALLITA in preparazione: '{riga}' e poi indossarlo non e' riuscito ({r ?? "nessuna risposta"})");
+                return false;
+            }
+        }
+        s.Attendi(() => s.Indossati != null && s.Indossati.Worn.Count(w => w.Type != ItemType.None) == 2, 5);
+        string indossati = IndossatiInRiga(s);
+
         File.WriteAllLines(Lasciato, righe.Append(registro).Append(rituali.ToString(Inv))
-                                          .Append(AbilitaEsempioPulita));
+                                          .Append(AbilitaEsempioPulita).Append(indossati));
 
         Console.WriteLine($"  lasciato: legno {righe[0]}, pietra {righe[1]}, " +
                           $"asce [{righe[2]}], in ({s.X:F0}, {s.Z:F0}), registro [{registro}]");
@@ -4365,6 +4592,7 @@ static class Regole
         string registroAtt = atteso.Length > 5 ? atteso[5] : "";
         int ritualiAtt = atteso.Length > 6 ? int.Parse(atteso[6], Inv) : -1;
         string abilitaAtt = atteso.Length > 7 ? atteso[7] : "";
+        string indossatiAtt = atteso.Length > 8 ? atteso[8] : "";
 
         using var s = new Sonda(token, host, port);
         if (!s.AttendiPronta()) { Console.WriteLine("  FALLITA: la sonda non e' rientrata in gioco"); return false; }
@@ -4421,6 +4649,18 @@ static class Regole
         if (msg == null || msg.Unlocked.Length != 8)
         { Console.WriteLine("  FALLITA: all'ingresso non e' arrivato lo stato delle abilita salvato"); ok = false; }
 
+        // L'armatura indossata (A14e1): stessi pezzi negli stessi slot, e
+        // nessuno di loro anche nello zaino.
+        s.Attendi(() => s.IndossatiRicevuti > 0, 6);
+        string indossati = IndossatiInRiga(s);
+        bool doppi;
+        lock (s.Zaino) doppi = s.Indossati != null && s.Indossati.Worn.Any(w => w.InstanceId != 0 && s.Istanze.ContainsKey(w.InstanceId));
+        Console.WriteLine($"  {quando}: indossati [{indossati}] (erano [{indossatiAtt}])");
+        if (indossati != indossatiAtt)
+        { Console.WriteLine("  FALLITA: l'armatura indossata non e' tornata uguale"); ok = false; }
+        if (doppi)
+        { Console.WriteLine("  FALLITA: un pezzo indossato e' anche nello zaino"); ok = false; }
+
         // Il Custode non si salva: rinasce addormentato al centro del
         // santuario (B3). Dopo un riavvio deve esserci lo stesso.
         var custode = StatoCustode(s);
@@ -4443,6 +4683,12 @@ static class Regole
         s.Attendi(() => false, 1);
         return ok;
     }
+
+    /// L'armatura indossata in una riga: per slot tipo, id, grado e usura, "-"
+    /// se vuoto; "?" se il server non l'ha mandata.
+    static string IndossatiInRiga(Sonda s) =>
+        s.Indossati == null ? "?" : string.Join(",", s.Indossati.Worn.Select(w =>
+            w.Type == ItemType.None ? "-" : $"{w.Type}:{w.InstanceId}:{w.Level}:{w.Durability}"));
 
     /// <summary>Esce e rientra sullo stesso server.</summary>
     public static bool PersistenzaAlRientro(string token, string host, int port)
