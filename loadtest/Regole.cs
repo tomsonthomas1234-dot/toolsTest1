@@ -7733,6 +7733,202 @@ static class Regole
         if (ok) Console.WriteLine("  OK: Sfida e Provocazione fanno girare il nemico vicino, che colpisce il Guerriero una volta");
         return ok;
     }
+
+    /// <summary>
+    /// A14j3a: le attive del Cacciatore che cambiano gli attacchi. A e il
+    /// Cacciatore (fazione 1, spada di pietra: il suo colpo fa 22), B il
+    /// nemico (fazione 2, spada di pietra). Tagliola, Esca e Fiuto hanno i loro
+    /// compiti (A14j3b, A14j4).
+    /// </summary>
+    public static bool Cacciatore(string tokenA, string tokenB, string host, int port)
+    {
+        Console.WriteLine("--- cacciatore: Colpo preciso, Raffica, Punto debole, Caccia, Rete, Ritirata, Mira ferma");
+        bool ok = true;
+        void Male(string m) { Console.WriteLine("  FALLITA: " + m); ok = false; }
+
+        using var a = new Sonda(tokenA, host, port);
+        using var b = new Sonda(tokenB, host, port);
+        if (!a.AttendiPronta() || !b.AttendiPronta())
+        { Console.WriteLine("  FALLITA: le sonde non sono entrate in gioco"); return false; }
+
+        const float PX = -150f, PZ = 250f;   // lo stesso punto delle prove delle armi
+        static byte[] P<T>(T v) => MessagePack.MessagePackSerializer.Serialize(v);
+        bool Aspetta(Func<bool> cosa, double secondi) =>
+            a.Attendi(() => { b.Attendi(() => true, 0.01); return cosa(); }, secondi);
+        void Pausa(double secondi) => Aspetta(() => false, secondi);
+        static string Visto(CommandResultMsg r) => r == null ? "nessuna risposta" : r.Success ? "riuscito" : "rifiutato " + r.ErrorCode;
+        float Vita(Sonda chi) => a.Stato(chi.Id).Vita;
+        void Tp(Sonda s, float x, float z)
+        {
+            s.Admin($"tp {x.ToString(Inv)} {z.ToString(Inv)}");
+            Aspetta(() => Dist(s.X, s.Z, x, z) < 0.5f, 6);
+            s.Cammina(0f, 0f, 0.1);
+        }
+        void Piena(params Sonda[] chi)
+        {
+            foreach (var s in chi) s.Admin("sethp 1000");
+            Aspetta(() => chi.All(s => Vita(s) >= 100f), 3);
+            Pausa(0.3);
+        }
+        string Effetto(Sonda s, string riga) { Pausa(0.15); return s.ChiediAdmin("effetto " + riga, "effetto: ") ?? "(nessuna risposta)"; }
+        string StatoDi(Sonda s) => Effetto(a, s == a ? "stato" : $"stato {s.Id}");
+        static (float X, float Z) Pos(string riga)
+        {
+            int i = riga.IndexOf("pos=", StringComparison.Ordinal);
+            if (i < 0) return (float.NaN, float.NaN);
+            int f = riga.IndexOf(' ', i);
+            var p = (f < 0 ? riga[(i + 4)..] : riga[(i + 4)..f]).Split(',');
+            return p.Length == 2 && float.TryParse(p[0], System.Globalization.NumberStyles.Float, Inv, out var x)
+                   && float.TryParse(p[1], System.Globalization.NumberStyles.Float, Inv, out var z) ? (x, z) : (float.NaN, float.NaN);
+        }
+        uint idComando = 640;
+        CommandResultMsg Prova(AbilityId id, float yaw = 90f)
+        {
+            uint idSlot = idComando++, idUso = idComando++;
+            Pausa(0.15);
+            a.Comando(idSlot, CommandType.SetAbilitySlot, P(new SetAbilitySlotCommand
+                { Kind = AbilitySlotKind.ClassActive, Slot = 0, Ability = id }));
+            CommandResultMsg r = null;
+            Aspetta(() => (r = a.Esito(idSlot)) != null, 5);
+            if (r == null || !r.Success) Male($"{id} nello slot: {Visto(r)}");
+            Pausa(0.15); a.Admin("ricarica");
+            Pausa(0.15);
+            a.Comando(idUso, CommandType.UseAbility, P(new UseAbilityCommand { Ability = id, Yaw = yaw }));
+            r = null;
+            Aspetta(() => (r = a.Esito(idUso)) != null, 5);
+            Pausa(0.2);
+            return r;
+        }
+        void Atteso(string cosa, CommandResultMsg r, ErrorCode atteso)
+        {
+            bool giusto = r != null && (atteso == ErrorCode.None ? r.Success : !r.Success && r.ErrorCode == atteso);
+            Console.WriteLine($"  {cosa}: {Visto(r)}{(giusto ? "" : $" (atteso {(atteso == ErrorCode.None ? "riuscito" : atteso.ToString())})")}");
+            if (!giusto) Male($"{cosa}: atteso {(atteso == ErrorCode.None ? "riuscito" : "rifiutato " + atteso)}");
+        }
+        void Pulisci(params Sonda[] chi) { foreach (var s in chi) Effetto(a, $"azzera {s.Id}"); }
+        void Controlla(string cosa, float visto, float atteso)
+        {
+            Console.WriteLine($"  {cosa}: {visto} (atteso {atteso})");
+            if (visto != atteso) Male($"{cosa}: {visto} invece di {atteso}");
+        }
+        void Contiene(string cosa, string riga, string pezzo, bool deve = true)
+        {
+            Console.WriteLine($"  {cosa}: {riga}");
+            if (riga.Contains(pezzo) != deve) Male($"{cosa}: {(deve ? "manca" : "non doveva esserci")} '{pezzo}'");
+        }
+        // Un attacco base di A sul piu vicino: quanto perde B.
+        float ColpoDiA()
+        {
+            Piena(b);
+            float prima = Vita(b);
+            a.Colpisci(0.1);
+            Aspetta(() => Vita(b) < prima, 1.5);
+            Pausa(0.4);
+            return prima - Vita(b);
+        }
+
+        try
+        {
+            a.Admin("setfaction 1"); b.Admin("setfaction 2");
+            foreach (var s in new[] { a, b })
+            {
+                s.Admin("clearinv"); s.Admin("abilita azzera"); s.Admin("effetto azzera");
+                s.Admin("give StoneSword 1");
+                Aspetta(() => s.Istanze.Values.Any(v => v.Tipo == ItemType.StoneSword), 5);
+                s.Dotazione(ItemType.StoneSword, ItemType.None, SideItemType.None);
+                s.Posizione(0);
+            }
+            Tp(a, PX, PZ); Tp(b, PX + 1.5f, PZ);
+            Pausa(0.15); Console.WriteLine($"  {a.ChiediAdmin("classe cacciatore", "classe: ")}");
+            Pausa(0.15); Console.WriteLine($"  {a.ChiediAdmin("classe sblocca", "classe: ")}");
+            Pausa(0.15); a.Admin("abilita sblocca cacciatore");
+            Pausa(0.4);
+            Piena(a, b);
+
+            // 0. Senza niente il colpo di spada di A fa 22.
+            Controlla("colpo di A su B senza niente", ColpoDiA(), 22f);
+
+            // 1. Colpo preciso: il prossimo attacco base +30% (29), quello dopo 22.
+            Atteso("Colpo preciso", Prova(AbilityId.HunterPreciseStrike), ErrorCode.None);
+            Contiene("Colpo preciso, A", StatoDi(a), "preciso+30");
+            Controlla("colpo di A col Colpo preciso", ColpoDiA(), 29f);
+            Controlla("il colpo dopo", ColpoDiA(), 22f);
+            Contiene("Colpo preciso consumato, A", StatoDi(a), "preciso", deve: false);
+
+            // 2. Raffica: per 5 s ogni attacco base colpisce due volte (44).
+            Atteso("Raffica", Prova(AbilityId.HunterBarrage), ErrorCode.None);
+            Contiene("Raffica, A", StatoDi(a), "raffica2");
+            Controlla("colpo di A con la Raffica", ColpoDiA(), 44f);
+            Pulisci(a);
+            Controlla("colpo di A dopo la Raffica tolta", ColpoDiA(), 22f);
+
+            // 3. Punto debole: B con lo scudo ha 5 di difesa (22 -> 17); se ne
+            //    ignora meta, arrotondata: ne restano 3 (22 -> 19).
+            b.Admin("give Shield 1");
+            Aspetta(() => b.Quanti(ItemType.Shield) == 1, 5);
+            b.Dotazione(ItemType.StoneSword, ItemType.None, SideItemType.Shield);
+            Pausa(0.2);
+            b.Posizione(1);   // arma 1 e mano libera: lo scudo in mano
+            string dot = null;
+            Aspetta(() => (dot = b.ChiediAdmin("dotazione", "dotazione: ")) != null && dot.Contains("mano=Shield"), 6);
+            if (dot == null || !dot.Contains("mano=Shield")) Male($"lo scudo non e' nella mano libera di B ({dot})");
+            Pausa(0.3);
+            Controlla("colpo di A su B con lo scudo", ColpoDiA(), 17f);
+            Atteso("Punto debole", Prova(AbilityId.HunterWeakSpot), ErrorCode.None);
+            Contiene("Punto debole, A", StatoDi(a), "debole50");
+            Controlla("colpo di A col Punto debole", ColpoDiA(), 19f);
+            Pulisci(a);
+            b.Dotazione(ItemType.StoneSword, ItemType.None, SideItemType.None);
+            Pausa(0.2);
+            b.Posizione(0);
+            Pausa(0.4);
+
+            // 4. Caccia su B, davanti: +20% su di lui (26).
+            Atteso("Caccia", Prova(AbilityId.HunterHunt), ErrorCode.None);
+            Contiene("Caccia, A", StatoDi(a), $"caccia:{b.Id}+20");
+            Controlla("colpo di A su B cacciato", ColpoDiA(), 26f);
+            Pulisci(a);
+
+            // 5. Rete: B a 12 m e fuori portata; a 6 m rallenta del 60%.
+            Tp(b, PX + 12f, PZ);
+            Atteso("Rete con B a 12 m", Prova(AbilityId.HunterNet), ErrorCode.AbilityNotUsable);
+            Tp(b, PX + 6f, PZ);
+            Atteso("Rete con B a 6 m", Prova(AbilityId.HunterNet), ErrorCode.None);
+            Contiene("Rete, B", StatoDi(b), "rallentato 60%");
+            Pulisci(b);
+
+            // 6. Ritirata: guardando verso +X, 5 m indietro e +20% velocita.
+            Atteso("Ritirata", Prova(AbilityId.HunterRetreat), ErrorCode.None);
+            var rit = StatoDi(a);
+            var (ax, az) = Pos(rit);
+            Console.WriteLine($"  Ritirata, A arriva a ({ax:F2}, {az:F2}) (atteso {PX - 5f}, {PZ})");
+            if (float.IsNaN(ax) || Dist(ax, az, PX - 5f, PZ) > 0.4f) Male("la Ritirata deve portare A 5 m indietro");
+            Contiene("Ritirata, A", rit, "MoveSpeed +20%");
+            Pulisci(a);
+
+            // 7. Mira ferma, col giavellotto (attacco base a distanza: 19). Da
+            //    fermo +40%: 27.
+            Tp(a, PX, PZ); Tp(b, PX + 3f, PZ);
+            a.Admin("give WoodJavelin 5");
+            Aspetta(() => a.Quanti(ItemType.WoodJavelin) >= 5, 5);
+            a.Dotazione(ItemType.WoodJavelin, ItemType.None, SideItemType.None);
+            Pausa(0.4);
+            Controlla("giavellotto di A su B", ColpoDiA(), 19f);
+            Atteso("Mira ferma da fermo", Prova(AbilityId.HunterSteadyAim), ErrorCode.None);
+            Contiene("Mira ferma, A", StatoDi(a), "mira+40");
+            Controlla("giavellotto di A con la Mira ferma", ColpoDiA(), 27f);
+        }
+        finally
+        {
+            foreach (var s in new[] { a, b }) { s.Admin("setfaction 1"); s.Admin("effetto azzera"); s.Admin("abilita azzera"); s.Admin("clearinv"); s.Admin("sethp 1000"); }
+            a.Dotazione(ItemType.None, ItemType.None, SideItemType.None);
+            b.Dotazione(ItemType.None, ItemType.None, SideItemType.None);
+            Pausa(0.5);
+        }
+
+        if (ok) Console.WriteLine("  OK: Colpo preciso, Raffica, Punto debole, Caccia, Rete, Ritirata e Mira ferma fanno quello che dice il catalogo");
+        return ok;
+    }
     static readonly System.Globalization.CultureInfo Inv =
         System.Globalization.CultureInfo.InvariantCulture;
 }
