@@ -134,6 +134,7 @@ if (modoRegole)
         ("protocollo delle abilita",() => Regole.ProtocolloAbilita(tokens[2], host, port)),
         ("catalogo e stato abilita",() => Regole.CatalogoEStatoAbilita(tokens[1], host, port)),
         ("comandi di prova abilita",() => Regole.ComandiDiProvaAbilita(tokens[1], host, port)),
+        ("bastone e scudo",         () => Regole.BastoneEScudo(tokens[1], host, port)),
         ("mangiare cura",           () => Regole.MangiareCura(tokens[1], host, port)),
         ("bauli",                   () => Regole.Bauli(tokens[1], host, port)),
         ("agricoltura",             () => Regole.Agricoltura(tokens[1], host, port)),

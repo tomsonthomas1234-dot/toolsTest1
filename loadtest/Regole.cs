@@ -239,6 +239,14 @@ sealed class Sonda : IDisposable
             }),
         });
 
+    /// La posizione di combattimento (0 arma1, 1 arma1 e mano libera, 2 arma2,
+    /// 3 arma2 e mano libera, 4 solo mano libera), per la regola dello scudo
+    /// (A14d).
+    /// L'esito si legge con Esito(112).
+    public void Posizione(byte posizione) =>
+        Comando(112, CommandType.SwitchStance,
+            MessagePack.MessagePackSerializer.Serialize(new SwitchStanceCommand { Stance = posizione }));
+
     /// Lo stato di un giocatore visto da questa sonda: vita, a terra, morto.
     /// Vita -1 se non lo vede.
     public (float Vita, bool ATerra, bool Morto, float Secondi) Stato(ulong id)
@@ -1545,7 +1553,7 @@ static class Regole
         else if (Grado(Id(scudi)) != (byte)Grade.Epic) Male("lo scudo dato non e' arrivato nello zaino come Epico");
         Rifiutato("dai IronSword torak", "dai");                          // uno al mondo: passa dal registro
         Rifiutato("dai Wood comune", "dai");                              // non ha gradi
-        Rifiutato("dai Staff comune", "dai");                             // non ancora un esemplare (A14d)
+        Rifiutato("dai LeatherHood comune", "dai");                       // non ancora un esemplare (A14e)
         Rifiutato("dai IronSword leggendario", "dai");
 
         // Si lascia l'account pulito per chi viene dopo.
@@ -1553,6 +1561,113 @@ static class Regole
         s.Admin("clearinv");
 
         if (ok) Console.WriteLine("  OK: i comandi di prova fanno quello che dicono e rifiutano quello che non ha senso");
+        return ok;
+    }
+
+    // ---- bastone e regola dello scudo (A14d) -----------------------------------
+    //
+    // Il bastone e' un'arma vera: ricetta di 3 legno e 1 cuoio senza stazione,
+    // un esemplare con usura, si puo' dare col suo grado. Lo scudo nella mano
+    // libera vale solo con spada o bastone, o a mani vuote: con lancia, arco,
+    // giavellotto o attrezzi resta appeso (decisioni/abilita.md sezione 3).
+    public static bool BastoneEScudo(string token, string host, int port)
+    {
+        Console.WriteLine("--- bastone e scudo: il bastone si crea senza stazione, lo scudo solo con spada o bastone");
+        bool ok = true;
+        void Male(string m) { Console.WriteLine("  FALLITA: " + m); ok = false; }
+
+        using var s = new Sonda(token, host, port);
+        if (!s.AttendiPronta()) { Console.WriteLine("  FALLITA: la sonda non e' entrata in gioco"); return false; }
+        if (!s.Attendi(() => s.Ricette.Length > 0, 10)) { Console.WriteLine("  FALLITA: il catalogo non e' arrivato"); return false; }
+
+        // La ricetta, come la vede il client.
+        int iStaff = s.IndiceRicetta("Staff");
+        if (iStaff < 0) { Console.WriteLine("  FALLITA: nel catalogo non c'e' il bastone"); return false; }
+        var ric = s.Ricette[iStaff];
+        string ing = string.Join("+", ric.Ingredients.OrderBy(g => g.Type)
+            .Select(g => $"{(g.Count <= 0 ? 1 : g.Count)}x{g.Type}"));
+        Console.WriteLine($"  Staff = {ing}, stazioni: banco={ric.RequiresWorkbench} costruttore={ric.RequiresConstructorTable} fornace={ric.RequiresFurnace}");
+        if (ric.ResultType != ItemType.Staff || ric.Category != CraftCategory.Weapon)
+            Male($"la ricetta 'Staff' da {ric.ResultType} ({ric.Category}), non un bastone fra le armi");
+        if (ing != "3xWood+1xLeather") Male($"ingredienti {ing}, attesi 3 legno e 1 cuoio");
+        if (ric.RequiresWorkbench || ric.RequiresConstructorTable || ric.RequiresFurnace)
+            Male("il bastone non deve chiedere stazioni");
+
+        // Crearlo davvero, lontano da ogni stazione.
+        const float CX = -140f, CZ = 250f;
+        s.Admin("setfaction 3");
+        s.Admin($"tp {CX.ToString(Inv)} {CZ.ToString(Inv)}");
+        s.Admin("clearinv");
+        s.Admin("give Wood 3");
+        s.Admin("give Leather 1");
+        if (!s.Attendi(() => s.Quanti(ItemType.Wood) == 3 && s.Quanti(ItemType.Leather) == 1 &&
+                             Dist(s.X, s.Z, CX, CZ) < 2f, 12))
+        {
+            Console.WriteLine("  FALLITA: preparazione non riuscita");
+            return false;
+        }
+        s.ChiediRicetta(iStaff, CX, CZ);
+        bool creato = s.Attendi(() => s.Quanti(ItemType.Staff) >= 1 && s.Quanti(ItemType.Wood) == 0 &&
+                                      s.Quanti(ItemType.Leather) == 0, 15);
+        // Il messaggio che chiude la creazione porta il conteggio, non
+        // l'identita' dell'esemplare: l'esemplare si vede con "dai" qui sotto.
+        Console.WriteLine($"  creato: bastoni={s.Quanti(ItemType.Staff)} legno={s.Quanti(ItemType.Wood)} cuoio={s.Quanti(ItemType.Leather)}");
+        if (!creato) Male("il bastone non e' stato creato, o gli ingredienti non sono stati consumati");
+
+        // Col suo grado, dal comando di prova.
+        var dato = s.ChiediAdmin("dai Staff comune", "dai: ");
+        Console.WriteLine($"  dai Staff comune -> {dato ?? "(nessuna risposta)"}");
+        if (dato == null || !dato.StartsWith("1x Staff Common id=")) Male("'dai Staff comune' non ha dato un bastone Comune");
+        else
+        {
+            ulong idDato = ulong.TryParse(dato.Split("id=").Last(), out var n) ? n : 0;
+            (ItemType Tipo, int Usura) es = default;
+            byte grado = 0;
+            bool arrivato = s.Attendi(() => { lock (s.Zaino) return s.Istanze.TryGetValue(idDato, out es) && s.GradiIstanze.TryGetValue(idDato, out grado); }, 5);
+            Console.WriteLine($"  esemplare {idDato}: {es.Tipo} usura={es.Usura} grado={grado}");
+            if (!arrivato || es.Tipo != ItemType.Staff || es.Usura != 60 || grado != (byte)Grade.Common)
+                Male("il bastone dato non e' arrivato come esemplare Comune con usura 60");
+        }
+
+        // La regola dello scudo, arma per arma, nella posizione "arma 1 e mano
+        // libera"; e a mani vuote nella posizione 4.
+        s.Admin("give Shield 1");
+        if (!s.Attendi(() => s.Quanti(ItemType.Shield) >= 1, 8)) { Male("lo scudo non e' arrivato"); }
+        var casi = new (ItemType Arma, bool ConScudo)[]
+        {
+            (ItemType.StoneSword, true), (ItemType.IronSword, true), (ItemType.Staff, true),
+            (ItemType.WoodSpear, false), (ItemType.IronSpear, false), (ItemType.Bow, false),
+            (ItemType.WoodJavelin, false), (ItemType.Axe, false), (ItemType.RudimentaryKnife, false),
+        };
+        string Mano(ItemType arma, byte posizione)
+        {
+            s.Dotazione(arma, ItemType.None, SideItemType.Shield);
+            s.Posizione(posizione);
+            CommandResultMsg esito = null;
+            s.Attendi(() => (esito = s.Esito(112)) != null, 4);
+            if (esito == null || !esito.Success)
+                Console.WriteLine($"  cambio di posizione {posizione}: {(esito == null ? "nessun esito" : $"rifiutato {esito.ErrorCode}")}");
+            string atteso = $"arma1={arma} arma2=None fianco=Shield posizione={posizione} ";
+            string r = null;
+            s.Attendi(() => (r = s.ChiediAdmin("dotazione", "dotazione: ")) != null && r.StartsWith(atteso), 6);
+            Console.WriteLine($"  {arma,-16} posizione {posizione}: {r ?? "(nessuna risposta)"}");
+            if (r == null || !r.StartsWith(atteso)) return null;
+            return r.Split(' ').FirstOrDefault(p => p.StartsWith("mano="))?.Substring(5);
+        }
+        foreach (var (arma, conScudo) in casi)
+        {
+            var mano = Mano(arma, 1);
+            string attesa = conScudo ? "Shield" : "None";
+            if (mano != attesa) Male($"con {arma} la mano libera e' '{mano ?? "?"}', attesa {attesa}");
+        }
+        if (Mano(ItemType.Staff, 4) != "Shield") Male("a mani vuote (posizione 4) lo scudo deve restare");
+
+        // Si lascia l'account pulito per chi viene dopo.
+        s.Dotazione(ItemType.None, ItemType.None, SideItemType.None);
+        s.Posizione(0);
+        s.Admin("clearinv");
+
+        if (ok) Console.WriteLine("  OK: il bastone si crea e si da, lo scudo vale solo con spada, bastone o a mani vuote");
         return ok;
     }
 
