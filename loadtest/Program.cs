@@ -181,6 +181,7 @@ if (modoRegole)
         ("lancia",                  () => Regole.Lancia(tokens[1], tokens[0], tokens[4], host, port)),
         ("arco",                    () => Regole.Arco(tokens[1], tokens[0], tokens[4], host, port)),
         ("bastone",                 () => Regole.Bastone(tokens[1], tokens[0], tokens[4], host, port)),
+        ("passiva dello scudo",     () => Regole.PassivaDelloScudo(tokens[1], host, port)),
         ("silenzio",                () => Regole.Silenzio(tokens[0], TokenBersaglio(), host, port)),
         ("bando",                   () => Regole.Bando(tokens[0], TokenBersaglio, host, port)),
     };

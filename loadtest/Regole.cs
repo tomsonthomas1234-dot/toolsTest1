@@ -6649,6 +6649,178 @@ static class Regole
         return PersistenzaVerifica(token, host, port, "al rientro");
     }
 
+    // ---- passiva dello scudo e Pietraviva (A14h) --------------------------------
+    //
+    // Decisioni/abilita.md sezione 3: con lo scudo nella mano libera, quando
+    // la vita scende sotto il 25% parte una barriera per 8 s (Comune 10%, Raro
+    // 15%, Epico 20%, Dono di Torak 25% della vita massima; Base niente),
+    // ricarica 60 s. Pietraviva in piu: il colpo che porterebbe a zero lascia
+    // a 1, immortali per 3 s, con il 15% di vita recuperato; ricarica 3 minuti.
+    // I colpi sono quelli del comando di prova "scudo colpo", che passa per la
+    // stessa strada dei colpi veri (DannoRicevuto).
+    public static bool PassivaDelloScudo(string token, string host, int port)
+    {
+        Console.WriteLine("--- passiva dello scudo: barriera sotto il 25%, Pietraviva non fa morire");
+        bool ok = true;
+        void Male(string m) { Console.WriteLine("  FALLITA: " + m); ok = false; }
+
+        using var s = new Sonda(token, host, port);
+        if (!s.AttendiPronta()) { Console.WriteLine("  FALLITA: la sonda non e' entrata in gioco"); return false; }
+
+        const float PX = -145f, PZ = 255f;   // lontano da tutto, come le prove dell'armatura
+        void Pausa(double secondi) => s.Attendi(() => false, secondi);
+        string Scudo(string riga = "")
+        {
+            Pausa(0.15);
+            return s.ChiediAdmin(("scudo " + riga).Trim(), "scudo: ") ?? "(nessuna risposta)";
+        }
+        static string Campo(string riga, string nome)
+        {
+            int i = riga.IndexOf(nome + "=", StringComparison.Ordinal);
+            if (i < 0) return null;
+            int f = riga.IndexOf(' ', i);
+            return f < 0 ? riga[(i + nome.Length + 1)..] : riga[(i + nome.Length + 1)..f];
+        }
+        (int Vita, int Max) Vita(string riga)
+        {
+            var v = Campo(riga, "vita")?.Split('/');
+            return v != null && v.Length == 2 && int.TryParse(v[0], out int a) && int.TryParse(v[1], out int b) ? (a, b) : (-1, -1);
+        }
+        int Preso(string riga) =>
+            riga.StartsWith("preso ") && int.TryParse(riga.Split(' ')[1], out int p) ? p : -1;
+        int PuntiBarriera(string riga)
+        {
+            var b = Campo(riga, "barriera");
+            return b == null || b == "no" ? 0 : int.TryParse(b, out int n) ? n : -1;
+        }
+        // Ogni risposta finisce nel resoconto della prova.
+        string Riga(string r) { Console.WriteLine("    " + r); return r; }
+
+        // Scudo e spada, la spada in mano con lo scudo (posizione 1).
+        bool Arma(string scudo)
+        {
+            s.Admin("clearinv");
+            Pausa(0.3);
+            if (scudo == "pietraviva")
+            {
+                var u = s.ChiediAdmin("unico dai 5", "unico: ");
+                Console.WriteLine($"  unico dai 5 -> {u ?? "(nessuna risposta)"}");
+                if (u == null || !u.StartsWith("5 ")) { Male("lo scudo unico (5) non e' libero o non e' arrivato"); return false; }
+            }
+            else
+            {
+                var d = s.ChiediAdmin($"dai Shield {scudo}", "dai: ");
+                if (d == null || !d.StartsWith("1x Shield ")) { Male($"'dai Shield {scudo}' non ha dato lo scudo ({d})"); return false; }
+            }
+            var w = s.ChiediAdmin("dai StoneSword base", "dai: ");
+            if (w == null || !w.StartsWith("1x StoneSword ")) { Male($"la spada non e' arrivata ({w})"); return false; }
+            Pausa(0.2);
+            s.Dotazione(ItemType.StoneSword, ItemType.None, SideItemType.Shield);
+            Pausa(0.2);
+            s.Posizione(1);
+            string r = null;
+            s.Attendi(() => (r = s.ChiediAdmin("dotazione", "dotazione: ")) != null && r.Contains("mano=Shield"), 6);
+            if (r == null || !r.Contains("mano=Shield")) { Male($"lo scudo non e' nella mano libera ({r})"); return false; }
+            s.Admin("ricarica");
+            s.Admin("effetto azzera");
+            s.Admin("sethp 1000");
+            Pausa(0.3);
+            return true;
+        }
+
+        s.Admin("setfaction 3");
+        s.Admin($"tp {PX.ToString(Inv)} {PZ.ToString(Inv)}");
+        s.Attendi(() => Dist(s.X, s.Z, PX, PZ) < 2f, 8);
+
+        // 1. Scudo Raro: sopra il 25% niente, sotto la barriera del 15%.
+        if (Arma("raro"))
+        {
+            var r = Riga(Scudo());
+            var (vita, max) = Vita(r);
+            if (Campo(r, "scudo") != "Rare" || max <= 0) Male($"stato dello scudo Raro sbagliato: {r}");
+            int attesa = (int)Math.Round(max * 0.15, MidpointRounding.AwayFromZero);
+
+            r = Riga(Scudo($"colpo {vita - (int)(max * 0.40)}"));   // al 40%
+            if (PuntiBarriera(r) != 0) Male("al 40% della vita la barriera non deve partire");
+
+            r = Riga(Scudo($"colpo {Vita(r).Vita - (int)(max * 0.20)}"));   // al 20%
+            int dopo = Vita(r).Vita;
+            if (PuntiBarriera(r) != attesa) Male($"sotto il 25% la barriera deve valere {attesa} (15% di {max})");
+            if (Campo(r, "ricarica") == "pronta") Male("partita la barriera, la passiva deve andare in ricarica");
+
+            r = Riga(Scudo("colpo 5"));
+            if (Preso(r) != 0 || Vita(r).Vita != dopo || PuntiBarriera(r) != attesa - 5)
+                Male("un colpo di 5 deve finire tutto nella barriera");
+
+            r = Riga(Scudo($"colpo {attesa}"));
+            if (Preso(r) != 5 || PuntiBarriera(r) != 0)
+                Male($"un colpo di {attesa} con {attesa - 5} di barriera deve passare per 5 e romperla");
+
+            // In ricarica non riparte.
+            s.Admin("sethp 1000"); Pausa(0.3);
+            r = Riga(Scudo($"colpo {(int)(max * 0.85)}"));
+            if (PuntiBarriera(r) != 0) Male("in ricarica la barriera non deve ripartire");
+
+            // Con lo scudo appeso (posizione 0, la spada da sola) niente.
+            s.Posizione(0); Pausa(0.3);
+            s.Admin("ricarica"); s.Admin("sethp 1000"); Pausa(0.3);
+            r = Riga(Scudo($"colpo {(int)(max * 0.85)}"));
+            if (Campo(r, "scudo") != "nessuno" || PuntiBarriera(r) != 0) Male("con lo scudo fuori dalla mano la passiva non deve valere");
+        }
+
+        // 2. Scudo Base: blocca come prima, nessuna barriera.
+        if (Arma("base"))
+        {
+            var r = Riga(Scudo());
+            int max = Vita(r).Max;
+            r = Riga(Scudo($"colpo {(int)(max * 0.85)}"));
+            if (Campo(r, "scudo") != "Base" || PuntiBarriera(r) != 0) Male("lo scudo Base non deve dare barriere");
+        }
+
+        // 3. Pietraviva: il colpo mortale lascia a 1, 3 s immortali, poi il 15%.
+        if (Arma("pietraviva"))
+        {
+            var r = Riga(Scudo());
+            int max = Vita(r).Max;
+            if (Campo(r, "scudo") != "Torak" || !r.Contains(" pietraviva ")) Male($"Pietraviva non riconosciuto: {r}");
+
+            r = Riga(Scudo($"colpo {max * 10}"));
+            if (Vita(r).Vita != 1 || Campo(r, "immortale") == "no") Male("il colpo mortale con Pietraviva deve lasciare a 1, immortale");
+            if (PuntiBarriera(r) != (int)Math.Round(max * 0.25, MidpointRounding.AwayFromZero))
+                Male("a 1 di vita deve partire anche la barriera del 25%");
+            if (Campo(r, "pietraviva") == "pronta") Male("Pietraviva deve andare in ricarica");
+
+            r = Riga(Scudo($"colpo {max * 10}"));
+            if (Preso(r) != 0 || Vita(r).Vita != 1) Male("da immortale nessun colpo deve togliere vita");
+            var aTerra = s.ChiediAdmin("aterra", "a terra: ");
+            if (aTerra != "no") Male($"con Pietraviva non si va a terra ({aTerra})");
+
+            Pausa(3.6);
+            r = Riga(Scudo());
+            int curata = 1 + (int)Math.Round(max * 0.15, MidpointRounding.AwayFromZero);
+            if (Vita(r).Vita < curata) Male($"dopo 3 s la vita deve essere almeno {curata} (1 piu' il 15%)");
+            if (Campo(r, "immortale") != "no") Male("dopo 3 s l'immortalita' deve finire");
+
+            // In ricarica Pietraviva non regge piu': si va a terra.
+            r = Riga(Scudo($"colpo {max * 10}"));
+            aTerra = s.ChiediAdmin("aterra", "a terra: ");
+            if (aTerra == null || !aTerra.StartsWith("si")) Male($"con Pietraviva in ricarica il colpo mortale deve mandare a terra ({aTerra})");
+            s.Admin("aterra rialza");
+        }
+
+        // Si lascia pulito: lo scudo unico torna libero con lo zaino vuoto.
+        s.Posizione(0);
+        s.Dotazione(ItemType.None, ItemType.None, SideItemType.None);
+        s.Admin("clearinv");
+        s.Admin("ricarica");
+        s.Admin("effetto azzera");
+        s.Admin("sethp 1000");
+        Pausa(0.5);
+
+        if (ok) Console.WriteLine("  OK: la barriera parte sotto il 25% secondo il grado, Pietraviva tiene a 1 e cura");
+        return ok;
+    }
+
     static readonly System.Globalization.CultureInfo Inv =
         System.Globalization.CultureInfo.InvariantCulture;
 }
