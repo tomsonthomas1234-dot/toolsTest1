@@ -3568,6 +3568,269 @@ static class Regole
         return ok;
     }
 
+    // ---- il bastone (A14g5) ----------------------------------------------------
+    //
+    // Le dodici abilita del bastone, con un bastone Epico (12 a colpo, portata
+    // 2,5 m), sguardo verso +X. A in fazione 1, B e C in 2; per il Vento alle
+    // spalle C passa per un momento in fazione 1. B colpisce a mani nude per
+    // provare Schivata e Danza.
+
+    public static bool Bastone(string tokenA, string tokenB, string tokenC, string host, int port)
+    {
+        Console.WriteLine("--- bastone: base, Comuni, Rare ed Epiche");
+        bool ok = true;
+        void Male(string m) { Console.WriteLine("  FALLITA: " + m); ok = false; }
+
+        using var a = new Sonda(tokenA, host, port);
+        using var b = new Sonda(tokenB, host, port);
+        using var c = new Sonda(tokenC, host, port);
+        if (!a.AttendiPronta() || !b.AttendiPronta() || !c.AttendiPronta())
+        { Console.WriteLine("  FALLITA: le sonde non sono entrate in gioco"); return false; }
+
+        const float PX = -150f, PZ = 250f;   // lo stesso punto delle prove della spada
+        static byte[] P<T>(T v) => MessagePack.MessagePackSerializer.Serialize(v);
+        bool Aspetta(Func<bool> cosa, double secondi) =>
+            a.Attendi(() => { b.Attendi(() => true, 0.01); c.Attendi(() => true, 0.01); return cosa(); }, secondi);
+        void Pausa(double secondi) => Aspetta(() => false, secondi);
+        static string Visto(CommandResultMsg r) => r == null ? "nessuna risposta" : r.Success ? "riuscito" : "rifiutato " + r.ErrorCode;
+        float Vita(Sonda chi) => a.Stato(chi.Id).Vita;
+        void Tp(Sonda s, float x, float z)
+        {
+            s.Admin($"tp {x.ToString(Inv)} {z.ToString(Inv)}");
+            Aspetta(() => Dist(s.X, s.Z, x, z) < 0.5f, 6);
+            s.Cammina(0f, 0f, 0.1);
+        }
+        void Piena(params Sonda[] chi)
+        {
+            foreach (var s in chi) s.Admin("sethp 1000");
+            Aspetta(() => chi.All(s => Vita(s) >= 100f), 3);
+            Pausa(0.3);
+        }
+        float Perso(Sonda chi, float prima, double secondi = 1.5)
+        {
+            Aspetta(() => Vita(chi) < prima, secondi);
+            Pausa(0.3);
+            return prima - Vita(chi);
+        }
+        string Effetto(Sonda s, string riga) { Pausa(0.15); return s.ChiediAdmin("effetto " + riga, "effetto: ") ?? "(nessuna risposta)"; }
+        static (float X, float Z) Pos(string riga)
+        {
+            int i = riga.IndexOf("pos=", StringComparison.Ordinal);
+            if (i < 0) return (float.NaN, float.NaN);
+            int f = riga.IndexOf(' ', i);
+            var p = (f < 0 ? riga[(i + 4)..] : riga[(i + 4)..f]).Split(',');
+            return p.Length == 2 && float.TryParse(p[0], System.Globalization.NumberStyles.Float, Inv, out var x)
+                   && float.TryParse(p[1], System.Globalization.NumberStyles.Float, Inv, out var z) ? (x, z) : (float.NaN, float.NaN);
+        }
+        (float X, float Z) Dove(Sonda s) => Pos(Effetto(a, s == a ? "stato" : $"stato {s.Id}"));
+        void Vicino(string cosa, Sonda s, float x, float z, float tolleranza = 0.4f)
+        {
+            var (vx, vz) = Dove(s);
+            Console.WriteLine($"  {cosa}: ({vx:F2}, {vz:F2}) (atteso {x}, {z})");
+            if (float.IsNaN(vx) || Dist(vx, vz, x, z) > tolleranza) Male($"{cosa}: ({vx:F2}, {vz:F2}) invece di ({x}, {z})");
+        }
+        CommandResultMsg Prova(Sonda s, AbilityId id, float yaw = 90f)
+        {
+            Pausa(0.15);
+            s.Comando(118, CommandType.SetAbilitySlot, P(new SetAbilitySlotCommand
+                { Kind = AbilitySlotKind.Weapon, Family = WeaponFamily.Staff, Slot = 0, Ability = id }));
+            CommandResultMsg r = null;
+            Aspetta(() => (r = s.Esito(118)) != null, 5);
+            if (r == null || !r.Success) Male($"{id} nello slot: {Visto(r)}");
+            Pausa(0.15); s.Admin("ricarica");
+            Pausa(0.15);
+            s.Comando(117, CommandType.UseAbility, P(new UseAbilityCommand { Ability = id, Yaw = yaw }));
+            r = null;
+            Aspetta(() => (r = s.Esito(117)) != null, 5);
+            return r;
+        }
+        void Atteso(string cosa, CommandResultMsg r, ErrorCode atteso)
+        {
+            bool giusto = r != null && (atteso == ErrorCode.None ? r.Success : !r.Success && r.ErrorCode == atteso);
+            Console.WriteLine($"  {cosa}: {Visto(r)}{(giusto ? "" : $" (atteso {(atteso == ErrorCode.None ? "riuscito" : atteso.ToString())})")}");
+            if (!giusto) Male($"{cosa}: atteso {(atteso == ErrorCode.None ? "riuscito" : "rifiutato " + atteso)}");
+        }
+        void Pulisci(params Sonda[] chi) { foreach (var s in chi) Effetto(a, $"azzera {s.Id}"); }
+        void Controlla(string cosa, float visto, float atteso)
+        {
+            Console.WriteLine($"  {cosa}: {visto} (atteso {atteso})");
+            if (visto != atteso) Male($"{cosa}: {visto} invece di {atteso}");
+        }
+        // B tira un pugno ad A (il colpo normale, a mani nude) e dice quanto ha tolto.
+        float Pugno()
+        {
+            float prima = Vita(a);
+            b.Colpisci(0.1);
+            return Perso(a, prima, 0.6);
+        }
+
+        a.Admin("setfaction 1"); b.Admin("setfaction 2"); c.Admin("setfaction 2");
+        foreach (var s in new[] { a, b, c }) { s.Admin("clearinv"); s.Admin("abilita azzera"); s.Admin("effetto azzera"); }
+        b.Dotazione(ItemType.None, ItemType.None, SideItemType.None);
+        c.Dotazione(ItemType.None, ItemType.None, SideItemType.None);
+        Tp(a, PX, PZ); Tp(b, PX + 1.5f, PZ); Tp(c, PX - 1.5f, PZ);
+        {
+            Pausa(0.15);
+            var r = a.ChiediAdmin("dai Staff epico", "dai: ");
+            ulong id = r != null && ulong.TryParse(r.Split("id=").Last(), out var n) ? n : 0;
+            if (id == 0 || !Aspetta(() => { lock (a.Zaino) return a.Istanze.ContainsKey(id); }, 5))
+                Male($"'dai Staff epico' non ha dato il bastone ({r ?? "nessuna risposta"})");
+            a.Dotazione(ItemType.Staff, ItemType.None, SideItemType.None);
+            a.Posizione(0);
+            Pausa(0.15); a.Admin("abilita sblocca bastone");
+            Pausa(0.4);
+        }
+        Piena(a, b, c);
+
+        // 1. Colpo rotante: B davanti e C dietro a 1,5 m, 12 a tutti e due e
+        //    spinti via di 1 m.
+        float pb = Vita(b), pc = Vita(c);
+        Atteso("Colpo rotante", Prova(a, AbilityId.StaffSpinStrike), ErrorCode.None);
+        Aspetta(() => Vita(b) < pb && Vita(c) < pc, 1.5);
+        Pausa(0.3);
+        Controlla("Colpo rotante, B perde", pb - Vita(b), 12f);
+        Controlla("Colpo rotante, C perde", pc - Vita(c), 12f);
+        Vicino("Colpo rotante, B spinto a", b, PX + 2.5f, PZ);
+        Vicino("Colpo rotante, C spinto a", c, PX - 2.5f, PZ);
+        Tp(c, PX - 20f, PZ);
+
+        // 2. Sgambetto: senza nessuno a portata non parte; B a 1,5 m perde 12
+        //    ed e' stordito.
+        Tp(b, PX + 6f, PZ);
+        Atteso("Sgambetto su B a 6 m", Prova(a, AbilityId.StaffTrip), ErrorCode.AbilityNotUsable);
+        Tp(b, PX + 1.5f, PZ);
+        Piena(b);
+        float prima = Vita(b);
+        Atteso("Sgambetto su B a 1,5 m", Prova(a, AbilityId.StaffTrip), ErrorCode.None);
+        Controlla("Sgambetto, B perde", Perso(b, prima, 1.0), 12f);
+        string stB = Effetto(a, $"stato {b.Id}");
+        Console.WriteLine($"  Sgambetto: {stB}");
+        if (!stB.Contains("stordito")) Male("lo Sgambetto deve stordire");
+        Pulisci(b);
+
+        // 3. Scatto: A 6 m avanti. Salto con l'asta: 8 m avanti.
+        Tp(b, PX + 1.5f, PZ + 10f);
+        Atteso("Scatto", Prova(a, AbilityId.StaffDash), ErrorCode.None);
+        Pausa(0.2);
+        Vicino("Scatto, A a", a, PX + 6f, PZ);
+        Tp(a, PX, PZ);
+        Atteso("Salto con l'asta", Prova(a, AbilityId.StaffPoleVault), ErrorCode.None);
+        Pausa(0.2);
+        Vicino("Salto con l'asta, A a", a, PX + 8f, PZ);
+        Tp(a, PX, PZ);
+
+        // 4. Passo leggero: A +30% velocita'. Vento alle spalle: A e C (passata
+        //    in fazione 1, a 3 m) +20%, B nemico a 1,5 m no.
+        Atteso("Passo leggero", Prova(a, AbilityId.StaffLightStep), ErrorCode.None);
+        string stA = Effetto(a, "stato");
+        Console.WriteLine($"  Passo leggero: {stA}");
+        if (!stA.Contains("MoveSpeed +30%")) Male("il Passo leggero deve dare +30% di velocita'");
+        Pulisci(a);
+        c.Admin("setfaction 1");
+        Tp(c, PX - 3f, PZ); Tp(b, PX + 1.5f, PZ);
+        Pausa(0.3);
+        Atteso("Vento alle spalle", Prova(a, AbilityId.StaffTailwind), ErrorCode.None);
+        stA = Effetto(a, "stato");
+        string stC = Effetto(a, $"stato {c.Id}");
+        stB = Effetto(a, $"stato {b.Id}");
+        Console.WriteLine($"  Vento alle spalle: A {stA}; C {stC}; B {stB}");
+        if (!stA.Contains("MoveSpeed +20%") || !stC.Contains("MoveSpeed +20%")) Male("il Vento alle spalle deve dare +20% di velocita' a chi lo usa e agli alleati vicini");
+        if (stB.Contains("Vento")) Male("il Vento alle spalle non deve andare ai nemici");
+        c.Admin("setfaction 2");
+        Pulisci(a, b, c);
+        Tp(c, PX - 20f, PZ);
+
+        // 5. Schivata: sguardo verso +X, A salta 3 m a destra (verso -Z); B le
+        //    sta gia' a un metro dal punto d'arrivo e tira un pugno: manca. Dopo
+        //    il secondo il pugno prende.
+        Tp(b, PX + 1f, PZ - 3f);
+        Piena(a);
+        Atteso("Schivata", Prova(a, AbilityId.StaffDodge), ErrorCode.None);
+        float schivato = Pugno();
+        Vicino("Schivata, A a", a, PX, PZ - 3f);
+        Controlla("Schivata, il pugno di B entro un secondo toglie", schivato, 0f);
+        Pausa(0.6);
+        float preso = Pugno();
+        Console.WriteLine($"  Dopo la Schivata il pugno di B toglie {preso}");
+        if (preso <= 0f) Male("finita la Schivata il pugno deve prendere");
+
+        // 6. Danza: con l'esito fissato a "manca" il pugno non toglie niente,
+        //    a "prende" si'. Il 50% vero non lo prova nessuno: e' un dado.
+        Piena(a);
+        Atteso("Danza", Prova(a, AbilityId.StaffDance), ErrorCode.None);
+        string danza = a.ChiediAdmin("danza si", "danza: ") ?? "(nessuna risposta)";
+        if (!danza.Contains("si")) Male($"'danza si' non risponde ({danza})");
+        Pausa(0.5);
+        Controlla("Danza che manca, il pugno di B toglie", Pugno(), 0f);
+        a.ChiediAdmin("danza no", "danza: ");
+        Pausa(0.5);
+        preso = Pugno();
+        Console.WriteLine($"  Danza che prende, il pugno di B toglie {preso}");
+        if (preso <= 0f) Male("con la Danza a 'prende' il pugno deve prendere");
+        a.ChiediAdmin("danza caso", "danza: ");
+        Pausa(3.5);   // la Danza finisce
+
+        // 7. Rimbalzo: B a 4 m e C a 7 m, 12 a tutti e due; A finisce accanto a C.
+        Tp(a, PX, PZ); Tp(b, PX + 4f, PZ); Tp(c, PX + 7f, PZ);
+        Piena(b, c);
+        pb = Vita(b); pc = Vita(c);
+        Atteso("Rimbalzo", Prova(a, AbilityId.StaffRicochet), ErrorCode.None);
+        Aspetta(() => Vita(b) < pb && Vita(c) < pc, 1.5);
+        Pausa(0.3);
+        Controlla("Rimbalzo, B perde", pb - Vita(b), 12f);
+        Controlla("Rimbalzo, C perde", pc - Vita(c), 12f);
+        Vicino("Rimbalzo, A finisce a", a, PX + 6f, PZ, 0.6f);
+        Tp(c, PX - 20f, PZ);
+
+        // 8. Folata: B a 2 m davanti e C a 3 m dietro, spinti via di 6 m, senza danno.
+        Tp(a, PX, PZ); Tp(b, PX + 2f, PZ); Tp(c, PX - 3f, PZ);
+        Piena(b, c);
+        pb = Vita(b); pc = Vita(c);
+        Atteso("Folata", Prova(a, AbilityId.StaffGust), ErrorCode.None);
+        Pausa(0.3);
+        Vicino("Folata, B spinto a", b, PX + 8f, PZ);
+        Vicino("Folata, C spinto a", c, PX - 9f, PZ);
+        Controlla("Folata, B perde", pb - Vita(b), 0f);
+        Tp(c, PX - 20f, PZ);
+
+        // 9. Passo d'ombra: nessuno davanti, non parte; B a 10 m: A arriva a un
+        //    metro dietro di lui, e il colpo dopo fa 24 (doppio); quello dopo 12.
+        Tp(b, PX, PZ + 10f);
+        Atteso("Passo d'ombra senza nessuno davanti", Prova(a, AbilityId.StaffShadowStep), ErrorCode.AbilityNotUsable);
+        Tp(b, PX + 10f, PZ);
+        Piena(b);
+        Atteso("Passo d'ombra", Prova(a, AbilityId.StaffShadowStep), ErrorCode.None);
+        Pausa(0.2);
+        Vicino("Passo d'ombra, A a", a, PX + 11f, PZ);
+        prima = Vita(b);
+        a.Colpisci(0.1);
+        Controlla("Dopo il Passo d'ombra il colpo toglie", Perso(b, prima, 1.0), 24f);
+        Pausa(0.6);
+        prima = Vita(b);
+        a.Colpisci(0.1);
+        Controlla("Il colpo dopo ancora toglie", Perso(b, prima, 1.0), 12f);
+
+        // 10. Ritorno: A ferma 5,5 s, poi lo Scatto di 6 m; il Ritorno la riporta
+        //     dov'era 5 s prima.
+        Tp(b, PX + 1.5f, PZ + 10f);
+        Tp(a, PX, PZ);
+        Pausa(5.5);
+        Atteso("Scatto prima del Ritorno", Prova(a, AbilityId.StaffDash), ErrorCode.None);
+        Pausa(0.2);
+        Vicino("Scatto, A a", a, PX + 6f, PZ);
+        Atteso("Ritorno", Prova(a, AbilityId.StaffRecall), ErrorCode.None);
+        Pausa(0.2);
+        Vicino("Ritorno, A torna a", a, PX, PZ);
+
+        // Si lascia tutto pulito.
+        foreach (var s in new[] { a, b, c }) { s.Admin("effetto azzera"); s.Admin("abilita azzera"); s.Admin("clearinv"); s.Admin("sethp 1000"); }
+        a.Dotazione(ItemType.None, ItemType.None, SideItemType.None);
+        Pausa(0.5);
+
+        if (ok) Console.WriteLine("  OK: le dodici abilita del bastone fanno cio' che devono");
+        return ok;
+    }
+
     // ---- 8. mangiare cura ------------------------------------------------------
 
     public static bool MangiareCura(string token, string host, int port)
