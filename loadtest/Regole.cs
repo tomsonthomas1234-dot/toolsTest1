@@ -1357,7 +1357,9 @@ static class Regole
         {
             (101, CommandType.UseAbility,     P(new UseAbilityCommand { Ability = AbilityId.SwordHeavySlash, Yaw = 1f })),
             (102, CommandType.SetAbilitySlot, P(new SetAbilitySlotCommand { Kind = AbilitySlotKind.Weapon, Family = WeaponFamily.Sword, Slot = 0, Ability = AbilityId.SwordParry })),
-            (103, CommandType.ChooseClass,    P(new ChooseClassCommand { Class = ClassId.Warrior })),
+            // Da A14i la scelta della classe c'e' davvero: una secondaria senza
+            // principale resta NotAllowed.
+            (103, CommandType.ChooseClass,    P(new ChooseClassCommand { Class = ClassId.Warrior, Secondary = true })),
             (104, CommandType.Evolve,         P(new EvolveCommand { Into = ClassId.CrystalAdept })),
             (105, CommandType.SpendPoint,     P(new SpendPointCommand { Ability = AbilityId.SwordLunge })),
             (106, CommandType.Equip,          P(new EquipCommand { Slot = EquipSlot.Body, InstanceId = 0 })),
@@ -6818,6 +6820,202 @@ static class Regole
         Pausa(0.5);
 
         if (ok) Console.WriteLine("  OK: la barriera parte sotto il 25% secondo il grado, Pietraviva tiene a 1 e cura");
+        return ok;
+    }
+
+    // ---- classi: scelta, sblocco, slot, cambio, passive (A14i) ----------------
+    //
+    // Decisioni/abilita.md sezione 6: si sceglie una classe principale; dopo 25
+    // uccisioni di mob si sblocca con le sue 2 attive e 2 passive base, che
+    // vanno negli slot vuoti; la secondaria dev'essere gia sbloccata e da' al
+    // piu' uno slot attivo e uno passivo; cambiando classe gli slot della
+    // classe lasciata si svuotano ma quello che si e' sbloccato resta. Le
+    // passive di statistica contano: Robusto +10% vita massima (col livello),
+    // Mano pesante +8% danno in mischia. A in fazione 1 col Guerriero, B in 2
+    // fa da bersaglio. La 25esima uccisione e' un lupo vero, ucciso da un
+    // danno nel tempo di A: le prime 24 le fissa "classe uccisioni".
+    public static bool Classi(string tokenA, string tokenB, string host, int port)
+    {
+        Console.WriteLine("--- classi: scelta, sblocco a 25 uccisioni, slot, secondaria, cambio, passive");
+        bool ok = true;
+        void Male(string m) { Console.WriteLine("  FALLITA: " + m); ok = false; }
+
+        using var a = new Sonda(tokenA, host, port);
+        using var b = new Sonda(tokenB, host, port);
+        if (!a.AttendiPronta() || !b.AttendiPronta())
+        { Console.WriteLine("  FALLITA: le sonde non sono entrate in gioco"); return false; }
+
+        const float PX = -155f, PZ = 245f;   // lontano da tutto, come le altre prove delle abilita
+        static byte[] P<T>(T v) => MessagePack.MessagePackSerializer.Serialize(v);
+        bool Aspetta(Func<bool> cosa, double secondi) =>
+            a.Attendi(() => { b.Attendi(() => true, 0.01); return cosa(); }, secondi);
+        void Pausa(double secondi) => Aspetta(() => false, secondi);
+        float Vita(Sonda chi) => a.Stato(chi.Id).Vita;
+        void Tp(Sonda s, float x, float z)
+        {
+            s.Admin($"tp {x.ToString(Inv)} {z.ToString(Inv)}");
+            Aspetta(() => Dist(s.X, s.Z, x, z) < 0.5f, 6);
+            s.Cammina(0f, 0f, 0.1);
+        }
+        void Piena(params Sonda[] chi)
+        {
+            foreach (var s in chi) s.Admin("sethp 1000");
+            Aspetta(() => chi.All(s => Vita(s) >= 100f), 3);
+            Pausa(0.3);
+        }
+        // Un colpo di A su B: quanto perde B.
+        float Colpo()
+        {
+            Piena(b);
+            float prima = Vita(b);
+            a.Colpisci(0.2);
+            Aspetta(() => Vita(b) < prima, 1.5);
+            Pausa(0.3);
+            return prima - Vita(b);
+        }
+        uint idComando = 130;
+        CommandResultMsg Manda(CommandType tipo, byte[] contenuto)
+        {
+            uint id = idComando++;
+            Pausa(0.15);
+            a.Comando(id, tipo, contenuto);
+            CommandResultMsg r = null;
+            Aspetta(() => (r = a.Esito(id)) != null, 5);
+            Pausa(0.2);   // lo stato delle abilita arriva subito dopo l'esito
+            return r;
+        }
+        void Atteso(string cosa, CommandResultMsg r, ErrorCode atteso)
+        {
+            string visto = r == null ? "nessuna risposta" : r.Success ? "riuscito" : $"rifiutato {r.ErrorCode}";
+            Console.WriteLine($"  {cosa}: {visto}");
+            bool va = r != null && (atteso == ErrorCode.None ? r.Success : !r.Success && r.ErrorCode == atteso);
+            if (!va) Male($"{cosa}: atteso {(atteso == ErrorCode.None ? "riuscito" : "rifiutato " + atteso)}");
+        }
+        CommandResultMsg Scegli(ClassId c, bool secondaria = false) =>
+            Manda(CommandType.ChooseClass, P(new ChooseClassCommand { Class = c, Secondary = secondaria }));
+        CommandResultMsg Slot(AbilitySlotKind tipo, byte slot, AbilityId ab) =>
+            Manda(CommandType.SetAbilitySlot, P(new SetAbilitySlotCommand { Kind = tipo, Slot = slot, Ability = ab }));
+        string Stato() { Pausa(0.15); return a.ChiediAdmin("classe stato", "classe: ") ?? "(nessuna risposta)"; }
+        // La vita massima secondo le statistiche mandate al client, dopo che
+        // ne e' arrivata una nuova (o subito, se non deve cambiare).
+        int VitaMax(int ricevuteDopo = -1)
+        {
+            if (ricevuteDopo >= 0) Aspetta(() => a.StatisticheRicevute > ricevuteDopo, 4);
+            Pausa(0.3);
+            return a.Statistiche?.MaxHp ?? -1;
+        }
+        string Slots() =>
+            a.Abilita == null ? "(nessuno stato)"
+            : $"attivi={string.Join("/", a.Abilita.ClassActiveSlots.Select(x => (int)x))} passivi={string.Join("/", a.Abilita.ClassPassiveSlots.Select(x => (int)x))}";
+
+        a.Admin("setfaction 1"); b.Admin("setfaction 2");
+        foreach (var s in new[] { a, b }) { s.Admin("clearinv"); s.Admin("abilita azzera"); s.Admin("effetto azzera"); }
+        b.Dotazione(ItemType.None, ItemType.None, SideItemType.None);
+        Tp(a, PX, PZ); Tp(b, PX + 1f, PZ);
+        a.Admin("give StoneSword 1");
+        Aspetta(() => a.Istanze.Values.Any(v => v.Tipo == ItemType.StoneSword), 5);
+        a.Dotazione(ItemType.StoneSword, ItemType.None, SideItemType.None);
+        a.Posizione(0);
+        Pausa(0.4);
+        Piena(a, b);
+        int vitaBase = VitaMax();
+        float colpoBase = Colpo();
+        Console.WriteLine($"  senza classe: vita massima {vitaBase}, colpo di spada {colpoBase}");
+        if (vitaBase <= 0) Male("le statistiche di A non sono arrivate");
+
+        // 1. scelte rifiutate: secondaria senza principale, evoluzione,
+        //    secondaria non sbloccata, secondaria uguale alla principale.
+        Atteso("secondaria senza principale", Scegli(ClassId.Warrior, true), ErrorCode.NotAllowed);
+        Atteso("Adepto dei Cristalli come principale", Scegli(ClassId.CrystalAdept), ErrorCode.NotAllowed);
+        Atteso("principale Guerriero", Scegli(ClassId.Warrior), ErrorCode.None);
+        Atteso("secondaria Cacciatore non sbloccata", Scegli(ClassId.Hunter, true), ErrorCode.NotAllowed);
+        Atteso("secondaria uguale alla principale", Scegli(ClassId.Warrior, true), ErrorCode.NotAllowed);
+        var st = Stato();
+        Console.WriteLine($"  classe stato: {st}");
+        if (st != "principale=Warrior:0/25 secondaria=-") Male("dopo la scelta il Guerriero deve essere a 0 uccisioni su 25");
+        if (!Aspetta(() => a.HaLetto("abbatti ancora 25 creature"), 3)) Male("la scelta della classe non e' stata detta in chat");
+        Atteso("Sfida prima dello sblocco", Manda(CommandType.UseAbility, P(new UseAbilityCommand { Ability = AbilityId.WarriorChallenge })),
+               ErrorCode.AbilityNotUsable);
+
+        // 2. la 25esima uccisione: un lupo ucciso da un danno nel tempo di A.
+        Console.WriteLine($"  classe uccisioni 24 -> {a.ChiediAdmin("classe uccisioni 24", "classe: ")}");
+        int statPrima = a.StatisticheRicevute;
+        // B si allontana: "effetto stato vicino" deve trovare il lupo, non lei.
+        Tp(b, PX + 40f, PZ);
+        a.Admin("spawn wolf");
+        Pausa(0.5);
+        string lupo = a.ChiediAdmin("effetto stato vicino", "effetto: ") ?? "";
+        string idLupo = lupo.Split(' ').FirstOrDefault(p => p.StartsWith("id="))?[3..];
+        if (!lupo.Contains("tipo=Wolf") || idLupo == null) { Male($"il lupo fatto nascere non si trova ({lupo})"); idLupo = "0"; }
+        a.ChiediAdmin($"effetto sanguina 1000 2 {idLupo}", "effetto: ");
+        bool sbloccato = Aspetta(() => a.Abilita?.Classes?.Any(c => c.Class == ClassId.Warrior && c.Unlocked) == true, 6);
+        if (idLupo != "0") a.Admin($"remove {idLupo}");
+        Tp(b, PX + 1f, PZ);   // B torna accanto ad A, per i colpi
+        st = Stato();
+        Console.WriteLine($"  dopo il lupo: {st}; {Slots()}");
+        if (!sbloccato || st != "principale=Warrior:sbloccata secondaria=-") Male("alla 25esima uccisione il Guerriero deve sbloccarsi");
+        if (!Aspetta(() => a.HaLetto("Guerriero sbloccato"), 3)) Male("lo sblocco non e' stato detto in chat");
+        var sb = a.Abilita?.Unlocked?.Select(u => u.Id).ToHashSet() ?? new HashSet<AbilityId>();
+        if (!new[] { AbilityId.WarriorChallenge, AbilityId.WarriorToughSkin, AbilityId.WarriorSturdy, AbilityId.WarriorHeavyHand }.All(sb.Contains))
+            Male("allo sblocco servono le 2 attive e le 2 passive base del Guerriero");
+        if (Slots() != "attivi=1000/1001/0 passivi=1050/1051") Male("le abilita base devono andare negli slot vuoti");
+
+        // 3. passive: Robusto +10% vita massima, al livello 3 +13%; Mano
+        //    pesante +8% in mischia (22 -> 24).
+        int vitaRobusto = VitaMax(statPrima);
+        float colpoMano = Colpo();
+        Console.WriteLine($"  con Robusto e Mano pesante: vita massima {vitaRobusto} (attesa {vitaBase + 10}), colpo {colpoMano} (atteso 24)");
+        if (vitaRobusto != vitaBase + 10) Male("Robusto deve dare +10% di vita massima");
+        if (colpoBase != 22f) Male($"il colpo di spada senza classe doveva fare 22, non {colpoBase}");
+        if (colpoMano != 24f) Male("Mano pesante deve dare +8% al colpo di spada");
+        statPrima = a.StatisticheRicevute;
+        a.ChiediAdmin("abilita livello 1050 3", "abilita livello: ");
+        int vitaL3 = VitaMax(statPrima);
+        Console.WriteLine($"  Robusto al livello 3: vita massima {vitaL3} (attesa {vitaBase + 13})");
+        if (vitaL3 != vitaBase + 13) Male("Robusto al livello 3 deve dare +13% (10% piu' due volte il 15%)");
+        // tolta dallo slot, la passiva non vale piu'.
+        Atteso("svuotare lo slot di Mano pesante", Slot(AbilitySlotKind.ClassPassive, 1, AbilityId.None), ErrorCode.None);
+        float colpoSenza = Colpo();
+        Console.WriteLine($"  senza Mano pesante nello slot: colpo {colpoSenza} (atteso {colpoBase})");
+        if (colpoSenza != colpoBase) Male("fuori dallo slot Mano pesante non deve valere");
+
+        // 4. cambio di classe: gli slot del Guerriero si svuotano, quello che
+        //    e' sbloccato resta; il Guerriero sbloccato puo' fare da secondaria,
+        //    con un solo slot attivo e uno passivo.
+        statPrima = a.StatisticheRicevute;
+        Atteso("principale Cacciatore", Scegli(ClassId.Hunter), ErrorCode.None);
+        int vitaCacciatore = VitaMax(statPrima);
+        st = Stato();
+        Console.WriteLine($"  col Cacciatore: {st}; {Slots()}; vita massima {vitaCacciatore}");
+        if (st != "principale=Hunter:0/25 secondaria=-") Male("il Cacciatore appena scelto deve essere a 0 su 25");
+        if (Slots() != "attivi=0/0/0 passivi=0/0") Male("cambiando classe gli slot del Guerriero devono svuotarsi");
+        if (vitaCacciatore != vitaBase) Male("senza Robusto nello slot la vita massima deve tornare quella di prima");
+        if (a.Abilita?.Classes?.Any(c => c.Class == ClassId.Warrior && c.Unlocked) != true
+            || a.Abilita?.Unlocked?.Any(u => u.Id == AbilityId.WarriorSturdy && u.Level == 3) != true)
+            Male("cambiando classe il Guerriero deve restare sbloccato, con Robusto al livello 3");
+        Atteso("Robusto nello slot senza il Guerriero", Slot(AbilitySlotKind.ClassPassive, 0, AbilityId.WarriorSturdy), ErrorCode.AbilityNotUsable);
+        Atteso("secondaria Guerriero, gia sbloccato", Scegli(ClassId.Warrior, true), ErrorCode.None);
+        statPrima = a.StatisticheRicevute;
+        Atteso("Robusto dalla secondaria", Slot(AbilitySlotKind.ClassPassive, 0, AbilityId.WarriorSturdy), ErrorCode.None);
+        int vitaSecondaria = VitaMax(statPrima);
+        Atteso("una seconda passiva dalla secondaria", Slot(AbilitySlotKind.ClassPassive, 1, AbilityId.WarriorHeavyHand), ErrorCode.AbilityNotUsable);
+        Atteso("Sfida dalla secondaria", Slot(AbilitySlotKind.ClassActive, 0, AbilityId.WarriorChallenge), ErrorCode.None);
+        Atteso("una seconda attiva dalla secondaria", Slot(AbilitySlotKind.ClassActive, 1, AbilityId.WarriorToughSkin), ErrorCode.AbilityNotUsable);
+        Console.WriteLine($"  Robusto dalla secondaria: vita massima {vitaSecondaria} (attesa {vitaBase + 13}); {Slots()}");
+        if (vitaSecondaria != vitaBase + 13) Male("Robusto dalla secondaria deve valere come dalla principale");
+        // un'attiva di classe senza effetto (arrivano con A14j) non va in ricarica.
+        Atteso("Sfida, effetto non ancora fatto", Manda(CommandType.UseAbility, P(new UseAbilityCommand { Ability = AbilityId.WarriorChallenge })),
+               ErrorCode.AbilityNotUsable);
+        if (a.Abilita?.Cooldowns?.Length > 0) Male("un'attiva senza effetto non deve andare in ricarica");
+        Atteso("togliere la secondaria", Scegli(ClassId.None, true), ErrorCode.None);
+        if (Slots() != "attivi=0/0/0 passivi=0/0") Male("tolta la secondaria i suoi slot devono svuotarsi");
+
+        // Si lascia pulito.
+        foreach (var s in new[] { a, b }) { s.Admin("effetto azzera"); s.Admin("abilita azzera"); s.Admin("clearinv"); s.Admin("sethp 1000"); }
+        a.Dotazione(ItemType.None, ItemType.None, SideItemType.None);
+        Pausa(0.5);
+
+        if (ok) Console.WriteLine("  OK: classi scelte, sbloccate a 25 uccisioni, slot e secondaria con le loro regole, passive di statistica applicate");
         return ok;
     }
 
