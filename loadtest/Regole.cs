@@ -3322,6 +3322,252 @@ static class Regole
         return ok;
     }
 
+    // ---- l'arco (A14g4) --------------------------------------------------------
+    //
+    // Le dodici abilita dell'arco, con un arco Epico, sguardo verso +X. Una
+    // freccia d'abilita vale il tiro pieno di oggi: 40. A in fazione 1, B e C
+    // in 2. Ogni freccia tirata consuma una freccia vera dello zaino di A.
+
+    public static bool Arco(string tokenA, string tokenB, string tokenC, string host, int port)
+    {
+        Console.WriteLine("--- arco: base, Comuni, Rare ed Epiche");
+        bool ok = true;
+        void Male(string m) { Console.WriteLine("  FALLITA: " + m); ok = false; }
+
+        using var a = new Sonda(tokenA, host, port);
+        using var b = new Sonda(tokenB, host, port);
+        using var c = new Sonda(tokenC, host, port);
+        if (!a.AttendiPronta() || !b.AttendiPronta() || !c.AttendiPronta())
+        { Console.WriteLine("  FALLITA: le sonde non sono entrate in gioco"); return false; }
+
+        const float PX = -150f, PZ = 250f;   // lo stesso punto delle prove della spada
+        static byte[] P<T>(T v) => MessagePack.MessagePackSerializer.Serialize(v);
+        bool Aspetta(Func<bool> cosa, double secondi) =>
+            a.Attendi(() => { b.Attendi(() => true, 0.01); c.Attendi(() => true, 0.01); return cosa(); }, secondi);
+        void Pausa(double secondi) => Aspetta(() => false, secondi);
+        static string Visto(CommandResultMsg r) => r == null ? "nessuna risposta" : r.Success ? "riuscito" : "rifiutato " + r.ErrorCode;
+        float Vita(Sonda chi) => a.Stato(chi.Id).Vita;
+        void Tp(Sonda s, float x, float z)
+        {
+            s.Admin($"tp {x.ToString(Inv)} {z.ToString(Inv)}");
+            Aspetta(() => Dist(s.X, s.Z, x, z) < 0.5f, 6);
+            s.Cammina(0f, 0f, 0.1);
+        }
+        void Piena(params Sonda[] chi)
+        {
+            foreach (var s in chi) s.Admin("sethp 1000");
+            Aspetta(() => chi.All(s => Vita(s) >= 100f), 3);
+            Pausa(0.3);
+        }
+        float Perso(Sonda chi, float prima, double secondi = 1.5)
+        {
+            Aspetta(() => Vita(chi) < prima, secondi);
+            Pausa(0.3);
+            return prima - Vita(chi);
+        }
+        string Effetto(Sonda s, string riga) { Pausa(0.15); return s.ChiediAdmin("effetto " + riga, "effetto: ") ?? "(nessuna risposta)"; }
+        static (float X, float Z) Pos(string riga)
+        {
+            int i = riga.IndexOf("pos=", StringComparison.Ordinal);
+            if (i < 0) return (float.NaN, float.NaN);
+            int f = riga.IndexOf(' ', i);
+            var p = (f < 0 ? riga[(i + 4)..] : riga[(i + 4)..f]).Split(',');
+            return p.Length == 2 && float.TryParse(p[0], System.Globalization.NumberStyles.Float, Inv, out var x)
+                   && float.TryParse(p[1], System.Globalization.NumberStyles.Float, Inv, out var z) ? (x, z) : (float.NaN, float.NaN);
+        }
+        CommandResultMsg Prova(Sonda s, AbilityId id, float yaw = 90f)
+        {
+            Pausa(0.15);
+            s.Comando(118, CommandType.SetAbilitySlot, P(new SetAbilitySlotCommand
+                { Kind = AbilitySlotKind.Weapon, Family = WeaponFamily.Bow, Slot = 0, Ability = id }));
+            CommandResultMsg r = null;
+            Aspetta(() => (r = s.Esito(118)) != null, 5);
+            if (r == null || !r.Success) Male($"{id} nello slot: {Visto(r)}");
+            Pausa(0.15); s.Admin("ricarica");
+            Pausa(0.15);
+            s.Comando(117, CommandType.UseAbility, P(new UseAbilityCommand { Ability = id, Yaw = yaw }));
+            r = null;
+            Aspetta(() => (r = s.Esito(117)) != null, 5);
+            return r;
+        }
+        void Atteso(string cosa, CommandResultMsg r, ErrorCode atteso)
+        {
+            bool giusto = r != null && (atteso == ErrorCode.None ? r.Success : !r.Success && r.ErrorCode == atteso);
+            Console.WriteLine($"  {cosa}: {Visto(r)}{(giusto ? "" : $" (atteso {(atteso == ErrorCode.None ? "riuscito" : atteso.ToString())})")}");
+            if (!giusto) Male($"{cosa}: atteso {(atteso == ErrorCode.None ? "riuscito" : "rifiutato " + atteso)}");
+        }
+        void Pulisci(params Sonda[] chi) { foreach (var s in chi) Effetto(a, $"azzera {s.Id}"); }
+        void Controlla(string cosa, float visto, float atteso)
+        {
+            Console.WriteLine($"  {cosa}: {visto} (atteso {atteso})");
+            if (visto != atteso) Male($"{cosa}: {visto} invece di {atteso}");
+        }
+        int Frecce() { Pausa(0.2); return a.Quanti(ItemType.Arrow); }
+
+        a.Admin("setfaction 1"); b.Admin("setfaction 2"); c.Admin("setfaction 2");
+        foreach (var s in new[] { a, b, c }) { s.Admin("clearinv"); s.Admin("abilita azzera"); s.Admin("effetto azzera"); }
+        b.Dotazione(ItemType.None, ItemType.None, SideItemType.None);
+        c.Dotazione(ItemType.None, ItemType.None, SideItemType.None);
+        Tp(a, PX, PZ); Tp(b, PX + 10f, PZ); Tp(c, PX - 20f, PZ);
+        {
+            Pausa(0.15);
+            var r = a.ChiediAdmin("dai Bow epico", "dai: ");
+            ulong id = r != null && ulong.TryParse(r.Split("id=").Last(), out var n) ? n : 0;
+            if (id == 0 || !Aspetta(() => { lock (a.Zaino) return a.Istanze.ContainsKey(id); }, 5))
+                Male($"'dai Bow epico' non ha dato l'arco ({r ?? "nessuna risposta"})");
+            a.Dotazione(ItemType.Bow, ItemType.None, SideItemType.None);
+            a.Posizione(0);
+            Pausa(0.15); a.Admin("abilita sblocca arco");
+            Pausa(0.4);
+        }
+        Piena(a, b, c);
+
+        // 1. Tiro mirato: senza frecce non parte; con le frecce 64 (+60%) e una freccia in meno.
+        Atteso("Tiro mirato senza frecce", Prova(a, AbilityId.BowAimedShot), ErrorCode.AbilityNotUsable);
+        a.Admin("give Arrow 60");
+        Aspetta(() => a.Quanti(ItemType.Arrow) == 60, 3);
+        int frecce = Frecce();
+        float prima = Vita(b);
+        Atteso("Tiro mirato su B a 10 m", Prova(a, AbilityId.BowAimedShot), ErrorCode.None);
+        Controlla("Tiro mirato, B perde", Perso(b, prima, 1.0), 64f);
+        Controlla("Tiro mirato, frecce usate", frecce - Frecce(), 1f);
+
+        // 2. Doppia freccia: due da 40.
+        Piena(b);
+        prima = Vita(b);
+        Atteso("Doppia freccia", Prova(a, AbilityId.BowDoubleArrow), ErrorCode.None);
+        Aspetta(() => prima - Vita(b) >= 80f, 2);
+        Pausa(0.4);
+        Controlla("Doppia freccia, B perde", prima - Vita(b), 80f);
+
+        // 3. Freccia azzoppante: 40 e rallentato del 40%.
+        Piena(b);
+        prima = Vita(b);
+        Atteso("Freccia azzoppante", Prova(a, AbilityId.BowCripplingArrow), ErrorCode.None);
+        Controlla("Freccia azzoppante, B perde", Perso(b, prima, 1.0), 40f);
+        string stB = Effetto(a, $"stato {b.Id}");
+        Console.WriteLine($"  Freccia azzoppante: {stB}");
+        if (!stB.Contains("rallentato 40%")) Male("la Freccia azzoppante deve rallentare del 40%");
+        Pulisci(b);
+
+        // 4. Freccia infuocata: 40 subito, poi 12 (30%) in 5 s.
+        Piena(b);
+        prima = Vita(b);
+        Atteso("Freccia infuocata", Prova(a, AbilityId.BowFireArrow), ErrorCode.None);
+        float subito = Perso(b, prima, 1.0);
+        Aspetta(() => prima - Vita(b) >= 52f, 7);
+        Pausa(1.3);
+        Controlla("Freccia infuocata, B perde subito", subito, 40f);
+        Controlla("Freccia infuocata, B perde in tutto", prima - Vita(b), 52f);
+        Pulisci(b);
+
+        // 5. Ventaglio: B dritto a 5 m e C a 5 m, 30 gradi a destra (verso -Z):
+        //    una freccia ciascuno, 40 a tutti e due, cinque frecce usate.
+        Tp(b, PX + 5f, PZ); Tp(c, PX + 4.33f, PZ - 2.5f);
+        Piena(b, c);
+        float pb = Vita(b), pc = Vita(c);
+        frecce = Frecce();
+        Atteso("Ventaglio", Prova(a, AbilityId.BowArrowFan), ErrorCode.None);
+        Aspetta(() => Vita(b) < pb && Vita(c) < pc, 1.5);
+        Pausa(0.3);
+        Controlla("Ventaglio, B perde", pb - Vita(b), 40f);
+        Controlla("Ventaglio, C perde", pc - Vita(c), 40f);
+        Controlla("Ventaglio, frecce usate", frecce - Frecce(), 5f);
+        Tp(c, PX - 20f, PZ);
+
+        // 6. Freccia stordente: 40 e stordito.
+        Tp(b, PX + 10f, PZ);
+        Piena(b);
+        prima = Vita(b);
+        Atteso("Freccia stordente", Prova(a, AbilityId.BowStunningArrow), ErrorCode.None);
+        Controlla("Freccia stordente, B perde", Perso(b, prima, 1.0), 40f);
+        stB = Effetto(a, $"stato {b.Id}");
+        Console.WriteLine($"  Freccia stordente: {stB}");
+        if (!stB.Contains("stordito")) Male("la Freccia stordente deve stordire");
+        Pulisci(b);
+
+        // 7. Pioggia di frecce: B a 15 m, C a 17 m; sei ondate da 10 a tutti e
+        //    due, sei frecce usate.
+        Tp(b, PX + 15f, PZ); Tp(c, PX + 17f, PZ);
+        Piena(b, c);
+        pb = Vita(b); pc = Vita(c);
+        frecce = Frecce();
+        Atteso("Pioggia di frecce", Prova(a, AbilityId.BowArrowRain), ErrorCode.None);
+        Aspetta(() => pb - Vita(b) >= 60f && pc - Vita(c) >= 60f, 5);
+        Pausa(0.8);
+        Controlla("Pioggia di frecce, B perde", pb - Vita(b), 60f);
+        Controlla("Pioggia di frecce, C perde", pc - Vita(c), 60f);
+        Controlla("Pioggia di frecce, frecce usate", frecce - Frecce(), 6f);
+        Tp(c, PX - 20f, PZ);
+
+        // 8. Tiro in fuga: B a 3 m; A salta 5 m indietro e B prende 40.
+        Tp(b, PX + 3f, PZ);
+        Piena(b);
+        prima = Vita(b);
+        Atteso("Tiro in fuga", Prova(a, AbilityId.BowRetreatShot), ErrorCode.None);
+        Controlla("Tiro in fuga, B perde", Perso(b, prima, 1.0), 40f);
+        var (ax, az) = Pos(Effetto(a, "stato"));
+        Console.WriteLine($"  Tiro in fuga: A a ({ax:F2}, {az:F2}) (atteso {PX - 5f}, {PZ})");
+        if (float.IsNaN(ax) || Dist(ax, az, PX - 5f, PZ) > 0.4f) Male("il Tiro in fuga deve portare A 5 m indietro");
+        Tp(a, PX, PZ);
+
+        // 9. Freccia perforante: B a 10 m e C a 30 m sulla linea, 80 a tutti e due.
+        Tp(b, PX + 10f, PZ); Tp(c, PX + 30f, PZ);
+        Piena(b, c);
+        pb = Vita(b); pc = Vita(c);
+        Atteso("Freccia perforante", Prova(a, AbilityId.BowPiercingArrow), ErrorCode.None);
+        Aspetta(() => Vita(b) < pb && Vita(c) < pc, 1.5);
+        Pausa(0.3);
+        Controlla("Freccia perforante, B perde", pb - Vita(b), 80f);
+        Controlla("Freccia perforante, C perde", pc - Vita(c), 80f);
+        Tp(c, PX - 20f, PZ);
+
+        // 10. Marchio del cacciatore: niente danno, B a +25% danno subito.
+        Piena(b);
+        prima = Vita(b);
+        Atteso("Marchio del cacciatore", Prova(a, AbilityId.BowHuntersMark), ErrorCode.None);
+        stB = Effetto(a, $"stato {b.Id}");
+        Console.WriteLine($"  Marchio del cacciatore: {stB}");
+        if (!stB.Contains("danno subito +25%")) Male("il Marchio deve dare +25% di danno subito");
+        Controlla("Marchio del cacciatore, B perde", prima - Vita(b), 0f);
+        Pulisci(b);
+
+        // 11. Tiro rapido: senza, premere l'attacco con l'arco non tira niente
+        //     (si tira rilasciando la carica); con, ogni 3/4 di secondo un tiro
+        //     pieno da 40: due in 1,3 s.
+        Piena(b);
+        prima = Vita(b);
+        a.Colpisci(1.0);
+        Pausa(0.3);
+        Controlla("Senza Tiro rapido, premere l'attacco: B perde", prima - Vita(b), 0f);
+        frecce = Frecce();
+        Atteso("Tiro rapido", Prova(a, AbilityId.BowRapidFire), ErrorCode.None);
+        a.Colpisci(1.3);
+        Pausa(0.3);
+        int tirate = frecce - Frecce();
+        Controlla("Tiro rapido, frecce tirate in 1,3 s", tirate, 2f);
+        Controlla("Tiro rapido, B perde", prima - Vita(b), 80f);
+        Pausa(3.0);   // il Tiro rapido finisce
+
+        // 12. Occhio di falco: B a 25 m, oltre la gittata: l'Azzoppante non
+        //     parte; con l'Occhio (+50% gittata, +10% danno) parte e fa 44.
+        Tp(b, PX + 25f, PZ);
+        Piena(b);
+        Atteso("Freccia azzoppante su B a 25 m", Prova(a, AbilityId.BowCripplingArrow), ErrorCode.AbilityNotUsable);
+        Atteso("Occhio di falco", Prova(a, AbilityId.BowHawkEye), ErrorCode.None);
+        prima = Vita(b);
+        Atteso("Freccia azzoppante su B a 25 m con l'Occhio", Prova(a, AbilityId.BowCripplingArrow), ErrorCode.None);
+        Controlla("Con l'Occhio di falco, B perde", Perso(b, prima, 1.0), 44f);
+
+        // Si lascia tutto pulito.
+        foreach (var s in new[] { a, b, c }) { s.Admin("effetto azzera"); s.Admin("abilita azzera"); s.Admin("clearinv"); s.Admin("sethp 1000"); }
+        a.Dotazione(ItemType.None, ItemType.None, SideItemType.None);
+        Pausa(0.5);
+
+        if (ok) Console.WriteLine("  OK: le dodici abilita dell'arco fanno cio' che devono");
+        return ok;
+    }
+
     // ---- 8. mangiare cura ------------------------------------------------------
 
     public static bool MangiareCura(string token, string host, int port)
