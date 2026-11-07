@@ -7972,6 +7972,175 @@ static class Regole
         if (ok) Console.WriteLine("  OK: Colpo preciso, Raffica, Punto debole, Caccia, Rete, Ritirata e Mira ferma fanno quello che dice il catalogo");
         return ok;
     }
+
+    /// <summary>
+    /// A14j3b: Tagliola ed Esca, i due oggetti del Cacciatore nel mondo. A e il
+    /// Cacciatore (fazione 1), B il nemico (fazione 2). La tagliola non prende
+    /// chi l'ha piazzata, una seconda toglie la prima, B che ci passa sopra
+    /// resta immobile e la tagliola si consuma. L'esca porta via un lupo: A
+    /// senza segno di prova accanto a lui non viene morsa finche l'esca dura,
+    /// e dopo si.
+    /// </summary>
+    public static bool TagliolaEdEsca(string tokenA, string tokenB, string host, int port)
+    {
+        Console.WriteLine("--- tagliola ed esca: oggetti del Cacciatore nel mondo");
+        bool ok = true;
+        void Male(string m) { Console.WriteLine("  FALLITA: " + m); ok = false; }
+
+        using var a = new Sonda(tokenA, host, port);
+        using var b = new Sonda(tokenB, host, port);
+        if (!a.AttendiPronta() || !b.AttendiPronta())
+        { Console.WriteLine("  FALLITA: le sonde non sono entrate in gioco"); return false; }
+
+        const float PX = -150f, PZ = 250f;   // lo stesso punto delle prove delle armi
+        static byte[] P<T>(T v) => MessagePack.MessagePackSerializer.Serialize(v);
+        bool Aspetta(Func<bool> cosa, double secondi) =>
+            a.Attendi(() => { b.Attendi(() => true, 0.01); return cosa(); }, secondi);
+        void Pausa(double secondi) => Aspetta(() => false, secondi);
+        static string Visto(CommandResultMsg r) => r == null ? "nessuna risposta" : r.Success ? "riuscito" : "rifiutato " + r.ErrorCode;
+        float Vita(Sonda chi) => a.Stato(chi.Id).Vita;
+        void Tp(Sonda s, float x, float z)
+        {
+            s.Admin($"tp {x.ToString(Inv)} {z.ToString(Inv)}");
+            Aspetta(() => Dist(s.X, s.Z, x, z) < 0.5f, 6);
+            s.Cammina(0f, 0f, 0.1);
+        }
+        void Piena(params Sonda[] chi)
+        {
+            foreach (var s in chi) s.Admin("sethp 1000");
+            Aspetta(() => chi.All(s => Vita(s) >= 100f), 3);
+            Pausa(0.3);
+        }
+        string Effetto(Sonda s, string riga) { Pausa(0.15); return s.ChiediAdmin("effetto " + riga, "effetto: ") ?? "(nessuna risposta)"; }
+        static (float X, float Z) Pos(string riga)
+        {
+            int i = riga.IndexOf("pos=", StringComparison.Ordinal);
+            if (i < 0) return (float.NaN, float.NaN);
+            int f = riga.IndexOf(' ', i);
+            var p = (f < 0 ? riga[(i + 4)..] : riga[(i + 4)..f]).Split(',');
+            return p.Length == 2 && float.TryParse(p[0], System.Globalization.NumberStyles.Float, Inv, out var x)
+                   && float.TryParse(p[1], System.Globalization.NumberStyles.Float, Inv, out var z) ? (x, z) : (float.NaN, float.NaN);
+        }
+        uint idComando = 700;
+        CommandResultMsg Prova(AbilityId id, float yaw = 90f)
+        {
+            uint idSlot = idComando++, idUso = idComando++;
+            Pausa(0.15);
+            a.Comando(idSlot, CommandType.SetAbilitySlot, P(new SetAbilitySlotCommand
+                { Kind = AbilitySlotKind.ClassActive, Slot = 0, Ability = id }));
+            CommandResultMsg r = null;
+            Aspetta(() => (r = a.Esito(idSlot)) != null, 5);
+            if (r == null || !r.Success) Male($"{id} nello slot: {Visto(r)}");
+            Pausa(0.15); a.Admin("ricarica");
+            Pausa(0.15);
+            a.Comando(idUso, CommandType.UseAbility, P(new UseAbilityCommand { Ability = id, Yaw = yaw }));
+            r = null;
+            Aspetta(() => (r = a.Esito(idUso)) != null, 5);
+            Pausa(0.2);
+            return r;
+        }
+        void Atteso(string cosa, CommandResultMsg r, ErrorCode atteso)
+        {
+            bool giusto = r != null && (atteso == ErrorCode.None ? r.Success : !r.Success && r.ErrorCode == atteso);
+            Console.WriteLine($"  {cosa}: {Visto(r)}{(giusto ? "" : $" (atteso {(atteso == ErrorCode.None ? "riuscito" : atteso.ToString())})")}");
+            if (!giusto) Male($"{cosa}: atteso {(atteso == ErrorCode.None ? "riuscito" : "rifiutato " + atteso)}");
+        }
+        // Gli oggetti di un tipo che A vede entro 15 m dal punto di prova.
+        List<EntityState> Visti(EntityType tipo)
+        {
+            lock (a.Mondo) return a.Mondo.Values.Where(e => e.Type == tipo && Dist(e.X, e.Z, PX, PZ) < 15f).ToList();
+        }
+        string Dove(List<EntityState> l) => l.Count == 0 ? "nessuna" : string.Join(" ", l.Select(e => $"({e.X:F1}, {e.Z:F1}) {e.Extra0}s"));
+
+        ulong idLupo = 0;
+        try
+        {
+            a.Admin("setfaction 1"); b.Admin("setfaction 2");
+            foreach (var s in new[] { a, b }) { s.Admin("clearinv"); s.Admin("abilita azzera"); s.Admin("effetto azzera"); }
+            Tp(a, PX, PZ); Tp(b, PX + 8f, PZ);
+            Pausa(0.15); Console.WriteLine($"  {a.ChiediAdmin("classe cacciatore", "classe: ")}");
+            Pausa(0.15); Console.WriteLine($"  {a.ChiediAdmin("classe sblocca", "classe: ")}");
+            Pausa(0.15); a.Admin("abilita sblocca cacciatore");
+            Pausa(0.4);
+            Piena(a, b);
+
+            // 1. Tagliola ai piedi di A: c'e, e A che ci sta sopra non la fa scattare.
+            Atteso("Tagliola", Prova(AbilityId.HunterSnareTrap), ErrorCode.None);
+            Aspetta(() => Visti(EntityType.Snare).Any(e => Dist(e.X, e.Z, PX, PZ) < 0.6f), 3);
+            Pausa(1.0);
+            var t1 = Visti(EntityType.Snare);
+            Console.WriteLine($"  tagliole viste dopo 1 s con A sopra: {Dove(t1)}");
+            if (!t1.Any(e => Dist(e.X, e.Z, PX, PZ) < 0.6f)) Male("la tagliola deve stare ai piedi di A, e A non la deve far scattare");
+            if (t1.Count > 0 && !(t1[0].Extra0 > 50f && t1[0].Extra0 <= 60f)) Male("la tagliola deve durare 60 s");
+
+            // 2. Una seconda tagliola, 3 m piu in la: la prima sparisce.
+            Tp(a, PX - 3f, PZ);
+            Atteso("seconda Tagliola", Prova(AbilityId.HunterSnareTrap), ErrorCode.None);
+            Aspetta(() => { var l = Visti(EntityType.Snare); return l.Count == 1 && Dist(l[0].X, l[0].Z, PX - 3f, PZ) < 0.6f; }, 3);
+            var t2 = Visti(EntityType.Snare);
+            Console.WriteLine($"  tagliole viste dopo la seconda: {Dove(t2)}");
+            if (t2.Count != 1 || Dist(t2[0].X, t2[0].Z, PX - 3f, PZ) >= 0.6f) Male("con la seconda tagliola deve restare solo quella nuova");
+
+            // 3. A si sposta; B (nemico) ci passa sopra: resta immobile e la tagliola si consuma.
+            Tp(a, PX + 3f, PZ);
+            Tp(b, PX - 3f, PZ);
+            bool presa = Aspetta(() => Visti(EntityType.Snare).Count == 0, 3);
+            string stB = Effetto(a, $"stato {b.Id}");
+            Console.WriteLine($"  B sulla tagliola: {stB}; tagliola consumata: {(presa ? "si" : "no")}");
+            if (!presa) Male("la tagliola presa da B deve sparire");
+            if (!stB.Contains("immobile")) Male("B preso dalla tagliola deve essere immobile");
+            var p0 = Pos(stB);
+            b.Cammina(1f, 0f, 0.5);
+            var p1 = Pos(Effetto(a, $"stato {b.Id}"));
+            float mosso = Dist(p0.X, p0.Z, p1.X, p1.Z);
+            Console.WriteLine($"  B prova a camminare 0,5 s: si sposta {mosso:F2} m (atteso 0)");
+            if (float.IsNaN(mosso) || mosso > 0.1f) Male("B immobile non deve muoversi");
+            Effetto(a, $"azzera {b.Id}");
+
+            // 4. Esca: un lupo a 2 m da A; l'esca 3 m dietro A (guardando verso
+            //    -X). A senza segno di prova: il lupo va dall'esca e non morde A
+            //    finche l'esca dura; finita, morde.
+            Tp(b, PX + 40f, PZ);
+            Tp(a, PX, PZ);
+            Piena(a);
+            a.Admin("spawn wolf");
+            EntityState lupo = null;
+            Aspetta(() => (lupo = a.PiuVicina(EntityType.Wolf, PX + 2f, PZ)) != null && Dist(lupo.X, lupo.Z, PX + 2f, PZ) < 1f, 5);
+            if (lupo == null || Dist(lupo.X, lupo.Z, PX + 2f, PZ) >= 1f) { Male("il lupo d'ufficio non e' comparso accanto ad A"); return false; }
+            idLupo = lupo.EntityId;
+            Atteso("Esca", Prova(AbilityId.HunterDecoy, yaw: 270f), ErrorCode.None);
+            a.ChiediAdmin("segnoprova no", "segno di prova: ");
+            var esche = Visti(EntityType.Lure);
+            Console.WriteLine($"  esche viste: {Dove(esche)} (attesa a ({PX - 3f}, {PZ}))");
+            if (esche.Count != 1 || Dist(esche[0].X, esche[0].Z, PX - 3f, PZ) > 0.6f) Male("l'esca deve stare 3 m davanti ad A");
+            float prima = Vita(a);
+            bool arrivato = Aspetta(() =>
+            {
+                EntityState l; lock (a.Mondo) a.Mondo.TryGetValue(idLupo, out l);
+                return l != null && Dist(l.X, l.Z, PX - 3f, PZ) < 2.1f;
+            }, 3);
+            Pausa(1.5);
+            float persoConEsca = prima - Vita(a);
+            Console.WriteLine($"  il lupo arriva all'esca: {(arrivato ? "si" : "no")}; A senza segno perde {persoConEsca} mentre l'esca dura (atteso 0)");
+            if (!arrivato) Male("il lupo adescato deve andare dall'esca");
+            if (persoConEsca != 0f) Male("il lupo adescato non deve mordere A");
+            bool finita = Aspetta(() => Visti(EntityType.Lure).Count == 0, 5);
+            bool morde = Aspetta(() => Vita(a) < prima, 6);
+            Console.WriteLine($"  esca finita: {(finita ? "si" : "no")}; poi il lupo morde A: {(morde ? "si" : "no")}");
+            if (!finita) Male("l'esca deve sparire dopo 5 s");
+            if (!morde) Male("finita l'esca il lupo deve tornare a mordere");
+        }
+        finally
+        {
+            a.ChiediAdmin("segnoprova si", "segno di prova: ");
+            if (idLupo != 0) a.Admin($"remove {idLupo}");
+            foreach (var s in new[] { a, b }) { s.Admin("setfaction 1"); s.Admin("effetto azzera"); s.Admin("abilita azzera"); s.Admin("clearinv"); s.Admin("sethp 1000"); }
+            Pausa(0.5);
+        }
+
+        if (ok) Console.WriteLine("  OK: la Tagliola tiene fermo il nemico che ci passa, l'Esca porta via le creature finche dura");
+        return ok;
+    }
     static readonly System.Globalization.CultureInfo Inv =
         System.Globalization.CultureInfo.InvariantCulture;
 }

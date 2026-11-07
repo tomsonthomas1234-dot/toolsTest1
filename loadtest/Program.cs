@@ -188,6 +188,7 @@ if (modoRegole)
         ("sfida e provocazione",    () => Regole.SfidaEProvocazione(tokens[1], tokens[0], host, port)),
         ("provocazione sui giocatori", () => Regole.ProvocazioneSuiGiocatori(tokens[1], tokens[0], host, port)),
         ("cacciatore",              () => Regole.Cacciatore(tokens[1], tokens[0], host, port)),
+        ("tagliola ed esca",        () => Regole.TagliolaEdEsca(tokens[1], tokens[0], host, port)),
         ("silenzio",                () => Regole.Silenzio(tokens[0], TokenBersaglio(), host, port)),
         ("bando",                   () => Regole.Bando(tokens[0], TokenBersaglio, host, port)),
     };
