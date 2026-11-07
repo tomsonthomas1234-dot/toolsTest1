@@ -8963,6 +8963,223 @@ static class Regole
         if (ok) Console.WriteLine("  OK: Letale, Ritmo, Colpo critico, Inseguitore, Tiro lungo e Scuoiatore fanno quello che dice il catalogo");
         return ok;
     }
+
+    /// <summary>
+    /// A14j5c: le passive dell'Esploratore con un effetto loro. A e
+    /// l'Esploratore (fazione 1, spada di pietra: il suo colpo fa 22), B il
+    /// nemico (fazione 2, stessa spada). Una passiva alla volta nello slot
+    /// passivo 0, l'altro vuoto: Fiato lungo, Sguscio, Imboscata, Evasione,
+    /// Viandante, Ombra.
+    /// </summary>
+    public static bool PassiveDellEsploratore(string tokenA, string tokenB, string host, int port)
+    {
+        Console.WriteLine("--- passive dell'esploratore: Fiato lungo, Sguscio, Imboscata, Evasione, Viandante, Ombra");
+        bool ok = true;
+        void Male(string m) { Console.WriteLine("  FALLITA: " + m); ok = false; }
+
+        using var a = new Sonda(tokenA, host, port);
+        using var b = new Sonda(tokenB, host, port);
+        if (!a.AttendiPronta() || !b.AttendiPronta())
+        { Console.WriteLine("  FALLITA: le sonde non sono entrate in gioco"); return false; }
+
+        const float PX = -150f, PZ = 250f;   // lo stesso punto delle prove delle armi
+        static byte[] P<T>(T v) => MessagePack.MessagePackSerializer.Serialize(v);
+        bool Aspetta(Func<bool> cosa, double secondi) =>
+            a.Attendi(() => { b.Attendi(() => true, 0.01); return cosa(); }, secondi);
+        void Pausa(double secondi) => Aspetta(() => false, secondi);
+        static string Visto(CommandResultMsg r) => r == null ? "nessuna risposta" : r.Success ? "riuscito" : "rifiutato " + r.ErrorCode;
+        float Vita(Sonda chi) => a.Stato(chi.Id).Vita;
+        void Tp(Sonda s, float x, float z)
+        {
+            s.Admin($"tp {x.ToString(Inv)} {z.ToString(Inv)}");
+            Aspetta(() => Dist(s.X, s.Z, x, z) < 0.5f, 6);
+            s.Cammina(0f, 0f, 0.1);
+        }
+        void Imposta(Sonda s, int hp)
+        {
+            s.Admin($"sethp {hp}");
+            Aspetta(() => Vita(s) == Math.Min(hp, 100), 3);
+            Pausa(0.3);
+        }
+        string Effetto(Sonda s, string riga) { Pausa(0.15); return s.ChiediAdmin("effetto " + riga, "effetto: ") ?? "(nessuna risposta)"; }
+        string StatoDiA() => Effetto(a, "stato");
+        static (float X, float Z) Pos(string riga)
+        {
+            int i = riga.IndexOf("pos=", StringComparison.Ordinal);
+            if (i < 0) return (float.NaN, float.NaN);
+            int f = riga.IndexOf(' ', i);
+            var p = (f < 0 ? riga[(i + 4)..] : riga[(i + 4)..f]).Split(',');
+            return p.Length == 2 && float.TryParse(p[0], System.Globalization.NumberStyles.Float, Inv, out var x)
+                   && float.TryParse(p[1], System.Globalization.NumberStyles.Float, Inv, out var z) ? (x, z) : (float.NaN, float.NaN);
+        }
+        // I secondi che restano del rallentamento del percento dato, NaN se non c'e.
+        static float SecondiRallentato(string riga, int percento)
+        {
+            string chiave = $"rallentato {percento}% ";
+            int i = riga.IndexOf(chiave, StringComparison.Ordinal);
+            if (i < 0) return float.NaN;
+            i += chiave.Length;
+            int f = riga.IndexOf('s', i);
+            return f > i && float.TryParse(riga[i..f], System.Globalization.NumberStyles.Float, Inv, out var v) ? v : float.NaN;
+        }
+        uint idComando = 860;
+        CommandResultMsg Comanda(CommandType tipo, byte[] dati)
+        {
+            uint n = idComando++;
+            Pausa(0.15);
+            a.Comando(n, tipo, dati);
+            CommandResultMsg r = null;
+            Aspetta(() => (r = a.Esito(n)) != null, 5);
+            return r;
+        }
+        void Passiva(AbilityId id)
+        {
+            foreach (var (slot, ab) in new[] { ((byte)0, id), ((byte)1, AbilityId.None) })
+            {
+                var r = Comanda(CommandType.SetAbilitySlot, P(new SetAbilitySlotCommand
+                    { Kind = AbilitySlotKind.ClassPassive, Slot = slot, Ability = ab }));
+                if (r == null || !r.Success) Male($"{(ab == AbilityId.None ? "svuotare" : ab.ToString())} nello slot passivo {slot}: {Visto(r)}");
+            }
+            Effetto(a, "azzera");   // si riparte senza accumuli e riposi
+            Pausa(0.3);
+        }
+        void Controlla(string cosa, float visto, float atteso)
+        {
+            Console.WriteLine($"  {cosa}: {visto} (atteso {atteso})");
+            if (visto != atteso) Male($"{cosa}: {visto} invece di {atteso}");
+        }
+        void Contiene(string cosa, string riga, string pezzo, bool deve = true)
+        {
+            Console.WriteLine($"  {cosa}: {riga}");
+            if (riga.Contains(pezzo) != deve) Male($"{cosa}: {(deve ? "manca" : "non doveva esserci")} '{pezzo}'");
+        }
+        // Un attacco base di chi sul piu vicino (vittima): quanto perde la vittima.
+        float Colpo(Sonda chi, Sonda vittima)
+        {
+            Imposta(vittima, 1000);
+            float prima = Vita(vittima);
+            chi.Colpisci(0.1);
+            Aspetta(() => Vita(vittima) < prima, 1.5);
+            Pausa(0.3);
+            return prima - Vita(vittima);
+        }
+        // Quanto cammina A verso +X in 1 s.
+        float Passo()
+        {
+            var p0 = Pos(StatoDiA());
+            a.Cammina(1f, 0f, 1.0);
+            a.Cammina(0f, 0f, 0.1);
+            Pausa(0.2);
+            var p1 = Pos(StatoDiA());
+            return Dist(p0.X, p0.Z, p1.X, p1.Z);
+        }
+        bool BVedeA() => b.Vede(a.Id);
+
+        try
+        {
+            a.Admin("setfaction 1"); b.Admin("setfaction 2");
+            foreach (var s in new[] { a, b })
+            {
+                s.Admin("clearinv"); s.Admin("abilita azzera"); s.Admin("effetto azzera");
+                s.Admin("give StoneSword 1");
+                Aspetta(() => s.Istanze.Values.Any(v => v.Tipo == ItemType.StoneSword), 5);
+                s.Dotazione(ItemType.StoneSword, ItemType.None, SideItemType.None);
+                s.Posizione(0);
+            }
+            Tp(a, PX, PZ); Tp(b, PX + 1.5f, PZ);
+            Pausa(0.15); Console.WriteLine($"  {a.ChiediAdmin("classe esploratore", "classe: ")}");
+            Pausa(0.15); Console.WriteLine($"  {a.ChiediAdmin("classe sblocca", "classe: ")}");
+            Pausa(0.15); a.Admin("abilita sblocca esploratore");
+            Pausa(0.4);
+            if (!Aspetta(BVedeA, 3)) Male("B deve vedere A prima della prova");
+
+            // 0. Senza passive: il colpo di A fa 22, anche da invisibile;
+            //    nessun "fiato".
+            Passiva(AbilityId.None);
+            Controlla("colpo di A senza passive", Colpo(a, b), 22f);
+            Effetto(a, "invisibile 5");
+            Controlla("colpo di A invisibile senza passive", Colpo(a, b), 22f);
+            Contiene("A senza passive", StatoDiA(), "fiato", deve: false);
+
+            // 1. Fiato lungo: il tempo fra un pasto e l'altro x1,25 (fame e
+            //    sete calano del 20% piu piano).
+            Passiva(AbilityId.ExplorerLongBreath);
+            Contiene("Fiato lungo, A", StatoDiA(), "fiato125");
+
+            // 2. Sguscio: un rallentamento di 4 s ne dura 2.
+            Passiva(AbilityId.None);
+            float senza = SecondiRallentato(Effetto(a, "rallenta 50 4"), 50);
+            Effetto(a, "azzera");
+            Passiva(AbilityId.ExplorerSlip);
+            float con = SecondiRallentato(Effetto(a, "rallenta 50 4"), 50);
+            Effetto(a, "azzera");
+            Console.WriteLine($"  Sguscio, rallentamento di 4 s: {senza} s senza, {con} s con (attesi circa 4 e 2)");
+            if (!(senza > 3.5f && senza <= 4f)) Male("senza Sguscio il rallentamento deve durare 4 s");
+            if (!(con > 1.5f && con <= 2f)) Male("con Sguscio il rallentamento deve durare la meta");
+
+            // 3. Imboscata: visto 22; da invisibile 22 x 1,4 = 30,8 -> 31; di
+            //    nuovo invisibile subito dopo, il riposo di 5 s: 22.
+            Passiva(AbilityId.ExplorerAmbush);
+            Controlla("Imboscata, A visto", Colpo(a, b), 22f);
+            Effetto(a, "invisibile 5");
+            Controlla("Imboscata, A invisibile", Colpo(a, b), 31f);
+            Contiene("Imboscata, A dopo", StatoDiA(), "imboscata-riposo");
+            Effetto(a, "invisibile 5");
+            Controlla("Imboscata, A invisibile subito dopo", Colpo(a, b), 22f);
+            Effetto(a, "azzera");
+
+            // 4. Evasione: sette colpi di B su A, sei da 22 e il settimo manca.
+            Passiva(AbilityId.ExplorerEvasion);
+            var colpi = new List<float>();
+            for (int i = 0; i < 7; i++) colpi.Add(Colpo(b, a));
+            Console.WriteLine($"  Evasione, sette colpi di B: {string.Join(" ", colpi)} (attesi sei da 22 e il settimo da 0)");
+            if (colpi.Take(6).Any(c => c != 22f) || colpi[6] != 0f) Male("con Evasione il settimo colpo ricevuto deve mancare, gli altri no");
+
+            // 5. Viandante: subito dopo un colpo il passo e quello normale;
+            //    dopo 5 s senza combattere +10%.
+            Passiva(AbilityId.ExplorerWayfarer);
+            Colpo(a, b);
+            Contiene("Viandante, A subito dopo un colpo", StatoDiA(), "viandante", deve: false);
+            Tp(b, PX, PZ + 10f);
+            float passoSenza = Passo();
+            Tp(a, PX, PZ);
+            Pausa(5.5);
+            Contiene("Viandante, A dopo 5 s senza combattere", StatoDiA(), "viandante+10");
+            float passoCon = Passo();
+            float rapporto = passoSenza > 0f ? passoCon / passoSenza : 0f;
+            Console.WriteLine($"  Viandante, passo in 1 s: {passoSenza:F2} m dopo il colpo, {passoCon:F2} m dopo 5 s (rapporto {rapporto:F2}, atteso circa 1,10)");
+            if (!(rapporto > 1.04f && rapporto < 1.18f)) Male("con Viandante il passo dopo 5 s senza combattere deve crescere del 10% circa");
+            Tp(a, PX, PZ); Tp(b, PX + 1.5f, PZ);
+
+            // 6. Ombra: fermo da poco ancora visibile; dopo 3 s invisibile e B
+            //    non lo vede; un passo lo rompe; di nuovo fermo torna
+            //    invisibile; colpire lo rompe.
+            Passiva(AbilityId.ExplorerShadow);
+            Pausa(1.2);
+            Contiene("Ombra, A fermo da poco", StatoDiA(), "invisibile", deve: false);
+            Pausa(2.3);
+            Contiene("Ombra, A fermo da piu di 3 s", StatoDiA(), "(si rompe muovendosi)");
+            if (!Aspetta(() => !BVedeA(), 3)) Male("con Ombra, fermo da 3 s, A non deve piu arrivare a B");
+            a.Cammina(1f, 0f, 0.3);
+            a.Cammina(0f, 0f, 0.1);
+            if (!Aspetta(BVedeA, 2)) Male("con Ombra, muovendosi A deve tornare visibile");
+            Contiene("Ombra, A dopo un passo", StatoDiA(), "invisibile", deve: false);
+            Tp(a, PX, PZ); Tp(b, PX + 1.5f, PZ);
+            if (!Aspetta(() => !BVedeA(), 5)) Male("con Ombra, di nuovo fermo, A deve tornare invisibile");
+            Colpo(a, b);
+            if (!Aspetta(BVedeA, 1)) Male("con Ombra, colpendo A deve tornare visibile");
+        }
+        finally
+        {
+            foreach (var s in new[] { a, b }) { s.Admin("setfaction 1"); s.Admin("effetto azzera"); s.Admin("abilita azzera"); s.Admin("clearinv"); s.Admin("sethp 1000"); }
+            a.Dotazione(ItemType.None, ItemType.None, SideItemType.None);
+            b.Dotazione(ItemType.None, ItemType.None, SideItemType.None);
+            Pausa(0.5);
+        }
+
+        if (ok) Console.WriteLine("  OK: Fiato lungo, Sguscio, Imboscata, Evasione, Viandante e Ombra fanno quello che dice il catalogo");
+        return ok;
+    }
     static readonly System.Globalization.CultureInfo Inv =
         System.Globalization.CultureInfo.InvariantCulture;
 }
