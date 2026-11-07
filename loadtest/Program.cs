@@ -195,6 +195,7 @@ if (modoRegole)
         ("fumo e sosia",            () => Regole.FumoESosia(tokens[1], tokens[0], host, port)),
         ("passive dell'esploratore", () => Regole.PassiveDellEsploratore(tokens[1], tokens[0], host, port)),
         ("mago",                    () => Regole.Mago(tokens[1], tokens[0], host, port)),
+        ("discepolo",               () => Regole.Discepolo(tokens[1], tokens[0], host, port)),
         ("silenzio",                () => Regole.Silenzio(tokens[0], TokenBersaglio(), host, port)),
         ("bando",                   () => Regole.Bando(tokens[0], TokenBersaglio, host, port)),
     };

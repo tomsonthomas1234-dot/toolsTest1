@@ -9377,6 +9377,234 @@ static class Regole
         if (ok) Console.WriteLine("  OK: Dardo magico, Raggelare, Scudo magico, Scintilla, Spinta arcana, Arcano e Arma incantata fanno quello che dice il catalogo");
         return ok;
     }
+
+    /// <summary>
+    /// A14j7a: le attive del Discepolo dei Radicati. A e il Discepolo (con
+    /// "evolvi discepolo"), B un alleato della stessa fazione; a mani vuote,
+    /// passive tolte (Vigore cambierebbe la vita massima). Salti e
+    /// teletrasporti guardano la posizione sul server, le cure la vita, i
+    /// passi in piu la riga degli effetti.
+    /// </summary>
+    public static bool Discepolo(string tokenA, string tokenB, string host, int port)
+    {
+        Console.WriteLine("--- discepolo: Balzo del cervo, Corteccia, Linfa, Sentiero di muschio, Passo fra gli alberi, Cura, Richiamo, Volo del seme, Cura della foresta, Sentiero dei Radicati");
+        bool ok = true;
+        void Male(string m) { Console.WriteLine("  FALLITA: " + m); ok = false; }
+
+        using var a = new Sonda(tokenA, host, port);
+        using var b = new Sonda(tokenB, host, port);
+        if (!a.AttendiPronta() || !b.AttendiPronta())
+        { Console.WriteLine("  FALLITA: le sonde non sono entrate in gioco"); return false; }
+
+        const float PX = -150f, PZ = 250f;   // lo stesso punto delle prove delle armi
+        static byte[] P<T>(T v) => MessagePack.MessagePackSerializer.Serialize(v);
+        bool Aspetta(Func<bool> cosa, double secondi) =>
+            a.Attendi(() => { b.Attendi(() => true, 0.01); return cosa(); }, secondi);
+        void Pausa(double secondi) => Aspetta(() => false, secondi);
+        static string Visto(CommandResultMsg r) => r == null ? "nessuna risposta" : r.Success ? "riuscito" : "rifiutato " + r.ErrorCode;
+        float Vita(Sonda chi) => a.Stato(chi.Id).Vita;
+        void Tp(Sonda s, float x, float z)
+        {
+            s.Admin($"tp {x.ToString(Inv)} {z.ToString(Inv)}");
+            Aspetta(() => Dist(s.X, s.Z, x, z) < 0.5f, 6);
+            s.Cammina(0f, 0f, 0.1);
+        }
+        void Piena(params Sonda[] chi)
+        {
+            foreach (var s in chi) s.Admin("sethp 1000");
+            Aspetta(() => chi.All(s => Vita(s) >= 100f), 3);
+            Pausa(0.3);
+        }
+        void Ferita(Sonda s, int vita)
+        {
+            s.Admin($"sethp {vita}");
+            Aspetta(() => Vita(s) <= vita, 3);
+            Pausa(0.2);
+        }
+        string Effetto(Sonda s, string riga) { Pausa(0.15); return s.ChiediAdmin("effetto " + riga, "effetto: ") ?? "(nessuna risposta)"; }
+        string StatoDi(Sonda s) => Effetto(a, s == a ? "stato" : $"stato {s.Id}");
+        static (float X, float Z) Pos(string riga)
+        {
+            int i = riga.IndexOf("pos=", StringComparison.Ordinal);
+            if (i < 0) return (float.NaN, float.NaN);
+            int f = riga.IndexOf(' ', i);
+            var p = (f < 0 ? riga[(i + 4)..] : riga[(i + 4)..f]).Split(',');
+            return p.Length == 2 && float.TryParse(p[0], System.Globalization.NumberStyles.Float, Inv, out var x)
+                   && float.TryParse(p[1], System.Globalization.NumberStyles.Float, Inv, out var z) ? (x, z) : (float.NaN, float.NaN);
+        }
+        void Dove(string cosa, Sonda s, float x, float z, float margine = 0.4f)
+        {
+            var (px, pz) = Pos(StatoDi(s));
+            Console.WriteLine($"  {cosa}: ({px:F2}, {pz:F2}) (atteso {x}, {z})");
+            if (float.IsNaN(px) || Dist(px, pz, x, z) > margine) Male($"{cosa}: ({px:F2}, {pz:F2}) invece di ({x}, {z})");
+        }
+        uint idComando = 780;
+        CommandResultMsg Comanda(CommandType tipo, byte[] dati)
+        {
+            uint n = idComando++;
+            Pausa(0.15);
+            a.Comando(n, tipo, dati);
+            CommandResultMsg r = null;
+            Aspetta(() => (r = a.Esito(n)) != null, 5);
+            return r;
+        }
+        // Mette l'attiva nel primo slot attivo, azzera le ricariche e la usa
+        // guardando verso +X, col punto (tx, tz) e il bersaglio se ci sono.
+        CommandResultMsg Prova(AbilityId id, float tx = 0f, float tz = 0f, ulong chi = 0)
+        {
+            var r = Comanda(CommandType.SetAbilitySlot, P(new SetAbilitySlotCommand
+                { Kind = AbilitySlotKind.ClassActive, Slot = 0, Ability = id }));
+            if (r == null || !r.Success) Male($"{id} nello slot: {Visto(r)}");
+            Pausa(0.15); a.Admin("ricarica");
+            r = Comanda(CommandType.UseAbility, P(new UseAbilityCommand
+                { Ability = id, Yaw = 90f, TargetX = tx, TargetZ = tz, TargetEntityId = chi }));
+            Pausa(0.2);
+            return r;
+        }
+        void Atteso(string cosa, CommandResultMsg r, ErrorCode atteso)
+        {
+            bool giusto = r != null && (atteso == ErrorCode.None ? r.Success : !r.Success && r.ErrorCode == atteso);
+            Console.WriteLine($"  {cosa}: {Visto(r)}{(giusto ? "" : $" (atteso {(atteso == ErrorCode.None ? "riuscito" : atteso.ToString())})")}");
+            if (!giusto) Male($"{cosa}: atteso {(atteso == ErrorCode.None ? "riuscito" : "rifiutato " + atteso)}");
+        }
+        void Pulisci(params Sonda[] chi) { foreach (var s in chi) Effetto(a, $"azzera {s.Id}"); }
+        void Contiene(string cosa, string riga, string pezzo, bool deve = true)
+        {
+            Console.WriteLine($"  {cosa}: {riga}");
+            if (riga.Contains(pezzo) != deve) Male($"{cosa}: {(deve ? "manca" : "non doveva esserci")} '{pezzo}'");
+        }
+        // La vita dopo una cura nel tempo: la rigenerazione normale (un punto
+        // ogni 10 s) puo cadere nella finestra, quindi si accetta un punto in piu.
+        void VitaFra(string cosa, Sonda s, float atteso, double secondi)
+        {
+            Aspetta(() => Vita(s) >= atteso, secondi);
+            Pausa(0.4);
+            float v = Vita(s);
+            Console.WriteLine($"  {cosa}: {v} (atteso {atteso})");
+            if (v < atteso || v > atteso + 1f) Male($"{cosa}: {v} invece di {atteso}");
+        }
+
+        try
+        {
+            a.Admin("setfaction 1"); b.Admin("setfaction 1");
+            foreach (var s in new[] { a, b })
+            {
+                s.Admin("clearinv"); s.Admin("abilita azzera"); s.Admin("effetto azzera");
+                s.Dotazione(ItemType.None, ItemType.None, SideItemType.None);
+                s.Posizione(0);
+            }
+            Tp(a, PX, PZ); Tp(b, PX, PZ + 3f);
+            Pausa(0.15); Console.WriteLine($"  {a.ChiediAdmin("classe mago", "classe: ")}");
+            Pausa(0.15); Console.WriteLine($"  {a.ChiediAdmin("evolvi discepolo", "evolvi: ")}");
+            Pausa(0.15); a.Admin("abilita sblocca discepolo");
+            Pausa(0.4);
+            foreach (var slot in new byte[] { 0, 1 })
+            {
+                var r = Comanda(CommandType.SetAbilitySlot, P(new SetAbilitySlotCommand
+                    { Kind = AbilitySlotKind.ClassPassive, Slot = slot, Ability = AbilityId.None }));
+                if (r == null || !r.Success) Male($"svuotare lo slot passivo {slot}: {Visto(r)}");
+            }
+            Pausa(0.3);
+            Piena(a, b);
+
+            // 1. Balzo del cervo: 6 m avanti (verso +X).
+            Atteso("Balzo del cervo", Prova(AbilityId.RootedStagLeap), ErrorCode.None);
+            Dove("Balzo del cervo, A", a, PX + 6f, PZ);
+            Tp(a, PX, PZ);
+
+            // 2. Passo fra gli alberi verso un punto a 20 m: si ferma a 8 m.
+            Atteso("Passo fra gli alberi", Prova(AbilityId.RootedTreeStep, PX + 20f, PZ), ErrorCode.None);
+            Dove("Passo fra gli alberi, A", a, PX + 8f, PZ);
+            Tp(a, PX, PZ);
+
+            // 3. Corteccia: vita massima 110 e vita 110; tolta, di nuovo 100.
+            Atteso("Corteccia", Prova(AbilityId.RootedBark), ErrorCode.None);
+            Aspetta(() => Vita(a) >= 110f, 2);
+            Console.WriteLine($"  Corteccia, vita di A: {Vita(a)} (atteso 110)");
+            if (Vita(a) != 110f) Male($"Corteccia: vita {Vita(a)} invece di 110");
+            Contiene("Corteccia, A", StatoDi(a), "MaxHp +10%");
+            Pulisci(a);
+            Aspetta(() => Vita(a) <= 100f, 2);
+            Console.WriteLine($"  Corteccia tolta, vita di A: {Vita(a)} (atteso 100)");
+            if (Vita(a) != 100f) Male($"Corteccia tolta: vita {Vita(a)} invece di 100");
+
+            // 4. Linfa: su B (50) +15 in 3 s; tutti pieni non parte; senza
+            //    bersaglio cura A (80 -> 95); B a 20 m non si raggiunge, e A
+            //    pieno non si cura.
+            Ferita(b, 50);
+            Atteso("Linfa su B", Prova(AbilityId.RootedSap, chi: b.Id), ErrorCode.None);
+            VitaFra("Linfa, vita di B", b, 65f, 4);
+            Piena(a, b);
+            Atteso("Linfa con tutti pieni", Prova(AbilityId.RootedSap, chi: b.Id), ErrorCode.AbilityNotUsable);
+            Ferita(a, 80);
+            Atteso("Linfa senza bersaglio, A ferito", Prova(AbilityId.RootedSap), ErrorCode.None);
+            VitaFra("Linfa, vita di A", a, 95f, 4);
+            Piena(a);
+            Tp(b, PX, PZ + 20f); Ferita(b, 50);
+            Atteso("Linfa su B a 20 m, A pieno", Prova(AbilityId.RootedSap, chi: b.Id), ErrorCode.AbilityNotUsable);
+            Tp(b, PX, PZ + 3f);
+
+            // 5. Cura: su B (50) +30 in 3 s.
+            Ferita(b, 50);
+            Atteso("Cura su B", Prova(AbilityId.RootedHeal, chi: b.Id), ErrorCode.None);
+            VitaFra("Cura, vita di B", b, 80f, 4);
+
+            // 6. Cura della foresta: A e B a 50, +25 tutti e due in 4 s; tutti
+            //    pieni non parte.
+            Ferita(a, 50); Ferita(b, 50);
+            Atteso("Cura della foresta", Prova(AbilityId.RootedForestHeal), ErrorCode.None);
+            VitaFra("Cura della foresta, vita di A", a, 75f, 5);
+            VitaFra("Cura della foresta, vita di B", b, 75f, 2);
+            Piena(a, b);
+            Atteso("Cura della foresta con tutti pieni", Prova(AbilityId.RootedForestHeal), ErrorCode.AbilityNotUsable);
+
+            // 7. Richiamo: B a 12 m arriva a 1,5 m da A; a 20 m non parte.
+            Tp(b, PX + 12f, PZ);
+            Atteso("Richiamo di B a 12 m", Prova(AbilityId.RootedSummon, chi: b.Id), ErrorCode.None);
+            Dove("Richiamo, B", b, PX + 1.5f, PZ);
+            Tp(b, PX + 20f, PZ);
+            Atteso("Richiamo di B a 20 m", Prova(AbilityId.RootedSummon, chi: b.Id), ErrorCode.AbilityNotUsable);
+
+            // 8. Volo del seme verso un punto a 15 m: A ci arriva, B vicino
+            //    all'atterraggio e A prendono +20% velocita.
+            Tp(b, PX + 15f, PZ + 1f);
+            Atteso("Volo del seme", Prova(AbilityId.RootedSeedFlight, PX + 15f, PZ), ErrorCode.None);
+            Dove("Volo del seme, A", a, PX + 15f, PZ);
+            Contiene("Volo del seme, B", StatoDi(b), "MoveSpeed +20%");
+            Contiene("Volo del seme, A", StatoDi(a), "MoveSpeed +20%");
+            Pulisci(a, b);
+            Tp(a, PX, PZ);
+
+            // 9. Sentiero di muschio: B lontano dalla scia non prende niente;
+            //    sulla scia +20% velocita; dopo 5 s la scia non c'e piu.
+            Tp(b, PX, PZ + 10f);
+            Atteso("Sentiero di muschio", Prova(AbilityId.RootedMossTrail), ErrorCode.None);
+            a.Cammina(1f, 0f, 1.0);
+            Contiene("Sentiero di muschio, A", StatoDi(a), "discepolo=muschio+20");
+            Contiene("Sentiero di muschio, B lontano", StatoDi(b), "Sentiero di muschio", deve: false);
+            Tp(b, PX + 0.5f, PZ);
+            Pausa(0.3);
+            Contiene("Sentiero di muschio, B sulla scia", StatoDi(b), "MoveSpeed +20%");
+            Pausa(4.5);
+            Contiene("Sentiero di muschio finito, A", StatoDi(a), "discepolo=", deve: false);
+            Pulisci(a, b);
+
+            // 10. Sentiero dei Radicati: A va a un punto a 20 m e B, a 2 m da
+            //     lui, arriva con lui tenendo la sua posizione.
+            Tp(a, PX, PZ); Tp(b, PX, PZ + 2f);
+            Atteso("Sentiero dei Radicati", Prova(AbilityId.RootedPath, PX + 20f, PZ), ErrorCode.None);
+            Dove("Sentiero dei Radicati, A", a, PX + 20f, PZ);
+            Dove("Sentiero dei Radicati, B", b, PX + 20f, PZ + 2f);
+        }
+        finally
+        {
+            foreach (var s in new[] { a, b }) { s.Admin("setfaction 1"); s.Admin("effetto azzera"); s.Admin("abilita azzera"); s.Admin("clearinv"); s.Admin("sethp 1000"); }
+            Pausa(0.5);
+        }
+
+        if (ok) Console.WriteLine("  OK: le dieci attive del Discepolo dei Radicati fanno quello che dice il catalogo");
+        return ok;
+    }
     static readonly System.Globalization.CultureInfo Inv =
         System.Globalization.CultureInfo.InvariantCulture;
 }
