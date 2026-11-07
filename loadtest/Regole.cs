@@ -9605,6 +9605,236 @@ static class Regole
         if (ok) Console.WriteLine("  OK: le dieci attive del Discepolo dei Radicati fanno quello che dice il catalogo");
         return ok;
     }
+
+    /// <summary>
+    /// A14j7b: le passive del Discepolo dei Radicati con un effetto loro. A e
+    /// il Discepolo (con "evolvi discepolo"), B un alleato della stessa
+    /// fazione; per Radici profonde B diventa un Mago nemico che spinge A con
+    /// la Spinta arcana. A mani vuote; due passive alla volta negli slot.
+    /// </summary>
+    public static bool PassiveDelDiscepolo(string tokenA, string tokenB, string host, int port)
+    {
+        Console.WriteLine("--- passive del discepolo: Mano verde, Corrente, Fioritura, Respiro della foresta, Radici profonde, Corsa infinita");
+        bool ok = true;
+        void Male(string m) { Console.WriteLine("  FALLITA: " + m); ok = false; }
+
+        using var a = new Sonda(tokenA, host, port);
+        using var b = new Sonda(tokenB, host, port);
+        if (!a.AttendiPronta() || !b.AttendiPronta())
+        { Console.WriteLine("  FALLITA: le sonde non sono entrate in gioco"); return false; }
+
+        const float PX = -150f, PZ = 250f;   // lo stesso punto delle prove delle armi
+        static byte[] P<T>(T v) => MessagePack.MessagePackSerializer.Serialize(v);
+        bool Aspetta(Func<bool> cosa, double secondi) =>
+            a.Attendi(() => { b.Attendi(() => true, 0.01); return cosa(); }, secondi);
+        void Pausa(double secondi) => Aspetta(() => false, secondi);
+        static string Visto(CommandResultMsg r) => r == null ? "nessuna risposta" : r.Success ? "riuscito" : "rifiutato " + r.ErrorCode;
+        float Vita(Sonda chi) => a.Stato(chi.Id).Vita;
+        void Tp(Sonda s, float x, float z)
+        {
+            s.Admin($"tp {x.ToString(Inv)} {z.ToString(Inv)}");
+            Aspetta(() => Dist(s.X, s.Z, x, z) < 0.5f, 6);
+            s.Cammina(0f, 0f, 0.1);
+        }
+        void Piena(params Sonda[] chi)
+        {
+            foreach (var s in chi) s.Admin("sethp 1000");
+            Aspetta(() => chi.All(s => Vita(s) >= 100f), 3);
+            Pausa(0.3);
+        }
+        void Ferita(Sonda s, int vita)
+        {
+            s.Admin($"sethp {vita}");
+            Aspetta(() => Vita(s) <= vita, 3);
+            Pausa(0.2);
+        }
+        string Effetto(Sonda s, string riga) { Pausa(0.15); return s.ChiediAdmin("effetto " + riga, "effetto: ") ?? "(nessuna risposta)"; }
+        string StatoDi(Sonda s) => Effetto(a, s == a ? "stato" : $"stato {s.Id}");
+        static (float X, float Z) Pos(string riga)
+        {
+            int i = riga.IndexOf("pos=", StringComparison.Ordinal);
+            if (i < 0) return (float.NaN, float.NaN);
+            int f = riga.IndexOf(' ', i);
+            var p = (f < 0 ? riga[(i + 4)..] : riga[(i + 4)..f]).Split(',');
+            return p.Length == 2 && float.TryParse(p[0], System.Globalization.NumberStyles.Float, Inv, out var x)
+                   && float.TryParse(p[1], System.Globalization.NumberStyles.Float, Inv, out var z) ? (x, z) : (float.NaN, float.NaN);
+        }
+        uint idComando = 940;
+        CommandResultMsg ComandaDi(Sonda chi, CommandType tipo, byte[] dati)
+        {
+            uint n = idComando++;
+            Pausa(0.15);
+            chi.Comando(n, tipo, dati);
+            CommandResultMsg r = null;
+            Aspetta(() => (r = chi.Esito(n)) != null, 5);
+            return r;
+        }
+        CommandResultMsg Comanda(CommandType tipo, byte[] dati) => ComandaDi(a, tipo, dati);
+        // Mette l'attiva nel primo slot attivo di chi, azzera le ricariche e la
+        // usa guardando verso +X, col bersaglio se c'e.
+        CommandResultMsg ProvaDi(Sonda chi, AbilityId id, ulong bersaglio = 0)
+        {
+            var r = ComandaDi(chi, CommandType.SetAbilitySlot, P(new SetAbilitySlotCommand
+                { Kind = AbilitySlotKind.ClassActive, Slot = 0, Ability = id }));
+            if (r == null || !r.Success) Male($"{id} nello slot: {Visto(r)}");
+            Pausa(0.15); chi.Admin("ricarica");
+            r = ComandaDi(chi, CommandType.UseAbility, P(new UseAbilityCommand
+                { Ability = id, Yaw = 90f, TargetEntityId = bersaglio }));
+            Pausa(0.2);
+            return r;
+        }
+        CommandResultMsg Prova(AbilityId id, ulong chi = 0) => ProvaDi(a, id, chi);
+        void Passive(AbilityId p0, AbilityId p1 = AbilityId.None)
+        {
+            foreach (var (slot, ab) in new[] { ((byte)0, p0), ((byte)1, p1) })
+            {
+                var r = Comanda(CommandType.SetAbilitySlot, P(new SetAbilitySlotCommand
+                    { Kind = AbilitySlotKind.ClassPassive, Slot = slot, Ability = ab }));
+                if (r == null || !r.Success) Male($"{(ab == AbilityId.None ? "svuotare" : ab.ToString())} nello slot passivo {slot}: {Visto(r)}");
+            }
+            Pausa(0.3);
+        }
+        void Atteso(string cosa, CommandResultMsg r, ErrorCode atteso)
+        {
+            bool giusto = r != null && (atteso == ErrorCode.None ? r.Success : !r.Success && r.ErrorCode == atteso);
+            Console.WriteLine($"  {cosa}: {Visto(r)}{(giusto ? "" : $" (atteso {(atteso == ErrorCode.None ? "riuscito" : atteso.ToString())})")}");
+            if (!giusto) Male($"{cosa}: atteso {(atteso == ErrorCode.None ? "riuscito" : "rifiutato " + atteso)}");
+        }
+        void Pulisci(params Sonda[] chi) { foreach (var s in chi) Effetto(a, $"azzera {s.Id}"); }
+        void Contiene(string cosa, string riga, string pezzo, bool deve = true)
+        {
+            Console.WriteLine($"  {cosa}: {riga}");
+            if (riga.Contains(pezzo) != deve) Male($"{cosa}: {(deve ? "manca" : "non doveva esserci")} '{pezzo}'");
+        }
+        void VitaFra(string cosa, Sonda s, float atteso, double secondi)
+        {
+            Aspetta(() => Vita(s) >= atteso, secondi);
+            Pausa(0.4);
+            float v = Vita(s);
+            Console.WriteLine($"  {cosa}: {v} (atteso {atteso})");
+            if (v < atteso || v > atteso + 1f) Male($"{cosa}: {v} invece di {atteso}");
+        }
+        int MsRicarica(AbilityId id) => a.Abilita?.Cooldowns?.FirstOrDefault(x => x.Id == id)?.MsLeft ?? -1;
+        void Ricarica(string cosa, AbilityId id, int minimo, int massimo)
+        {
+            int ms = -1;
+            Aspetta(() => (ms = MsRicarica(id)) > 0, 2);
+            Console.WriteLine($"  {cosa}: {ms} ms (atteso fra {minimo} e {massimo})");
+            if (ms < minimo || ms > massimo) Male($"{cosa}: {ms} ms invece di {minimo}-{massimo}");
+        }
+
+        try
+        {
+            a.Admin("setfaction 1"); b.Admin("setfaction 1");
+            foreach (var s in new[] { a, b })
+            {
+                s.Admin("clearinv"); s.Admin("abilita azzera"); s.Admin("effetto azzera");
+                s.Dotazione(ItemType.None, ItemType.None, SideItemType.None);
+                s.Posizione(0);
+            }
+            Tp(a, PX, PZ); Tp(b, PX, PZ + 3f);
+            Pausa(0.15); Console.WriteLine($"  {a.ChiediAdmin("classe mago", "classe: ")}");
+            Pausa(0.15); Console.WriteLine($"  {a.ChiediAdmin("evolvi discepolo", "evolvi: ")}");
+            Pausa(0.15); a.Admin("abilita sblocca discepolo");
+            Pausa(0.4);
+            Passive(AbilityId.None);
+            Piena(a, b);
+
+            // 0. Senza passive: Linfa su B (50) +15, e B non corre di piu.
+            Ferita(b, 50);
+            Atteso("Linfa senza passive", Prova(AbilityId.RootedSap, b.Id), ErrorCode.None);
+            Contiene("senza Corrente, B", StatoDi(b), "Corrente", deve: false);
+            VitaFra("Linfa senza passive, vita di B", b, 65f, 4);
+            Pulisci(b);
+
+            // 1. Mano verde e Corrente: Linfa su B (50) +18 (15 x 1,2), e B
+            //    +15% velocita per 3 s.
+            Passive(AbilityId.RootedGreenHand, AbilityId.RootedCurrent);
+            Contiene("passive in slot, A", StatoDi(a), "radicati=manoverde+20,corrente+15");
+            Ferita(b, 50);
+            Atteso("Linfa con Mano verde e Corrente", Prova(AbilityId.RootedSap, b.Id), ErrorCode.None);
+            Contiene("Corrente, B", StatoDi(b), "MoveSpeed +15%");
+            VitaFra("Linfa con Mano verde, vita di B", b, 68f, 4);
+            Pausa(0.5);
+            Contiene("Corrente dopo 3 s, B", StatoDi(b), "Corrente", deve: false);
+            Pulisci(b);
+
+            // 2. Fioritura: senza, Cura su B pieno non parte; con, parte e B ha
+            //    una barriera di meta della cura (30% di 100 = 30, meta 15).
+            Passive(AbilityId.None);
+            Piena(a, b);
+            Atteso("Cura su B pieno senza Fioritura", Prova(AbilityId.RootedHeal, b.Id), ErrorCode.AbilityNotUsable);
+            Passive(AbilityId.RootedBloom);
+            Atteso("Cura su B pieno con Fioritura", Prova(AbilityId.RootedHeal, b.Id), ErrorCode.None);
+            Contiene("Fioritura, B", StatoDi(b), "barriera 15 ");
+            Pulisci(b);
+
+            // 3. Respiro della foresta: A a 50, 1 punto ogni 3 s (in 7 s, 2 o 3).
+            //    Senza la passiva nessun punto (le sonde non rigenerano, P4).
+            Passive(AbilityId.None);
+            Ferita(a, 50);
+            Pausa(4);
+            Console.WriteLine($"  senza Respiro, vita di A dopo 4 s: {Vita(a)} (atteso 50)");
+            if (Vita(a) != 50f) Male($"senza Respiro la vita di A deve restare 50, e {Vita(a)}");
+            Passive(AbilityId.RootedForestBreath);
+            Ferita(a, 50);
+            Pausa(7);
+            float respiro = Vita(a);
+            Console.WriteLine($"  Respiro della foresta, vita di A dopo 7 s: {respiro} (atteso 52 o 53)");
+            if (respiro < 52f || respiro > 53f) Male($"Respiro della foresta: vita {respiro} invece di 52-53");
+            Piena(a);
+
+            // 4. Radici profonde: un rallentamento del 50% diventa del 30%; la
+            //    Spinta arcana di B (Mago nemico) porta A a 2,4 m invece di 4.
+            Passive(AbilityId.None);
+            Contiene("rallentamento senza Radici, A", Effetto(a, "rallenta 50 4"), "rallentato 50% ");
+            Pulisci(a);
+            Passive(AbilityId.RootedDeepRoots);
+            Contiene("rallentamento con Radici, A", Effetto(a, "rallenta 50 4"), "rallentato 30% ");
+            Pulisci(a);
+            b.Admin("setfaction 2");
+            Pausa(0.15); Console.WriteLine($"  {b.ChiediAdmin("classe mago", "classe: ")}");
+            Pausa(0.15); Console.WriteLine($"  {b.ChiediAdmin("classe sblocca", "classe: ")}");
+            Pausa(0.15); b.Admin("abilita sblocca mago");
+            Pausa(0.4);
+            Tp(b, PX - 2f, PZ); Tp(a, PX, PZ);
+            Atteso("Spinta arcana di B su A con Radici", ProvaDi(b, AbilityId.MageArcanePush), ErrorCode.None);
+            var (ax, az) = Pos(StatoDi(a));
+            Console.WriteLine($"  Radici profonde, A spinto a ({ax:F2}, {az:F2}) (atteso {PX + 2.4f}, {PZ})");
+            if (float.IsNaN(ax) || Dist(ax, az, PX + 2.4f, PZ) > 0.4f) Male("con Radici profonde la Spinta arcana deve portare A a 4,4 m da B");
+            Passive(AbilityId.None);
+            Tp(a, PX, PZ);
+            Atteso("Spinta arcana di B su A senza Radici", ProvaDi(b, AbilityId.MageArcanePush), ErrorCode.None);
+            (ax, az) = Pos(StatoDi(a));
+            Console.WriteLine($"  senza Radici, A spinto a ({ax:F2}, {az:F2}) (atteso {PX + 4f}, {PZ})");
+            if (float.IsNaN(ax) || Dist(ax, az, PX + 4f, PZ) > 0.4f) Male("senza Radici profonde la Spinta arcana deve portare A a 6 m da B");
+            b.Admin("abilita azzera"); b.Admin("setfaction 1");
+            Pulisci(a, b);
+            Tp(a, PX, PZ); Tp(b, PX, PZ + 3f);
+
+            // 5. Corsa infinita: Balzo del cervo (12 s) ricarica in 8,4 s; Linfa
+            //    (20 s), che non e di movimento, resta 20.
+            Passive(AbilityId.None);
+            Atteso("Balzo del cervo senza Corsa infinita", Prova(AbilityId.RootedStagLeap), ErrorCode.None);
+            Ricarica("Balzo del cervo senza Corsa infinita", AbilityId.RootedStagLeap, 10500, 12100);
+            Tp(a, PX, PZ);
+            Passive(AbilityId.RootedEndlessRun);
+            Atteso("Balzo del cervo con Corsa infinita", Prova(AbilityId.RootedStagLeap), ErrorCode.None);
+            Ricarica("Balzo del cervo con Corsa infinita", AbilityId.RootedStagLeap, 7000, 8500);
+            Tp(a, PX, PZ);
+            Ferita(a, 50);
+            Atteso("Linfa con Corsa infinita", Prova(AbilityId.RootedSap), ErrorCode.None);
+            Ricarica("Linfa con Corsa infinita", AbilityId.RootedSap, 18500, 20100);
+        }
+        finally
+        {
+            foreach (var s in new[] { a, b }) { s.Admin("setfaction 1"); s.Admin("effetto azzera"); s.Admin("abilita azzera"); s.Admin("clearinv"); s.Admin("sethp 1000"); }
+            Pausa(0.5);
+        }
+
+        if (ok) Console.WriteLine("  OK: le sei passive del Discepolo dei Radicati fanno quello che dice il catalogo");
+        return ok;
+    }
     static readonly System.Globalization.CultureInfo Inv =
         System.Globalization.CultureInfo.InvariantCulture;
 }
