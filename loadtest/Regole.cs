@@ -8141,6 +8141,231 @@ static class Regole
         if (ok) Console.WriteLine("  OK: la Tagliola tiene fermo il nemico che ci passa, l'Esca porta via le creature finche dura");
         return ok;
     }
+
+    /// <summary>
+    /// A14j3c: le passive del Cacciatore con un effetto loro. A e il Cacciatore
+    /// (fazione 1, spada di pietra: il suo colpo fa 22), B il nemico (fazione
+    /// 2). Una passiva alla volta nello slot passivo 0, l'altro vuoto: Letale,
+    /// Ritmo, Colpo critico, Inseguitore, Tiro lungo (con la Freccia
+    /// azzoppante, gittata 20 m), Scuoiatore (pelli di un lupo ucciso col
+    /// danno nel tempo).
+    /// </summary>
+    public static bool PassiveDelCacciatore(string tokenA, string tokenB, string host, int port)
+    {
+        Console.WriteLine("--- passive del cacciatore: Letale, Ritmo, Colpo critico, Inseguitore, Tiro lungo, Scuoiatore");
+        bool ok = true;
+        void Male(string m) { Console.WriteLine("  FALLITA: " + m); ok = false; }
+
+        using var a = new Sonda(tokenA, host, port);
+        using var b = new Sonda(tokenB, host, port);
+        if (!a.AttendiPronta() || !b.AttendiPronta())
+        { Console.WriteLine("  FALLITA: le sonde non sono entrate in gioco"); return false; }
+
+        const float PX = -150f, PZ = 250f;   // lo stesso punto delle prove delle armi
+        static byte[] P<T>(T v) => MessagePack.MessagePackSerializer.Serialize(v);
+        bool Aspetta(Func<bool> cosa, double secondi) =>
+            a.Attendi(() => { b.Attendi(() => true, 0.01); return cosa(); }, secondi);
+        void Pausa(double secondi) => Aspetta(() => false, secondi);
+        static string Visto(CommandResultMsg r) => r == null ? "nessuna risposta" : r.Success ? "riuscito" : "rifiutato " + r.ErrorCode;
+        float Vita(Sonda chi) => a.Stato(chi.Id).Vita;
+        void Tp(Sonda s, float x, float z)
+        {
+            s.Admin($"tp {x.ToString(Inv)} {z.ToString(Inv)}");
+            Aspetta(() => Dist(s.X, s.Z, x, z) < 0.5f, 6);
+            s.Cammina(0f, 0f, 0.1);
+        }
+        void Imposta(Sonda s, int hp)
+        {
+            s.Admin($"sethp {hp}");
+            Aspetta(() => Vita(s) == Math.Min(hp, 100), 3);
+            Pausa(0.3);
+        }
+        string Effetto(Sonda s, string riga) { Pausa(0.15); return s.ChiediAdmin("effetto " + riga, "effetto: ") ?? "(nessuna risposta)"; }
+        string StatoDi(Sonda s) => Effetto(a, s == a ? "stato" : $"stato {s.Id}");
+        static (float X, float Z) Pos(string riga)
+        {
+            int i = riga.IndexOf("pos=", StringComparison.Ordinal);
+            if (i < 0) return (float.NaN, float.NaN);
+            int f = riga.IndexOf(' ', i);
+            var p = (f < 0 ? riga[(i + 4)..] : riga[(i + 4)..f]).Split(',');
+            return p.Length == 2 && float.TryParse(p[0], System.Globalization.NumberStyles.Float, Inv, out var x)
+                   && float.TryParse(p[1], System.Globalization.NumberStyles.Float, Inv, out var z) ? (x, z) : (float.NaN, float.NaN);
+        }
+        uint idComando = 760;
+        CommandResultMsg Comanda(CommandType tipo, byte[] dati)
+        {
+            uint n = idComando++;
+            Pausa(0.15);
+            a.Comando(n, tipo, dati);
+            CommandResultMsg r = null;
+            Aspetta(() => (r = a.Esito(n)) != null, 5);
+            return r;
+        }
+        void Passiva(AbilityId id)
+        {
+            foreach (var (slot, ab) in new[] { ((byte)0, id), ((byte)1, AbilityId.None) })
+            {
+                var r = Comanda(CommandType.SetAbilitySlot, P(new SetAbilitySlotCommand
+                    { Kind = AbilitySlotKind.ClassPassive, Slot = slot, Ability = ab }));
+                if (r == null || !r.Success) Male($"{(ab == AbilityId.None ? "svuotare" : ab.ToString())} nello slot passivo {slot}: {Visto(r)}");
+            }
+            Effetto(a, "azzera");   // si riparte senza serie, accumuli, ultimo colpito
+            Pausa(0.3);
+        }
+        void Atteso(string cosa, CommandResultMsg r, ErrorCode atteso)
+        {
+            bool giusto = r != null && (atteso == ErrorCode.None ? r.Success : !r.Success && r.ErrorCode == atteso);
+            Console.WriteLine($"  {cosa}: {Visto(r)}{(giusto ? "" : $" (atteso {(atteso == ErrorCode.None ? "riuscito" : atteso.ToString())})")}");
+            if (!giusto) Male($"{cosa}: atteso {(atteso == ErrorCode.None ? "riuscito" : "rifiutato " + atteso)}");
+        }
+        void Controlla(string cosa, float visto, float atteso)
+        {
+            Console.WriteLine($"  {cosa}: {visto} (atteso {atteso})");
+            if (visto != atteso) Male($"{cosa}: {visto} invece di {atteso}");
+        }
+        void Contiene(string cosa, string riga, string pezzo)
+        {
+            Console.WriteLine($"  {cosa}: {riga}");
+            if (!riga.Contains(pezzo)) Male($"{cosa}: manca '{pezzo}'");
+        }
+        // Un attacco base di A sul piu vicino: quanto perde B (che parte da vita).
+        float ColpoDiA(int vita = 1000)
+        {
+            Imposta(b, vita);
+            float prima = Vita(b);
+            a.Colpisci(0.1);
+            Aspetta(() => Vita(b) < prima, 1.5);
+            Pausa(0.3);
+            return prima - Vita(b);
+        }
+        // Quanto cammina A verso +X in 1 s (dentro i 3 s dell'Inseguitore).
+        float Passo()
+        {
+            var p0 = Pos(StatoDi(a));
+            a.Cammina(1f, 0f, 1.0);
+            Pausa(0.2);
+            var p1 = Pos(StatoDi(a));
+            return Dist(p0.X, p0.Z, p1.X, p1.Z);
+        }
+        // Un lupo accanto ad A, ucciso dal danno nel tempo di A: quante pelli prende A.
+        var lupi = new List<ulong>();
+        int PelliDaUnLupo()
+        {
+            a.Admin("spawn wolf");
+            EntityState lupo = null;
+            Aspetta(() => (lupo = a.PiuVicina(EntityType.Wolf, PX, PZ)) != null && !lupi.Contains(lupo.EntityId)
+                          && Dist(lupo.X, lupo.Z, PX, PZ) < 4f, 5);
+            if (lupo == null || lupi.Contains(lupo.EntityId)) { Male("il lupo d'ufficio non e' comparso accanto ad A"); return -1; }
+            lupi.Add(lupo.EntityId);
+            Pausa(0.3);
+            int prima = a.Quanti(ItemType.RawHide);
+            Effetto(a, $"sanguina 1000 2 {lupo.EntityId}");
+            Aspetta(() => a.Quanti(ItemType.RawHide) > prima, 5);
+            Pausa(0.3);
+            return a.Quanti(ItemType.RawHide) - prima;
+        }
+
+        try
+        {
+            a.Admin("setfaction 1"); b.Admin("setfaction 2");
+            foreach (var s in new[] { a, b })
+            {
+                s.Admin("clearinv"); s.Admin("abilita azzera"); s.Admin("effetto azzera");
+                s.Admin("give StoneSword 1");
+                Aspetta(() => s.Istanze.Values.Any(v => v.Tipo == ItemType.StoneSword), 5);
+                s.Dotazione(ItemType.StoneSword, ItemType.None, SideItemType.None);
+                s.Posizione(0);
+            }
+            Tp(a, PX, PZ); Tp(b, PX + 1.5f, PZ);
+            Pausa(0.15); Console.WriteLine($"  {a.ChiediAdmin("classe cacciatore", "classe: ")}");
+            Pausa(0.15); Console.WriteLine($"  {a.ChiediAdmin("classe sblocca", "classe: ")}");
+            Pausa(0.15); a.Admin("abilita sblocca cacciatore");
+            Pausa(0.4);
+
+            // 0. Senza passive il colpo di A fa 22, anche su B a 40 di vita.
+            Passiva(AbilityId.None);
+            Controlla("colpo di A senza passive", ColpoDiA(), 22f);
+            Controlla("colpo di A senza passive su B a 40", ColpoDiA(40), 22f);
+
+            // 1. Letale: su B a 40 (sotto meta) +25%, 27,5 -> 28; a vita piena 22.
+            Passiva(AbilityId.HunterLethal);
+            Controlla("Letale, B a vita piena", ColpoDiA(), 22f);
+            Controlla("Letale, B a 40 di vita", ColpoDiA(40), 28f);
+
+            // 2. Ritmo: colpi di fila su B 22, 23 (+5%), 24 (+10%); dopo 3,5 s
+            //    senza colpire si riparte da 22.
+            Passiva(AbilityId.HunterRhythm);
+            Controlla("Ritmo, primo colpo", ColpoDiA(), 22f);
+            Controlla("Ritmo, secondo colpo di fila", ColpoDiA(), 23f);
+            Controlla("Ritmo, terzo colpo di fila", ColpoDiA(), 24f);
+            Contiene("Ritmo, A", StatoDi(a), "ritmo+10");
+            Pausa(3.5);
+            Controlla("Ritmo, colpo dopo 3,5 s fermi", ColpoDiA(), 22f);
+
+            // 3. Colpo critico: dieci colpi, nove da 22 e il decimo doppio (44).
+            Passiva(AbilityId.HunterCriticalHit);
+            var colpi = new List<float>();
+            for (int i = 0; i < 10; i++) colpi.Add(ColpoDiA());
+            Console.WriteLine($"  Colpo critico, dieci colpi: {string.Join(" ", colpi)} (attesi nove da 22 e il decimo da 44)");
+            if (colpi.Take(9).Any(c => c != 22f) || colpi[9] != 44f) Male("con Colpo critico il decimo attacco base deve fare il doppio, gli altri no");
+
+            // 4. Inseguitore: A cammina verso B a 10 m; senza aver colpito, poi
+            //    subito dopo aver colpito B: +15% di passo.
+            Passiva(AbilityId.HunterPursuer);
+            Tp(a, PX, PZ); Tp(b, PX + 10f, PZ);
+            float senza = Passo();
+            Tp(a, PX, PZ); Tp(b, PX + 1.5f, PZ);
+            ColpoDiA();
+            Tp(b, PX + 10f, PZ);
+            Contiene("Inseguitore, A dopo il colpo", StatoDi(a), $"insegue:{b.Id}");
+            float con = Passo();
+            float rapporto = senza > 0f ? con / senza : 0f;
+            Console.WriteLine($"  Inseguitore, passo in 1 s: {senza:F2} m senza, {con:F2} m dopo il colpo (rapporto {rapporto:F2}, atteso circa 1,15)");
+            if (!(rapporto > 1.05f && rapporto < 1.30f)) Male("con Inseguitore il passo verso chi hai colpito deve crescere del 15% circa");
+
+            // 5. Tiro lungo: arco e frecce; la Freccia azzoppante (20 m) su B a
+            //    22 m non parte senza, parte col Tiro lungo (24 m).
+            Tp(a, PX, PZ); Tp(b, PX + 22f, PZ);
+            Imposta(b, 1000);
+            a.Admin("give Bow 1"); a.Admin("give Arrow 10");
+            Aspetta(() => a.Istanze.Values.Any(v => v.Tipo == ItemType.Bow) && a.Quanti(ItemType.Arrow) >= 10, 5);
+            a.Dotazione(ItemType.Bow, ItemType.None, SideItemType.None);
+            a.Posizione(0);
+            Pausa(0.4);
+            CommandResultMsg Azzoppante()
+            {
+                var r = Comanda(CommandType.SetAbilitySlot, P(new SetAbilitySlotCommand
+                    { Kind = AbilitySlotKind.Weapon, Family = WeaponFamily.Bow, Slot = 0, Ability = AbilityId.BowCripplingArrow }));
+                if (r == null || !r.Success) Male($"Freccia azzoppante nello slot: {Visto(r)}");
+                Pausa(0.15); a.Admin("ricarica");
+                var u = Comanda(CommandType.UseAbility, P(new UseAbilityCommand { Ability = AbilityId.BowCripplingArrow, Yaw = 90f }));
+                Pausa(0.3);
+                return u;
+            }
+            Passiva(AbilityId.None);
+            Atteso("Freccia azzoppante su B a 22 m senza Tiro lungo", Azzoppante(), ErrorCode.AbilityNotUsable);
+            Passiva(AbilityId.HunterLongShot);
+            Atteso("Freccia azzoppante su B a 22 m col Tiro lungo", Azzoppante(), ErrorCode.None);
+
+            // 6. Scuoiatore: un lupo da 2 pelli ne da 3 (+25%, arrotondato).
+            Tp(b, PX + 40f, PZ); Tp(a, PX, PZ);
+            Passiva(AbilityId.None);
+            Controlla("pelli da un lupo senza Scuoiatore", PelliDaUnLupo(), 2f);
+            Passiva(AbilityId.HunterSkinner);
+            Controlla("pelli da un lupo con Scuoiatore", PelliDaUnLupo(), 3f);
+        }
+        finally
+        {
+            foreach (var id in lupi) a.Admin($"remove {id}");
+            foreach (var s in new[] { a, b }) { s.Admin("setfaction 1"); s.Admin("effetto azzera"); s.Admin("abilita azzera"); s.Admin("clearinv"); s.Admin("sethp 1000"); }
+            a.Dotazione(ItemType.None, ItemType.None, SideItemType.None);
+            b.Dotazione(ItemType.None, ItemType.None, SideItemType.None);
+            Pausa(0.5);
+        }
+
+        if (ok) Console.WriteLine("  OK: Letale, Ritmo, Colpo critico, Inseguitore, Tiro lungo e Scuoiatore fanno quello che dice il catalogo");
+        return ok;
+    }
     static readonly System.Globalization.CultureInfo Inv =
         System.Globalization.CultureInfo.InvariantCulture;
 }
