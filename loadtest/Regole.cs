@@ -8574,6 +8574,172 @@ static class Regole
     }
 
     /// <summary>
+    /// A14j5b1: Fumo e Sosia dell'Esploratore, oggetti nel mondo. A e
+    /// l'Esploratore (fazione 1), B il nemico (fazione 2). Fumo: la nube nasce
+    /// ai piedi di A (4 m, 5 s); B fuori non vede piu A, B dentro lo vede ed e
+    /// rallentato; finita la nube B fuori rivede A. Sosia: con un lupo a 2 m e
+    /// A senza segno di prova, la copia nasce ai piedi di A, A e invisibile, il
+    /// lupo va dalla copia e non morde A finche dura; finita, caccia A.
+    /// </summary>
+    public static bool FumoESosia(string tokenA, string tokenB, string host, int port)
+    {
+        Console.WriteLine("--- fumo e sosia: la nube nasconde e rallenta, la copia attira le creature");
+        bool ok = true;
+        void Male(string m) { Console.WriteLine("  FALLITA: " + m); ok = false; }
+
+        using var a = new Sonda(tokenA, host, port);
+        using var b = new Sonda(tokenB, host, port);
+        if (!a.AttendiPronta() || !b.AttendiPronta())
+        { Console.WriteLine("  FALLITA: le sonde non sono entrate in gioco"); return false; }
+
+        const float PX = -150f, PZ = 250f;   // lo stesso punto delle prove delle armi
+        static byte[] P<T>(T v) => MessagePack.MessagePackSerializer.Serialize(v);
+        bool Aspetta(Func<bool> cosa, double secondi) =>
+            a.Attendi(() => { b.Attendi(() => true, 0.01); return cosa(); }, secondi);
+        void Pausa(double secondi) => Aspetta(() => false, secondi);
+        static string Visto(CommandResultMsg r) => r == null ? "nessuna risposta" : r.Success ? "riuscito" : "rifiutato " + r.ErrorCode;
+        float Vita(Sonda chi) => a.Stato(chi.Id).Vita;
+        void Tp(Sonda s, float x, float z)
+        {
+            s.Admin($"tp {x.ToString(Inv)} {z.ToString(Inv)}");
+            Aspetta(() => Dist(s.X, s.Z, x, z) < 0.5f, 6);
+            s.Cammina(0f, 0f, 0.1);
+        }
+        void Piena(params Sonda[] chi)
+        {
+            foreach (var s in chi) s.Admin("sethp 1000");
+            Aspetta(() => chi.All(s => Vita(s) >= 100f), 3);
+            Pausa(0.3);
+        }
+        string Effetto(Sonda s, string riga) { Pausa(0.15); return s.ChiediAdmin("effetto " + riga, "effetto: ") ?? "(nessuna risposta)"; }
+        static string Campo(string riga, string nome)
+        {
+            int i = riga.IndexOf(" " + nome + "=", StringComparison.Ordinal);
+            if (i < 0) return "";
+            i += nome.Length + 2;
+            int f = riga.IndexOf(' ', i);
+            return f < 0 ? riga[i..] : riga[i..f];
+        }
+        uint idComando = 900;
+        CommandResultMsg Prova(AbilityId id, float yaw = 90f)
+        {
+            uint idSlot = idComando++, idUso = idComando++;
+            Pausa(0.15);
+            a.Comando(idSlot, CommandType.SetAbilitySlot, P(new SetAbilitySlotCommand
+                { Kind = AbilitySlotKind.ClassActive, Slot = 0, Ability = id }));
+            CommandResultMsg r = null;
+            Aspetta(() => (r = a.Esito(idSlot)) != null, 5);
+            if (r == null || !r.Success) Male($"{id} nello slot: {Visto(r)}");
+            Pausa(0.15); a.Admin("ricarica");
+            Pausa(0.15);
+            a.Comando(idUso, CommandType.UseAbility, P(new UseAbilityCommand { Ability = id, Yaw = yaw }));
+            r = null;
+            Aspetta(() => (r = a.Esito(idUso)) != null, 5);
+            Pausa(0.2);
+            return r;
+        }
+        void Atteso(string cosa, CommandResultMsg r, ErrorCode atteso)
+        {
+            bool giusto = r != null && (atteso == ErrorCode.None ? r.Success : !r.Success && r.ErrorCode == atteso);
+            Console.WriteLine($"  {cosa}: {Visto(r)}{(giusto ? "" : $" (atteso {(atteso == ErrorCode.None ? "riuscito" : atteso.ToString())})")}");
+            if (!giusto) Male($"{cosa}: atteso {(atteso == ErrorCode.None ? "riuscito" : "rifiutato " + atteso)}");
+        }
+        // Gli oggetti di un tipo che A vede entro 15 m dal punto di prova.
+        List<EntityState> Visti(EntityType tipo)
+        {
+            lock (a.Mondo) return a.Mondo.Values.Where(e => e.Type == tipo && !a.Spariti.Contains(e.EntityId)
+                                                          && Dist(e.X, e.Z, PX, PZ) < 15f).ToList();
+        }
+        string Dove(List<EntityState> l) => l.Count == 0 ? "nessuno" : string.Join(" ", l.Select(e => $"({e.X:F1}, {e.Z:F1}) {e.Extra0}s r{e.Extra1}"));
+        bool BVedeA() => b.Vede(a.Id);
+        ulong idLupo = 0;
+
+        try
+        {
+            a.Admin("setfaction 1"); b.Admin("setfaction 2");
+            foreach (var s in new[] { a, b }) { s.Admin("clearinv"); s.Admin("abilita azzera"); s.Admin("effetto azzera"); }
+            Tp(a, PX, PZ); Tp(b, PX + 8f, PZ);
+            Pausa(0.15); Console.WriteLine($"  {a.ChiediAdmin("classe esploratore", "classe: ")}");
+            Pausa(0.15); Console.WriteLine($"  {a.ChiediAdmin("classe sblocca", "classe: ")}");
+            Pausa(0.15); a.Admin("abilita sblocca esploratore");
+            Pausa(0.4);
+            Piena(a, b);
+            if (!Aspetta(BVedeA, 3)) Male("B deve vedere A prima della prova");
+
+            // 1. Fumo ai piedi di A, 4 m: B a 8 m, fuori, non vede piu A.
+            Atteso("Fumo", Prova(AbilityId.ExplorerSmoke), ErrorCode.None);
+            Aspetta(() => Visti(EntityType.Smoke).Count > 0, 3);
+            var fumi = Visti(EntityType.Smoke);
+            Console.WriteLine($"  fumo visto da A: {Dove(fumi)} (atteso a ({PX}, {PZ}), r4, 5 s)");
+            if (fumi.Count != 1 || Dist(fumi[0].X, fumi[0].Z, PX, PZ) > 0.6f) Male("il fumo deve nascere ai piedi di A");
+            else if (fumi[0].Extra1 != 4 || fumi[0].Extra0 > 5f || fumi[0].Extra0 < 3f) Male("il fumo deve avere 4 m di raggio e durare 5 s");
+            bool nascosto = Aspetta(() => !BVedeA(), 2);
+            Console.WriteLine($"  B fuori dal fumo: A {(nascosto ? "non arriva" : "arriva")}");
+            if (!nascosto) Male("con A nel suo fumo, B fuori non lo deve vedere");
+
+            // 2. B entra nel fumo: vede A ed e rallentato.
+            Tp(b, PX + 2f, PZ);
+            bool dentro = Aspetta(BVedeA, 2);
+            bool lento = Aspetta(() => Effetto(a, $"stato {b.Id}").Contains("rallentato"), 2);
+            Console.WriteLine($"  B dentro il fumo: A {(dentro ? "arriva" : "non arriva")}; B: {Effetto(a, $"stato {b.Id}")}");
+            if (!dentro) Male("B dentro lo stesso fumo deve vedere A");
+            if (!lento) Male("B dentro il fumo di A deve essere rallentato");
+
+            // 3. B esce; finita la nube il fumo sparisce e B rivede A.
+            Tp(b, PX + 8f, PZ);
+            bool finito = Aspetta(() => Visti(EntityType.Smoke).Count == 0, 6);
+            bool rivisto = Aspetta(BVedeA, 2);
+            Console.WriteLine($"  fumo finito: {(finito ? "sparito" : "ancora li")}; B fuori: A {(rivisto ? "arriva" : "non arriva")}");
+            if (!finito) Male("il fumo deve sparire dopo 5 s");
+            if (!rivisto) Male("finito il fumo B deve rivedere A");
+            Effetto(a, $"azzera {b.Id}");
+
+            // 4. Sosia: un lupo a 2 m da A. Copia ai piedi di A, A invisibile;
+            //    A senza segno di prova si sposta di 6 m: il lupo va dalla copia
+            //    e non morde A finche dura, poi caccia A.
+            Tp(b, PX + 40f, PZ);
+            Tp(a, PX, PZ);
+            Piena(a);
+            a.Admin("spawn wolf");
+            EntityState lupo = null;
+            Aspetta(() => (lupo = a.PiuVicina(EntityType.Wolf, PX + 2f, PZ)) != null && Dist(lupo.X, lupo.Z, PX + 2f, PZ) < 1f, 5);
+            if (lupo == null || Dist(lupo.X, lupo.Z, PX + 2f, PZ) >= 1f) { Male("il lupo d'ufficio non e' comparso accanto ad A"); return false; }
+            idLupo = lupo.EntityId;
+            Atteso("Sosia", Prova(AbilityId.ExplorerDouble), ErrorCode.None);
+            string stA = Effetto(a, "stato");
+            Console.WriteLine($"  A dopo il Sosia: {stA}");
+            if (!stA.Contains("invisibile")) Male("col Sosia A deve essere invisibile");
+            a.ChiediAdmin("segnoprova no", "segno di prova: ");
+            Aspetta(() => Visti(EntityType.Decoy).Count > 0, 2);
+            var copie = Visti(EntityType.Decoy);
+            Console.WriteLine($"  sosia visti da A: {Dove(copie)} (atteso a ({PX}, {PZ}))");
+            if (copie.Count != 1 || Dist(copie[0].X, copie[0].Z, PX, PZ) > 0.6f) Male("il sosia deve nascere ai piedi di A");
+            Tp(a, PX - 6f, PZ);
+            float vitaPrima = Vita(a);
+            Pausa(2.5);
+            string stLupo = Effetto(a, $"stato {idLupo}");
+            Console.WriteLine($"  lupo durante il sosia: {stLupo}; vita di A {vitaPrima} -> {Vita(a)}");
+            if (Vita(a) < vitaPrima) Male("finche c'e il sosia il lupo non deve mordere A");
+            if (Campo(stLupo, "caccia") == a.Id.ToString()) Male("finche c'e il sosia il lupo non deve cacciare A");
+            bool copiaFinita = Aspetta(() => Visti(EntityType.Decoy).Count == 0, 4);
+            bool caccia = Aspetta(() => Campo(Effetto(a, $"stato {idLupo}"), "caccia") == a.Id.ToString(), 4);
+            Console.WriteLine($"  sosia finito: {(copiaFinita ? "sparito" : "ancora li")}; lupo: {Effetto(a, $"stato {idLupo}")}");
+            if (!copiaFinita) Male("il sosia deve sparire dopo 5 s");
+            if (!caccia) Male("finito il sosia il lupo deve cacciare A");
+        }
+        finally
+        {
+            if (idLupo != 0) a.Admin($"remove {idLupo}");
+            a.ChiediAdmin("segnoprova si", "segno di prova: ");
+            foreach (var s in new[] { a, b }) { s.Admin("setfaction 1"); s.Admin("effetto azzera"); s.Admin("abilita azzera"); s.Admin("clearinv"); s.Admin("sethp 1000"); }
+            Pausa(0.5);
+        }
+
+        if (ok) Console.WriteLine("  OK: il fumo nasconde chi e dentro a chi e fuori e rallenta i nemici; il sosia attira le creature e rende invisibili");
+        return ok;
+    }
+
+    /// <summary>
     /// A14j3c: le passive del Cacciatore con un effetto loro. A e il Cacciatore
     /// (fazione 1, spada di pietra: il suo colpo fa 22), B il nemico (fazione
     /// 2). Una passiva alla volta nello slot passivo 0, l'altro vuoto: Letale,

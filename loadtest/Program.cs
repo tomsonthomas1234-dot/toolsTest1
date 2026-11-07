@@ -192,6 +192,7 @@ if (modoRegole)
         ("passive del cacciatore",  () => Regole.PassiveDelCacciatore(tokens[1], tokens[0], host, port)),
         ("invisibilita",            () => Regole.Invisibilita(tokens[1], tokens[0], tokens[4], host, port)),
         ("esploratore",             () => Regole.Esploratore(tokens[1], tokens[0], host, port)),
+        ("fumo e sosia",            () => Regole.FumoESosia(tokens[1], tokens[0], host, port)),
         ("silenzio",                () => Regole.Silenzio(tokens[0], TokenBersaglio(), host, port)),
         ("bando",                   () => Regole.Bando(tokens[0], TokenBersaglio, host, port)),
     };
