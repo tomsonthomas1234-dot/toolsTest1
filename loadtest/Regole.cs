@@ -8328,6 +8328,252 @@ static class Regole
     }
 
     /// <summary>
+    /// A14j5a: le attive dell'Esploratore senza oggetti nel mondo. A e
+    /// l'Esploratore (fazione 1, spada di pietra: il suo colpo fa 22), B il
+    /// nemico (fazione 2) accanto. Corsa, Rotolata (toglie il rallentamento),
+    /// Balzo nell'ombra (al punto, e al piu 20 m), Nascondersi (camminare lo
+    /// rompe), Invisibilita (camminare no; il colpo che la rompe fa +50%),
+    /// poi con un lupo fermo a distanza e A senza segno di prova: il lupo lo
+    /// caccia a 10 m, col Passo silenzioso no; a 5 m si; Sparire, da storditi,
+    /// toglie stordimento e rallentamento e il lupo lo perde.
+    /// </summary>
+    public static bool Esploratore(string tokenA, string tokenB, string host, int port)
+    {
+        Console.WriteLine("--- esploratore: Corsa, Rotolata, Balzo nell'ombra, Nascondersi, Invisibilita, Passo silenzioso, Sparire");
+        bool ok = true;
+        void Male(string m) { Console.WriteLine("  FALLITA: " + m); ok = false; }
+
+        using var a = new Sonda(tokenA, host, port);
+        using var b = new Sonda(tokenB, host, port);
+        if (!a.AttendiPronta() || !b.AttendiPronta())
+        { Console.WriteLine("  FALLITA: le sonde non sono entrate in gioco"); return false; }
+
+        const float PX = -150f, PZ = 250f;   // lo stesso punto delle prove delle armi
+        static byte[] P<T>(T v) => MessagePack.MessagePackSerializer.Serialize(v);
+        bool Aspetta(Func<bool> cosa, double secondi) =>
+            a.Attendi(() => { b.Attendi(() => true, 0.01); return cosa(); }, secondi);
+        void Pausa(double secondi) => Aspetta(() => false, secondi);
+        static string Visto(CommandResultMsg r) => r == null ? "nessuna risposta" : r.Success ? "riuscito" : "rifiutato " + r.ErrorCode;
+        float Vita(Sonda chi) => a.Stato(chi.Id).Vita;
+        void Tp(Sonda s, float x, float z)
+        {
+            s.Admin($"tp {x.ToString(Inv)} {z.ToString(Inv)}");
+            Aspetta(() => Dist(s.X, s.Z, x, z) < 0.5f, 6);
+            s.Cammina(0f, 0f, 0.1);
+        }
+        void Piena(params Sonda[] chi)
+        {
+            foreach (var s in chi) s.Admin("sethp 1000");
+            Aspetta(() => chi.All(s => Vita(s) >= 100f), 3);
+            Pausa(0.3);
+        }
+        string Effetto(Sonda s, string riga) { Pausa(0.15); return s.ChiediAdmin("effetto " + riga, "effetto: ") ?? "(nessuna risposta)"; }
+        string StatoDiA() => Effetto(a, "stato");
+        string StatoDi(ulong id) => Effetto(a, $"stato {id}");
+        static (float X, float Z) Pos(string riga)
+        {
+            int i = riga.IndexOf("pos=", StringComparison.Ordinal);
+            if (i < 0) return (float.NaN, float.NaN);
+            int f = riga.IndexOf(' ', i);
+            var p = (f < 0 ? riga[(i + 4)..] : riga[(i + 4)..f]).Split(',');
+            return p.Length == 2 && float.TryParse(p[0], System.Globalization.NumberStyles.Float, Inv, out var x)
+                   && float.TryParse(p[1], System.Globalization.NumberStyles.Float, Inv, out var z) ? (x, z) : (float.NaN, float.NaN);
+        }
+        static string Campo(string riga, string nome)
+        {
+            int i = riga.IndexOf(" " + nome + "=", StringComparison.Ordinal);
+            if (i < 0) return "";
+            i += nome.Length + 2;
+            int f = riga.IndexOf(' ', i);
+            return f < 0 ? riga[i..] : riga[i..f];
+        }
+        uint idComando = 820;
+        CommandResultMsg Prova(AbilityId id, float yaw = 90f, float tx = 0f, float tz = 0f)
+        {
+            uint idSlot = idComando++, idUso = idComando++;
+            Pausa(0.15);
+            a.Comando(idSlot, CommandType.SetAbilitySlot, P(new SetAbilitySlotCommand
+                { Kind = AbilitySlotKind.ClassActive, Slot = 0, Ability = id }));
+            CommandResultMsg r = null;
+            Aspetta(() => (r = a.Esito(idSlot)) != null, 5);
+            if (r == null || !r.Success) Male($"{id} nello slot: {Visto(r)}");
+            Pausa(0.15); a.Admin("ricarica");
+            Pausa(0.15);
+            a.Comando(idUso, CommandType.UseAbility, P(new UseAbilityCommand { Ability = id, Yaw = yaw, TargetX = tx, TargetZ = tz }));
+            r = null;
+            Aspetta(() => (r = a.Esito(idUso)) != null, 5);
+            Pausa(0.2);
+            return r;
+        }
+        void Atteso(string cosa, CommandResultMsg r, ErrorCode atteso)
+        {
+            bool giusto = r != null && (atteso == ErrorCode.None ? r.Success : !r.Success && r.ErrorCode == atteso);
+            Console.WriteLine($"  {cosa}: {Visto(r)}{(giusto ? "" : $" (atteso {(atteso == ErrorCode.None ? "riuscito" : atteso.ToString())})")}");
+            if (!giusto) Male($"{cosa}: atteso {(atteso == ErrorCode.None ? "riuscito" : "rifiutato " + atteso)}");
+        }
+        void Contiene(string cosa, string riga, string pezzo, bool deve = true)
+        {
+            Console.WriteLine($"  {cosa}: {riga}");
+            if (riga.Contains(pezzo) != deve) Male($"{cosa}: {(deve ? "manca" : "non doveva esserci")} '{pezzo}'");
+        }
+        void Controlla(string cosa, float visto, float atteso)
+        {
+            Console.WriteLine($"  {cosa}: {visto} (atteso {atteso})");
+            if (visto != atteso) Male($"{cosa}: {visto} invece di {atteso}");
+        }
+        void Vicino(string cosa, string riga, float x, float z)
+        {
+            var (px, pz) = Pos(riga);
+            Console.WriteLine($"  {cosa}: A a ({px:F2}, {pz:F2}) (atteso {x:F2}, {z:F2})");
+            if (float.IsNaN(px) || Dist(px, pz, x, z) > 0.4f) Male($"{cosa}: A doveva arrivare a ({x:F2}, {z:F2})");
+        }
+        // Un attacco base di A sul piu vicino: quanto perde B.
+        float ColpoDiA()
+        {
+            Piena(b);
+            float prima = Vita(b);
+            a.Colpisci(0.1);
+            Aspetta(() => Vita(b) < prima, 1.5);
+            Pausa(0.4);
+            return prima - Vita(b);
+        }
+        bool BVedeA() => b.Vede(a.Id);
+        ulong lupo = 0;
+
+        try
+        {
+            a.Admin("setfaction 1"); b.Admin("setfaction 2");
+            foreach (var s in new[] { a, b })
+            {
+                s.Admin("clearinv"); s.Admin("abilita azzera"); s.Admin("effetto azzera");
+                s.Admin("give StoneSword 1");
+                Aspetta(() => s.Istanze.Values.Any(v => v.Tipo == ItemType.StoneSword), 5);
+                s.Dotazione(ItemType.StoneSword, ItemType.None, SideItemType.None);
+                s.Posizione(0);
+            }
+            Tp(a, PX, PZ); Tp(b, PX + 1.5f, PZ);
+            Pausa(0.15); Console.WriteLine($"  {a.ChiediAdmin("classe esploratore", "classe: ")}");
+            Pausa(0.15); Console.WriteLine($"  {a.ChiediAdmin("classe sblocca", "classe: ")}");
+            Pausa(0.15); a.Admin("abilita sblocca esploratore");
+            Pausa(0.4);
+            Piena(a, b);
+            if (!Aspetta(BVedeA, 3)) Male("B deve vedere A prima della prova");
+
+            // 0. Senza niente il colpo di spada di A fa 22.
+            Controlla("colpo di A su B senza niente", ColpoDiA(), 22f);
+
+            // 1. Corsa: +25% velocita.
+            Atteso("Corsa", Prova(AbilityId.ExplorerSprint), ErrorCode.None);
+            Contiene("Corsa, A", StatoDiA(), "MoveSpeed +25%");
+            Effetto(a, "azzera");
+
+            // 2. Rotolata: rallentato del 50%, guardando verso -X rotola 5 m
+            //    (lontano da B) e il rallentamento va via.
+            Effetto(a, "rallenta 50 10");
+            Atteso("Rotolata", Prova(AbilityId.ExplorerRoll, yaw: -90f), ErrorCode.None);
+            string st = StatoDiA();
+            Vicino("Rotolata", st, PX - 5f, PZ);
+            Contiene("Rotolata, A", st, "rallentato", deve: false);
+            Tp(a, PX, PZ);
+
+            // 3. Balzo nell'ombra: al punto del comando, 12 m verso +Z; un punto a
+            //    30 m verso -Z si ferma a 20 m.
+            Atteso("Balzo nell'ombra a 12 m", Prova(AbilityId.ExplorerShadowLeap, tx: PX, tz: PZ + 12f), ErrorCode.None);
+            Vicino("Balzo nell'ombra a 12 m", StatoDiA(), PX, PZ + 12f);
+            Tp(a, PX, PZ);
+            Atteso("Balzo nell'ombra a 30 m", Prova(AbilityId.ExplorerShadowLeap, tx: PX, tz: PZ - 30f), ErrorCode.None);
+            Vicino("Balzo nell'ombra a 30 m", StatoDiA(), PX, PZ - 20f);
+            Tp(a, PX, PZ);
+            Aspetta(BVedeA, 3);
+
+            // 4. Nascondersi: B non vede piu A; A cammina e torna visibile.
+            Atteso("Nascondersi", Prova(AbilityId.ExplorerHide), ErrorCode.None);
+            bool nascosto = Aspetta(() => !BVedeA(), 3);
+            Pausa(0.5);
+            nascosto &= !BVedeA();
+            a.Cammina(-1f, 0f, 0.3);
+            bool visto = Aspetta(BVedeA, 3);
+            Console.WriteLine($"  Nascondersi: per B A {(nascosto ? "sparisce" : "resta")}; camminando {(visto ? "torna" : "non torna")}");
+            if (!nascosto) Male("con Nascondersi A non deve arrivare a B, nemico");
+            if (!visto) Male("con Nascondersi A deve tornare visibile camminando");
+            Effetto(a, "azzera");
+            Tp(a, PX, PZ);
+            Aspetta(BVedeA, 3);
+
+            // 5. Invisibilita: camminando resta invisibile; il colpo la rompe e
+            //    fa +50% (33); quello dopo 22.
+            Atteso("Invisibilita", Prova(AbilityId.ExplorerInvisibility), ErrorCode.None);
+            Contiene("Invisibilita, A", StatoDiA(), "colpo+50");
+            bool invisibile = Aspetta(() => !BVedeA(), 3);
+            a.Cammina(-1f, 0f, 0.3);
+            Pausa(0.3);
+            invisibile &= !BVedeA();
+            Console.WriteLine($"  Invisibilita: per B A {(invisibile ? "non arriva, anche camminando" : "arriva")}");
+            if (!invisibile) Male("con l'Invisibilita A non deve arrivare a B, nemmeno camminando");
+            Tp(a, PX, PZ);
+            Controlla("colpo di A che rompe l'Invisibilita", ColpoDiA(), 33f);
+            if (!Aspetta(BVedeA, 3)) Male("colpendo, A deve tornare visibile");
+            Controlla("il colpo dopo", ColpoDiA(), 22f);
+
+            // 6. Un lupo fermo (nato quando A ha ancora il segno di prova).
+            //    Senza segno, a 10 m il lupo caccia A; col Passo silenzioso no.
+            Tp(b, PX + 1.5f, PZ + 3f);
+            float lx = a.X + 2f, lz = a.Z;
+            a.Admin("spawn wolf");
+            EntityState l = null;
+            Aspetta(() =>
+            {
+                lock (a.Mondo) l = a.Mondo.Values.FirstOrDefault(e => e.Type == EntityType.Wolf && Dist(e.X, e.Z, lx, lz) < 2.5f);
+                return l != null;
+            }, 5);
+            if (l == null) { Male("'spawn wolf' non ha fatto nascere un lupo accanto ad A"); return false; }
+            lupo = l.EntityId;
+            Effetto(a, $"immobile 60 {lupo}");
+            Pausa(0.2);
+            var (wx, wz) = Pos(StatoDi(lupo));
+            Tp(a, wx - 10f, wz);
+            a.ChiediAdmin("segnoprova no", "segno di prova: ");
+            bool caccia10 = Aspetta(() => Campo(StatoDi(lupo), "caccia") == a.Id.ToString(), 3);
+            Console.WriteLine($"  lupo a 10 m da A senza segno: {StatoDi(lupo)}");
+            if (!caccia10) Male("a 10 m il lupo deve cacciare A");
+            Atteso("Passo silenzioso", Prova(AbilityId.ExplorerSilentStep), ErrorCode.None);
+            Contiene("Passo silenzioso, A", StatoDiA(), "silenzioso50");
+            bool perso10 = Aspetta(() => Campo(StatoDi(lupo), "caccia") == "0", 2);
+            Console.WriteLine($"  lupo a 10 m col Passo silenzioso: {StatoDi(lupo)}");
+            if (!perso10) Male("col Passo silenzioso a 10 m il lupo non deve cacciare A (lo nota a 7,5 m)");
+
+            // 7. A 5 m il lupo caccia anche col Passo silenzioso; A stordito e
+            //    rallentato usa Sparire: via tutti e due, e il lupo lo perde.
+            Tp(a, wx - 5f, wz);
+            bool caccia5 = Aspetta(() => Campo(StatoDi(lupo), "caccia") == a.Id.ToString(), 3);
+            Console.WriteLine($"  lupo a 5 m col Passo silenzioso: {StatoDi(lupo)}");
+            if (!caccia5) Male("a 5 m il lupo deve cacciare A anche col Passo silenzioso");
+            Effetto(a, "stordisci 6");
+            Effetto(a, "rallenta 50 10");
+            Atteso("Sparire da stordito", Prova(AbilityId.ExplorerVanish), ErrorCode.None);
+            st = StatoDiA();
+            Contiene("Sparire, A", st, "sparito");
+            if (st.Contains("stordito") || st.Contains("rallentato")) Male("Sparire deve togliere stordimento e rallentamento");
+            bool perso5 = Aspetta(() => Campo(StatoDi(lupo), "caccia") == "0", 2);
+            Pausa(1.0);
+            perso5 &= Campo(StatoDi(lupo), "caccia") == "0";
+            Console.WriteLine($"  lupo a 5 m dopo Sparire: {StatoDi(lupo)}; per B A {(BVedeA() ? "arriva" : "non arriva")}");
+            if (!perso5) Male("con Sparire il lupo deve perdere A");
+            if (BVedeA()) Male("con Sparire A non deve arrivare a B, nemico");
+        }
+        finally
+        {
+            if (lupo != 0) a.Admin($"remove {lupo}");
+            a.ChiediAdmin("segnoprova si", "segno di prova: ");
+            foreach (var s in new[] { a, b }) { s.Admin("setfaction 1"); s.Admin("effetto azzera"); s.Admin("abilita azzera"); s.Admin("clearinv"); s.Admin("sethp 1000"); }
+            Pausa(0.5);
+        }
+
+        if (ok) Console.WriteLine("  OK: Corsa, Rotolata, Balzo nell'ombra, Nascondersi, Invisibilita, Passo silenzioso e Sparire fanno quello che dice il catalogo");
+        return ok;
+    }
+
+    /// <summary>
     /// A14j3c: le passive del Cacciatore con un effetto loro. A e il Cacciatore
     /// (fazione 1, spada di pietra: il suo colpo fa 22), B il nemico (fazione
     /// 2). Una passiva alla volta nello slot passivo 0, l'altro vuoto: Letale,
