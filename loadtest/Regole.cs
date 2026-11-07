@@ -332,6 +332,25 @@ sealed class Sonda : IDisposable
     /// quello.
     public readonly Dictionary<ulong, EntityState> Mondo = new();
 
+    /// Gli id che il server ha tolto con un differenziale dopo l'ultima volta
+    /// che li ha mandati (A14j4). Mondo li tiene fino al prossimo fotogramma
+    /// intero, come sempre, per non cambiare le altre prove; chi vuole sapere
+    /// se un'entita e ancora visibile guarda Vede(). Sotto lock (Mondo).
+    public readonly HashSet<ulong> Spariti = new();
+
+    /// Il server ci sta mandando questa entita adesso? Vero se e in Mondo e
+    /// nessun differenziale l'ha tolta dopo.
+    public bool Vede(ulong id)
+    {
+        lock (Mondo) return Mondo.ContainsKey(id) && !Spariti.Contains(id);
+    }
+
+    /// Lo stato di un'entita che vediamo adesso, o null.
+    public EntityState Visto(ulong id)
+    {
+        lock (Mondo) return Mondo.TryGetValue(id, out var e) && !Spariti.Contains(id) ? e : null;
+    }
+
     /// Tutti i bit visti nei Flags del Custode da quando si e azzerato
     /// (backlog B7: le mosse, vedi KeeperState). Si legge e si azzera sotto
     /// lock (Mondo).
@@ -412,9 +431,13 @@ sealed class Sonda : IDisposable
                         break;
 
                     case NetMsgType.DeltaSnapshot:
-                        Aggiorna(MessagePack.MessagePackSerializer
-                                     .Deserialize<DeltaSnapshotMsg>(env.Payload).Upserts);
+                    {
+                        var delta = MessagePack.MessagePackSerializer.Deserialize<DeltaSnapshotMsg>(env.Payload);
+                        Aggiorna(delta.Upserts);
+                        if (delta.Despawns != null)
+                            lock (Mondo) foreach (var id in delta.Despawns) Spariti.Add(id);
                         break;
+                    }
 
                     case NetMsgType.CraftResult:
                         UltimoCraft ??= MessagePack.MessagePackSerializer
@@ -541,10 +564,11 @@ sealed class Sonda : IDisposable
     {
         lock (Mondo)
         {
-            if (sostituisci) Mondo.Clear();
+            if (sostituisci) { Mondo.Clear(); Spariti.Clear(); }
             foreach (var e in entita)
             {
                 Mondo[e.EntityId] = e;
+                Spariti.Remove(e.EntityId);
                 // I bit delle mosse durano un secondo o meno: tra un controllo
                 // e l'altro si perderebbero, quindi si tengono qui (B7).
                 if (e.Type == EntityType.Keeper) BitDelCustodeVisti |= e.Flags;
@@ -8139,6 +8163,167 @@ static class Regole
         }
 
         if (ok) Console.WriteLine("  OK: la Tagliola tiene fermo il nemico che ci passa, l'Esca porta via le creature finche dura");
+        return ok;
+    }
+
+    /// <summary>
+    /// A14j4: l'invisibilita lato server. A e il Cacciatore (fazione 1), B il
+    /// nemico che diventa invisibile col comando di prova (fazione 2), C
+    /// l'alleato di B (fazione 2), dietro ad A. Chi e invisibile non arriva
+    /// ad A, arriva a C e a se stesso col bit Invisible; A non lo puo mirare
+    /// (Rete rifiutata); col Fiuto lo vede e lo mira; svelato (come dal
+    /// Marchio) lo vedono tutti; la Caccia lo fa vedere al Cacciatore;
+    /// colpire rompe l'invisibilita, e muoversi rompe quella di Nascondersi;
+    /// la tagliola di A non arriva a B.
+    /// </summary>
+    public static bool Invisibilita(string tokenA, string tokenB, string tokenC, string host, int port)
+    {
+        Console.WriteLine("--- invisibilita: chi e invisibile non arriva ai nemici");
+        bool ok = true;
+        void Male(string m) { Console.WriteLine("  FALLITA: " + m); ok = false; }
+
+        using var a = new Sonda(tokenA, host, port);
+        using var b = new Sonda(tokenB, host, port);
+        using var c = new Sonda(tokenC, host, port);
+        if (!a.AttendiPronta() || !b.AttendiPronta() || !c.AttendiPronta())
+        { Console.WriteLine("  FALLITA: le sonde non sono entrate in gioco"); return false; }
+
+        const float PX = -150f, PZ = 250f;   // lo stesso punto delle prove delle armi
+        static byte[] P<T>(T v) => MessagePack.MessagePackSerializer.Serialize(v);
+        bool Aspetta(Func<bool> cosa, double secondi) =>
+            a.Attendi(() => { b.Attendi(() => true, 0.01); c.Attendi(() => true, 0.01); return cosa(); }, secondi);
+        void Pausa(double secondi) => Aspetta(() => false, secondi);
+        static string Visto(CommandResultMsg r) => r == null ? "nessuna risposta" : r.Success ? "riuscito" : "rifiutato " + r.ErrorCode;
+        void Tp(Sonda s, float x, float z)
+        {
+            s.Admin($"tp {x.ToString(Inv)} {z.ToString(Inv)}");
+            Aspetta(() => Dist(s.X, s.Z, x, z) < 0.5f, 6);
+            s.Cammina(0f, 0f, 0.1);
+        }
+        string Effetto(Sonda s, string riga) { Pausa(0.15); return s.ChiediAdmin("effetto " + riga, "effetto: ") ?? "(nessuna risposta)"; }
+        uint idComando = 760;
+        CommandResultMsg Prova(AbilityId id, float yaw = 90f)
+        {
+            uint idSlot = idComando++, idUso = idComando++;
+            Pausa(0.15);
+            a.Comando(idSlot, CommandType.SetAbilitySlot, P(new SetAbilitySlotCommand
+                { Kind = AbilitySlotKind.ClassActive, Slot = 0, Ability = id }));
+            CommandResultMsg r = null;
+            Aspetta(() => (r = a.Esito(idSlot)) != null, 5);
+            if (r == null || !r.Success) Male($"{id} nello slot: {Visto(r)}");
+            Pausa(0.15); a.Admin("ricarica");
+            Pausa(0.15);
+            a.Comando(idUso, CommandType.UseAbility, P(new UseAbilityCommand { Ability = id, Yaw = yaw }));
+            r = null;
+            Aspetta(() => (r = a.Esito(idUso)) != null, 5);
+            Pausa(0.2);
+            return r;
+        }
+        void Atteso(string cosa, CommandResultMsg r, ErrorCode atteso)
+        {
+            bool giusto = r != null && (atteso == ErrorCode.None ? r.Success : !r.Success && r.ErrorCode == atteso);
+            Console.WriteLine($"  {cosa}: {Visto(r)}{(giusto ? "" : $" (atteso {(atteso == ErrorCode.None ? "riuscito" : atteso.ToString())})")}");
+            if (!giusto) Male($"{cosa}: atteso {(atteso == ErrorCode.None ? "riuscito" : "rifiutato " + atteso)}");
+        }
+        static bool ColBit(EntityState e) => e != null && (e.Flags & PlayerFlags.Invisible) != 0;
+        static string Come(EntityState e) => e == null ? "non arriva" : ColBit(e) ? "arriva, invisibile" : "arriva, visibile";
+        // A vede B adesso?
+        bool AVedeB() => a.Vede(b.Id);
+        // Le tagliole che una sonda riceve adesso entro 15 m dal punto di prova.
+        int Tagliole(Sonda s)
+        {
+            lock (s.Mondo) return s.Mondo.Values.Count(e => e.Type == EntityType.Snare && !s.Spariti.Contains(e.EntityId)
+                                                         && Dist(e.X, e.Z, PX, PZ) < 15f);
+        }
+
+        try
+        {
+            a.Admin("setfaction 1"); b.Admin("setfaction 2"); c.Admin("setfaction 2");
+            foreach (var s in new[] { a, b, c }) { s.Admin("clearinv"); s.Admin("abilita azzera"); s.Admin("effetto azzera"); s.Admin("sethp 1000"); }
+            // B 6 m davanti ad A (A guarda verso +X); C 4 m dietro ad A, fuori
+            // dal tiro della Rete.
+            Tp(a, PX, PZ); Tp(b, PX + 6f, PZ); Tp(c, PX - 4f, PZ);
+            Pausa(0.15); Console.WriteLine($"  {a.ChiediAdmin("classe cacciatore", "classe: ")}");
+            Pausa(0.15); Console.WriteLine($"  {a.ChiediAdmin("classe sblocca", "classe: ")}");
+            Pausa(0.15); a.Admin("abilita sblocca cacciatore");
+            if (!Aspetta(AVedeB, 3)) Male("A deve vedere B prima della prova");
+
+            // 1. B invisibile: ad A (nemico) non arriva piu; a C (alleato) e a B
+            //    stesso si, col bit.
+            Console.WriteLine($"  B invisibile: {Effetto(a, $"invisibile 60 {b.Id}")}");
+            bool sparito = Aspetta(() => !AVedeB(), 3);
+            Aspetta(() => ColBit(c.Visto(b.Id)) && ColBit(b.Visto(b.Id)), 2);
+            Console.WriteLine($"  B per A: {Come(a.Visto(b.Id))}; per C: {Come(c.Visto(b.Id))}; per se stesso: {Come(b.Visto(b.Id))}");
+            if (!sparito) Male("B invisibile non deve piu arrivare ad A, che e nemico");
+            if (!ColBit(c.Visto(b.Id))) Male("B invisibile deve arrivare a C, alleato, col bit Invisible");
+            if (!ColBit(b.Visto(b.Id))) Male("B invisibile deve vedersi, col bit Invisible");
+
+            // 2. Chi non si vede non si mira: la Rete su B a 6 m non parte.
+            Atteso("Rete su B invisibile", Prova(AbilityId.HunterNet), ErrorCode.AbilityNotUsable);
+
+            // 3. Fiuto: A vede B (entro 30 m) e lo mira; finito il Fiuto, B sparisce di nuovo.
+            Atteso("Fiuto", Prova(AbilityId.HunterScent), ErrorCode.None);
+            bool fiutato = Aspetta(() => ColBit(a.Visto(b.Id)), 3);
+            Console.WriteLine($"  B per A col Fiuto: {Come(a.Visto(b.Id))}; A: {Effetto(a, "stato")}");
+            if (!fiutato) Male("col Fiuto A deve vedere B invisibile, col bit");
+            Atteso("Rete su B col Fiuto", Prova(AbilityId.HunterNet), ErrorCode.None);
+            Effetto(a, "azzera");
+            if (!Aspetta(() => !AVedeB(), 3)) Male("finito il Fiuto B invisibile non deve piu arrivare ad A");
+
+            // 4. Svelato (quello che fa il Marchio del cacciatore): A lo rivede; poi no.
+            Effetto(a, $"svela 2 {b.Id}");
+            bool svelato = Aspetta(AVedeB, 2);
+            Console.WriteLine($"  B svelato per A: {Come(a.Visto(b.Id))}");
+            if (!svelato) Male("B svelato deve arrivare ad A anche se invisibile");
+            if (!Aspetta(() => !AVedeB(), 4)) Male("finito lo svelato B invisibile non deve piu arrivare ad A");
+
+            // 5. Caccia: A caccia B quando si vede, poi B torna invisibile: A lo vede lo stesso.
+            Effetto(a, $"azzera {b.Id}");
+            Aspetta(AVedeB, 3);
+            Atteso("Caccia su B", Prova(AbilityId.HunterHunt), ErrorCode.None);
+            Effetto(a, $"invisibile 60 {b.Id}");
+            Pausa(1.0);
+            Console.WriteLine($"  B cacciato e invisibile, per A: {Come(a.Visto(b.Id))}");
+            if (!ColBit(a.Visto(b.Id))) Male("A che caccia B lo deve vedere anche invisibile");
+            Effetto(a, "azzera");
+            if (!Aspetta(() => !AVedeB(), 3)) Male("finita la Caccia B invisibile non deve piu arrivare ad A");
+
+            // 6. Colpire rompe l'invisibilita: B a 1 m da A tira un pugno.
+            Tp(b, PX + 1f, PZ);
+            b.Colpisci(0.6);
+            bool rotta = Aspetta(() => a.Visto(b.Id) is EntityState e && !ColBit(e), 3);
+            Console.WriteLine($"  B colpisce A: per A {Come(a.Visto(b.Id))}; B: {Effetto(a, $"stato {b.Id}")}");
+            if (!rotta) Male("colpendo B deve tornare visibile");
+
+            // 7. Nascondersi: B fermo resta nascosto, appena cammina torna visibile.
+            Effetto(a, $"nascondi 60 {b.Id}");
+            bool nascosto = Aspetta(() => !AVedeB(), 3);
+            Pausa(0.5);
+            nascosto &= !AVedeB();
+            b.Cammina(1f, 0f, 0.3);
+            bool mosso = Aspetta(() => a.Visto(b.Id) is EntityState e && !ColBit(e), 3);
+            Console.WriteLine($"  B nascosto e fermo: per A {(nascosto ? "non arriva" : "arriva")}; poi cammina: per A {Come(a.Visto(b.Id))}");
+            if (!nascosto) Male("B nascosto e fermo non deve arrivare ad A");
+            if (!mosso) Male("B nascosto che cammina deve tornare visibile");
+
+            // 8. La tagliola di A non arriva a B, nemico; ad A si.
+            Effetto(a, $"azzera {b.Id}");
+            Tp(b, PX + 6f, PZ);
+            Tp(a, PX, PZ);
+            Atteso("Tagliola", Prova(AbilityId.HunterSnareTrap), ErrorCode.None);
+            Aspetta(() => Tagliole(a) > 0, 3);
+            Pausa(0.5);
+            Console.WriteLine($"  tagliole: A ne riceve {Tagliole(a)}, B {Tagliole(b)}, C {Tagliole(c)}");
+            if (Tagliole(a) != 1) Male("A deve ricevere la sua tagliola");
+            if (Tagliole(b) != 0 || Tagliole(c) != 0) Male("la tagliola di A non deve arrivare ai nemici");
+        }
+        finally
+        {
+            foreach (var s in new[] { a, b, c }) { s.Admin("setfaction 1"); s.Admin("effetto azzera"); s.Admin("abilita azzera"); s.Admin("clearinv"); s.Admin("sethp 1000"); }
+            Pausa(0.5);
+        }
+
+        if (ok) Console.WriteLine("  OK: chi e invisibile non arriva ai nemici; Fiuto, svelato e Caccia lo mostrano; colpire e muoversi lo rompono");
         return ok;
     }
 
