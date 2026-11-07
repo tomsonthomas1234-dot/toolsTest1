@@ -9180,6 +9180,203 @@ static class Regole
         if (ok) Console.WriteLine("  OK: Fiato lungo, Sguscio, Imboscata, Evasione, Viandante e Ombra fanno quello che dice il catalogo");
         return ok;
     }
+
+    /// <summary>
+    /// A14j6: il Mago. A e il Mago (fazione 1, spada di pietra: il suo colpo fa
+    /// 22), B il nemico (fazione 2, spada di pietra, niente difesa). Le cinque
+    /// attive (Dardo magico, Raggelare, Scudo magico, Scintilla, Spinta
+    /// arcana) e le due passive con un effetto loro (Arcano, Arma incantata).
+    /// </summary>
+    public static bool Mago(string tokenA, string tokenB, string host, int port)
+    {
+        Console.WriteLine("--- mago: Dardo magico, Raggelare, Scudo magico, Scintilla, Spinta arcana, Arcano, Arma incantata");
+        bool ok = true;
+        void Male(string m) { Console.WriteLine("  FALLITA: " + m); ok = false; }
+
+        using var a = new Sonda(tokenA, host, port);
+        using var b = new Sonda(tokenB, host, port);
+        if (!a.AttendiPronta() || !b.AttendiPronta())
+        { Console.WriteLine("  FALLITA: le sonde non sono entrate in gioco"); return false; }
+
+        const float PX = -150f, PZ = 250f;   // lo stesso punto delle prove delle armi
+        static byte[] P<T>(T v) => MessagePack.MessagePackSerializer.Serialize(v);
+        bool Aspetta(Func<bool> cosa, double secondi) =>
+            a.Attendi(() => { b.Attendi(() => true, 0.01); return cosa(); }, secondi);
+        void Pausa(double secondi) => Aspetta(() => false, secondi);
+        static string Visto(CommandResultMsg r) => r == null ? "nessuna risposta" : r.Success ? "riuscito" : "rifiutato " + r.ErrorCode;
+        float Vita(Sonda chi) => a.Stato(chi.Id).Vita;
+        void Tp(Sonda s, float x, float z)
+        {
+            s.Admin($"tp {x.ToString(Inv)} {z.ToString(Inv)}");
+            Aspetta(() => Dist(s.X, s.Z, x, z) < 0.5f, 6);
+            s.Cammina(0f, 0f, 0.1);
+        }
+        void Piena(params Sonda[] chi)
+        {
+            foreach (var s in chi) s.Admin("sethp 1000");
+            Aspetta(() => chi.All(s => Vita(s) >= 100f), 3);
+            Pausa(0.3);
+        }
+        string Effetto(Sonda s, string riga) { Pausa(0.15); return s.ChiediAdmin("effetto " + riga, "effetto: ") ?? "(nessuna risposta)"; }
+        string StatoDi(Sonda s) => Effetto(a, s == a ? "stato" : $"stato {s.Id}");
+        static (float X, float Z) Pos(string riga)
+        {
+            int i = riga.IndexOf("pos=", StringComparison.Ordinal);
+            if (i < 0) return (float.NaN, float.NaN);
+            int f = riga.IndexOf(' ', i);
+            var p = (f < 0 ? riga[(i + 4)..] : riga[(i + 4)..f]).Split(',');
+            return p.Length == 2 && float.TryParse(p[0], System.Globalization.NumberStyles.Float, Inv, out var x)
+                   && float.TryParse(p[1], System.Globalization.NumberStyles.Float, Inv, out var z) ? (x, z) : (float.NaN, float.NaN);
+        }
+        uint idComando = 760;
+        CommandResultMsg Comanda(CommandType tipo, byte[] dati)
+        {
+            uint n = idComando++;
+            Pausa(0.15);
+            a.Comando(n, tipo, dati);
+            CommandResultMsg r = null;
+            Aspetta(() => (r = a.Esito(n)) != null, 5);
+            return r;
+        }
+        // Mette l'attiva nel primo slot attivo, azzera le ricariche e la usa
+        // guardando verso +X (dove sta B), col punto (tx, tz) se c'e.
+        CommandResultMsg Prova(AbilityId id, float tx = 0f, float tz = 0f)
+        {
+            var r = Comanda(CommandType.SetAbilitySlot, P(new SetAbilitySlotCommand
+                { Kind = AbilitySlotKind.ClassActive, Slot = 0, Ability = id }));
+            if (r == null || !r.Success) Male($"{id} nello slot: {Visto(r)}");
+            Pausa(0.15); a.Admin("ricarica");
+            r = Comanda(CommandType.UseAbility, P(new UseAbilityCommand { Ability = id, Yaw = 90f, TargetX = tx, TargetZ = tz }));
+            Pausa(0.2);
+            return r;
+        }
+        void Passiva(AbilityId id)
+        {
+            foreach (var (slot, ab) in new[] { ((byte)0, id), ((byte)1, AbilityId.None) })
+            {
+                var r = Comanda(CommandType.SetAbilitySlot, P(new SetAbilitySlotCommand
+                    { Kind = AbilitySlotKind.ClassPassive, Slot = slot, Ability = ab }));
+                if (r == null || !r.Success) Male($"{(ab == AbilityId.None ? "svuotare" : ab.ToString())} nello slot passivo {slot}: {Visto(r)}");
+            }
+            Pausa(0.3);
+        }
+        void Atteso(string cosa, CommandResultMsg r, ErrorCode atteso)
+        {
+            bool giusto = r != null && (atteso == ErrorCode.None ? r.Success : !r.Success && r.ErrorCode == atteso);
+            Console.WriteLine($"  {cosa}: {Visto(r)}{(giusto ? "" : $" (atteso {(atteso == ErrorCode.None ? "riuscito" : atteso.ToString())})")}");
+            if (!giusto) Male($"{cosa}: atteso {(atteso == ErrorCode.None ? "riuscito" : "rifiutato " + atteso)}");
+        }
+        void Pulisci(params Sonda[] chi) { foreach (var s in chi) Effetto(a, $"azzera {s.Id}"); }
+        void Controlla(string cosa, float visto, float atteso)
+        {
+            Console.WriteLine($"  {cosa}: {visto} (atteso {atteso})");
+            if (visto != atteso) Male($"{cosa}: {visto} invece di {atteso}");
+        }
+        void Contiene(string cosa, string riga, string pezzo, bool deve = true)
+        {
+            Console.WriteLine($"  {cosa}: {riga}");
+            if (riga.Contains(pezzo) != deve) Male($"{cosa}: {(deve ? "manca" : "non doveva esserci")} '{pezzo}'");
+        }
+        // Quanto perde B per un'azione di A (0 se niente in 1,5 s).
+        float Perde(Action azione)
+        {
+            Piena(b);
+            float prima = Vita(b);
+            azione();
+            Aspetta(() => Vita(b) < prima, 1.5);
+            Pausa(0.4);
+            return prima - Vita(b);
+        }
+        float ColpoDiA() => Perde(() => a.Colpisci(0.1));
+        float Magia(AbilityId id, float tx = 0f, float tz = 0f)
+        {
+            float perso = 0f;
+            perso = Perde(() => Atteso(id.ToString(), Prova(id, tx, tz), ErrorCode.None));
+            return perso;
+        }
+
+        try
+        {
+            a.Admin("setfaction 1"); b.Admin("setfaction 2");
+            foreach (var s in new[] { a, b })
+            {
+                s.Admin("clearinv"); s.Admin("abilita azzera"); s.Admin("effetto azzera");
+                s.Admin("give StoneSword 1");
+                Aspetta(() => s.Istanze.Values.Any(v => v.Tipo == ItemType.StoneSword), 5);
+                s.Dotazione(ItemType.StoneSword, ItemType.None, SideItemType.None);
+                s.Posizione(0);
+            }
+            Tp(a, PX, PZ); Tp(b, PX + 1.5f, PZ);
+            Pausa(0.15); Console.WriteLine($"  {a.ChiediAdmin("classe mago", "classe: ")}");
+            Pausa(0.15); Console.WriteLine($"  {a.ChiediAdmin("classe sblocca", "classe: ")}");
+            Pausa(0.15); a.Admin("abilita sblocca mago");
+            Pausa(0.4);
+            Passiva(AbilityId.None);
+            Piena(a, b);
+
+            // 0. Senza niente il colpo di spada di A fa 22.
+            Controlla("colpo di A su B senza niente", ColpoDiA(), 22f);
+
+            // 1. Dardo magico: 20 danni a B davanti; a 25 m non parte.
+            Controlla("Dardo magico su B a 1,5 m", Magia(AbilityId.MageMagicBolt), 20f);
+            Tp(b, PX + 25f, PZ);
+            Atteso("Dardo magico con B a 25 m", Prova(AbilityId.MageMagicBolt), ErrorCode.AbilityNotUsable);
+
+            // 2. Raggelare: a 14 m non parte; a 6 m B rallenta del 30%, senza danno.
+            Tp(b, PX + 14f, PZ);
+            Atteso("Raggelare con B a 14 m", Prova(AbilityId.MageChill), ErrorCode.AbilityNotUsable);
+            Tp(b, PX + 6f, PZ);
+            Atteso("Raggelare con B a 6 m", Prova(AbilityId.MageChill), ErrorCode.None);
+            Contiene("Raggelare, B", StatoDi(b), "rallentato 30%");
+            Pulisci(b);
+
+            // 3. Scudo magico: barriera del 10% della vita massima (100 -> 10).
+            Atteso("Scudo magico", Prova(AbilityId.MageMagicShield), ErrorCode.None);
+            Contiene("Scudo magico, A", StatoDi(a), "barriera 10 ");
+            Pulisci(a);
+
+            // 4. Scintilla: sul bersaglio davanti 20 danni; su un punto a 10 m,
+            //    lontano da B, parte e B non perde niente.
+            Tp(b, PX + 1.5f, PZ);
+            Controlla("Scintilla su B", Magia(AbilityId.MageSpark), 20f);
+            Controlla("Scintilla su un punto a 10 m da B", Magia(AbilityId.MageSpark, PX, PZ + 10f), 0f);
+
+            // 5. Spinta arcana: B a 2 m respinto di 4 m, a 6 m da A.
+            Tp(b, PX + 2f, PZ);
+            Atteso("Spinta arcana", Prova(AbilityId.MageArcanePush), ErrorCode.None);
+            var (bx, bz) = Pos(StatoDi(b));
+            Console.WriteLine($"  Spinta arcana, B arriva a ({bx:F2}, {bz:F2}) (atteso {PX + 6f}, {PZ})");
+            if (float.IsNaN(bx) || Dist(bx, bz, PX + 6f, PZ) > 0.4f) Male("la Spinta arcana deve portare B a 6 m da A");
+            Tp(b, PX + 1.5f, PZ);
+
+            // 6. Arcano nello slot passivo: il Dardo fa 22 (20 +10%).
+            Passiva(AbilityId.MageArcane);
+            Contiene("Arcano, A", StatoDi(a), "arcano+10");
+            Controlla("Dardo magico con Arcano", Magia(AbilityId.MageMagicBolt), 22f);
+            Controlla("colpo di A con Arcano (non e un'abilita)", ColpoDiA(), 22f);
+
+            // 7. Arma incantata: dopo una magia (Raggelare, senza danno) per 3 s
+            //    l'attacco base fa +15% (25); dopo i 3 s di nuovo 22.
+            Passiva(AbilityId.MageEnchantedWeapon);
+            Controlla("colpo di A con Arma incantata, senza magia", ColpoDiA(), 22f);
+            Atteso("Raggelare per Arma incantata", Prova(AbilityId.MageChill), ErrorCode.None);
+            Contiene("Arma incantata, A", StatoDi(a), "incantata+15");
+            Controlla("colpo di A subito dopo la magia", ColpoDiA(), 25f);
+            Pausa(3.2);
+            Contiene("Arma incantata finita, A", StatoDi(a), "incantata", deve: false);
+            Controlla("colpo di A dopo i 3 s", ColpoDiA(), 22f);
+        }
+        finally
+        {
+            foreach (var s in new[] { a, b }) { s.Admin("setfaction 1"); s.Admin("effetto azzera"); s.Admin("abilita azzera"); s.Admin("clearinv"); s.Admin("sethp 1000"); }
+            a.Dotazione(ItemType.None, ItemType.None, SideItemType.None);
+            b.Dotazione(ItemType.None, ItemType.None, SideItemType.None);
+            Pausa(0.5);
+        }
+
+        if (ok) Console.WriteLine("  OK: Dardo magico, Raggelare, Scudo magico, Scintilla, Spinta arcana, Arcano e Arma incantata fanno quello che dice il catalogo");
+        return ok;
+    }
     static readonly System.Globalization.CultureInfo Inv =
         System.Globalization.CultureInfo.InvariantCulture;
 }
