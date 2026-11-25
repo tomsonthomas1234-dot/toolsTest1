@@ -8740,6 +8740,118 @@ static class Regole
     }
 
     /// <summary>
+    /// A14j5b2: l'Occhio d'aquila dell'Esploratore. A e l'Esploratore
+    /// (fazione 1), B il nemico (fazione 2) a 8 m. La minimappa del client
+    /// mostra i nemici solo finche nello stato di A c'e il bit
+    /// PlayerFlags.EagleEye: qui si guarda il bit. Prima dell'uso non c'e;
+    /// dopo l'uso c'e nello stato che A riceve di se, non in quello che B
+    /// riceve di A; sparisce da solo dopo 6 s; "effetto azzera" lo toglie.
+    /// </summary>
+    public static bool OcchioDAquila(string tokenA, string tokenB, string host, int port)
+    {
+        Console.WriteLine("--- occhio d'aquila: i nemici sulla mappa per 6 s, il bit solo a chi lo usa");
+        bool ok = true;
+        void Male(string m) { Console.WriteLine("  FALLITA: " + m); ok = false; }
+
+        using var a = new Sonda(tokenA, host, port);
+        using var b = new Sonda(tokenB, host, port);
+        if (!a.AttendiPronta() || !b.AttendiPronta())
+        { Console.WriteLine("  FALLITA: le sonde non sono entrate in gioco"); return false; }
+
+        const float PX = -150f, PZ = 250f;   // lo stesso punto delle prove delle armi
+        static byte[] P<T>(T v) => MessagePack.MessagePackSerializer.Serialize(v);
+        bool Aspetta(Func<bool> cosa, double secondi) =>
+            a.Attendi(() => { b.Attendi(() => true, 0.01); return cosa(); }, secondi);
+        void Pausa(double secondi) => Aspetta(() => false, secondi);
+        static string Visto(CommandResultMsg r) => r == null ? "nessuna risposta" : r.Success ? "riuscito" : "rifiutato " + r.ErrorCode;
+        void Tp(Sonda s, float x, float z)
+        {
+            s.Admin($"tp {x.ToString(Inv)} {z.ToString(Inv)}");
+            Aspetta(() => Dist(s.X, s.Z, x, z) < 0.5f, 6);
+            s.Cammina(0f, 0f, 0.1);
+        }
+        string Effetto(Sonda s, string riga) { Pausa(0.15); return s.ChiediAdmin("effetto " + riga, "effetto: ") ?? "(nessuna risposta)"; }
+        // Il bit dell'Occhio nello stato di A visto da chi.
+        bool? Bit(Sonda chi)
+        {
+            lock (chi.Mondo)
+                return chi.Mondo.TryGetValue(a.Id, out var e) ? (e.Flags & PlayerFlags.EagleEye) != 0 : null;
+        }
+        static string Come(bool? bit) => bit == null ? "non arriva" : bit.Value ? "col bit" : "senza bit";
+        uint idComando = 950;
+        CommandResultMsg Prova(AbilityId id)
+        {
+            uint idSlot = idComando++, idUso = idComando++;
+            Pausa(0.15);
+            a.Comando(idSlot, CommandType.SetAbilitySlot, P(new SetAbilitySlotCommand
+                { Kind = AbilitySlotKind.ClassActive, Slot = 0, Ability = id }));
+            CommandResultMsg r = null;
+            Aspetta(() => (r = a.Esito(idSlot)) != null, 5);
+            if (r == null || !r.Success) Male($"{id} nello slot: {Visto(r)}");
+            Pausa(0.15); a.Admin("ricarica");
+            Pausa(0.15);
+            a.Comando(idUso, CommandType.UseAbility, P(new UseAbilityCommand { Ability = id, Yaw = 90f }));
+            r = null;
+            Aspetta(() => (r = a.Esito(idUso)) != null, 5);
+            return r;
+        }
+
+        try
+        {
+            a.Admin("setfaction 1"); b.Admin("setfaction 2");
+            foreach (var s in new[] { a, b }) { s.Admin("clearinv"); s.Admin("abilita azzera"); s.Admin("effetto azzera"); s.Admin("sethp 1000"); }
+            Tp(a, PX, PZ); Tp(b, PX + 8f, PZ);
+            Pausa(0.15); Console.WriteLine($"  {a.ChiediAdmin("classe esploratore", "classe: ")}");
+            Pausa(0.15); Console.WriteLine($"  {a.ChiediAdmin("classe sblocca", "classe: ")}");
+            Pausa(0.15); a.Admin("abilita sblocca esploratore");
+            Pausa(0.5);
+
+            // 1. Prima dell'uso: nessun bit, ne per A ne per B.
+            Aspetta(() => Bit(a) != null && Bit(b) != null, 3);
+            Console.WriteLine($"  prima: A di se {Come(Bit(a))}, B di A {Come(Bit(b))}");
+            if (Bit(a) != false) Male("prima dell'Occhio d'aquila A non deve avere il bit");
+            if (Bit(b) != false) Male("prima dell'Occhio d'aquila B deve vedere A senza il bit");
+
+            // 2. L'uso parte; il bit arriva ad A, non a B.
+            var r = Prova(AbilityId.ExplorerEagleEye);
+            Console.WriteLine($"  Occhio d'aquila: {Visto(r)}");
+            if (r == null || !r.Success) { Male("l'Occhio d'aquila deve partire"); return false; }
+            var orologio = System.Diagnostics.Stopwatch.StartNew();
+            bool acceso = Aspetta(() => Bit(a) == true, 2);
+            Pausa(0.3);
+            string st = Effetto(a, "stato");
+            Console.WriteLine($"  dopo: A di se {Come(Bit(a))}, B di A {Come(Bit(b))}; {st}");
+            if (!acceso) Male("con l'Occhio d'aquila A deve ricevere il bit nel proprio stato");
+            if (Bit(b) == true) Male("il bit dell'Occhio d'aquila non deve arrivare ad altri");
+            if (!st.Contains("occhio")) Male("\"effetto stato\" deve mostrare l'Occhio d'aquila");
+
+            // 3. Dopo 6 s il bit sparisce da solo.
+            bool spento = Aspetta(() => Bit(a) == false, 9);
+            double secondi = orologio.Elapsed.TotalSeconds;
+            Console.WriteLine($"  il bit sparisce dopo {secondi:F1} s (atteso circa 6)");
+            if (!spento) Male("il bit dell'Occhio d'aquila deve sparire dopo 6 s");
+            else if (secondi < 5f || secondi > 7.5f) Male($"l'Occhio d'aquila deve durare circa 6 s, non {secondi:F1}");
+
+            // 4. "effetto azzera" lo toglie subito.
+            r = Prova(AbilityId.ExplorerEagleEye);
+            bool riacceso = Aspetta(() => Bit(a) == true, 2);
+            Effetto(a, "azzera");
+            bool azzerato = Aspetta(() => Bit(a) == false, 2);
+            Console.WriteLine($"  di nuovo: {Visto(r)}, {(riacceso ? "col bit" : "senza bit")}; dopo \"effetto azzera\" {(azzerato ? "senza bit" : "ancora col bit")}");
+            if (!riacceso) Male("il secondo Occhio d'aquila deve rimettere il bit");
+            if (!azzerato) Male("\"effetto azzera\" deve togliere l'Occhio d'aquila");
+        }
+        finally
+        {
+            foreach (var s in new[] { a, b }) { s.Admin("setfaction 1"); s.Admin("effetto azzera"); s.Admin("abilita azzera"); s.Admin("clearinv"); s.Admin("sethp 1000"); }
+            Pausa(0.5);
+        }
+
+        if (ok) Console.WriteLine("  OK: l'Occhio d'aquila accende il bit della minimappa per 6 s, solo per chi lo usa");
+        return ok;
+    }
+
+    /// <summary>
     /// A14j3c: le passive del Cacciatore con un effetto loro. A e il Cacciatore
     /// (fazione 1, spada di pietra: il suo colpo fa 22), B il nemico (fazione
     /// 2). Una passiva alla volta nello slot passivo 0, l'altro vuoto: Letale,

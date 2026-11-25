@@ -193,6 +193,7 @@ if (modoRegole)
         ("invisibilita",            () => Regole.Invisibilita(tokens[1], tokens[0], tokens[4], host, port)),
         ("esploratore",             () => Regole.Esploratore(tokens[1], tokens[0], host, port)),
         ("fumo e sosia",            () => Regole.FumoESosia(tokens[1], tokens[0], host, port)),
+        ("occhio d'aquila",         () => Regole.OcchioDAquila(tokens[1], tokens[0], host, port)),
         ("passive dell'esploratore", () => Regole.PassiveDellEsploratore(tokens[1], tokens[0], host, port)),
         ("mago",                    () => Regole.Mago(tokens[1], tokens[0], host, port)),
         ("discepolo",               () => Regole.Discepolo(tokens[1], tokens[0], host, port)),
