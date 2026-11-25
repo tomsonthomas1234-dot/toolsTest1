@@ -197,6 +197,7 @@ if (modoRegole)
         ("mago",                    () => Regole.Mago(tokens[1], tokens[0], host, port)),
         ("discepolo",               () => Regole.Discepolo(tokens[1], tokens[0], host, port)),
         ("passive del discepolo",   () => Regole.PassiveDelDiscepolo(tokens[1], tokens[0], host, port)),
+        ("accolito",                () => Regole.Accolito(tokens[1], tokens[0], host, port)),
         ("silenzio",                () => Regole.Silenzio(tokens[0], TokenBersaglio(), host, port)),
         ("bando",                   () => Regole.Bando(tokens[0], TokenBersaglio, host, port)),
     };

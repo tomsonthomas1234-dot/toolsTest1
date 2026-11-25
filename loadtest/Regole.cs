@@ -9835,6 +9835,216 @@ static class Regole
         if (ok) Console.WriteLine("  OK: le sei passive del Discepolo dei Radicati fanno quello che dice il catalogo");
         return ok;
     }
+
+    /// <summary>
+    /// A14j8a: le attive dell'Accolito degli Echi senza oggetti nel mondo. A e
+    /// l'Accolito (con "evolvi accolito"), B un nemico con la spada di pietra,
+    /// passive tolte (Tempra oscura cambierebbe i colpi presi da A). I danni
+    /// si leggono sulla vita, gli effetti sulla riga di "effetto stato".
+    /// </summary>
+    public static bool Accolito(string tokenA, string tokenB, string host, int port)
+    {
+        Console.WriteLine("--- accolito: Tocco di cenere, Pelle scura, Catene d'ombra, Guscio, Eco del colpo, Prigione, Crepa, Sonno, Corazza degli Echi");
+        bool ok = true;
+        void Male(string m) { Console.WriteLine("  FALLITA: " + m); ok = false; }
+
+        using var a = new Sonda(tokenA, host, port);
+        using var b = new Sonda(tokenB, host, port);
+        if (!a.AttendiPronta() || !b.AttendiPronta())
+        { Console.WriteLine("  FALLITA: le sonde non sono entrate in gioco"); return false; }
+
+        const float PX = -150f, PZ = 250f;   // lo stesso punto delle prove delle armi
+        static byte[] P<T>(T v) => MessagePack.MessagePackSerializer.Serialize(v);
+        bool Aspetta(Func<bool> cosa, double secondi) =>
+            a.Attendi(() => { b.Attendi(() => true, 0.01); return cosa(); }, secondi);
+        void Pausa(double secondi) => Aspetta(() => false, secondi);
+        static string Visto(CommandResultMsg r) => r == null ? "nessuna risposta" : r.Success ? "riuscito" : "rifiutato " + r.ErrorCode;
+        float Vita(Sonda chi) => a.Stato(chi.Id).Vita;
+        void Tp(Sonda s, float x, float z)
+        {
+            s.Admin($"tp {x.ToString(Inv)} {z.ToString(Inv)}");
+            Aspetta(() => Dist(s.X, s.Z, x, z) < 0.5f, 6);
+            s.Cammina(0f, 0f, 0.1);
+        }
+        void Piena(params Sonda[] chi)
+        {
+            foreach (var s in chi) s.Admin("sethp 1000");
+            Aspetta(() => chi.All(s => Vita(s) >= 100f), 3);
+            Pausa(0.3);
+        }
+        string Effetto(Sonda s, string riga) { Pausa(0.15); return s.ChiediAdmin("effetto " + riga, "effetto: ") ?? "(nessuna risposta)"; }
+        string StatoDi(Sonda s) => Effetto(a, s == a ? "stato" : $"stato {s.Id}");
+        uint idComando = 860;
+        CommandResultMsg Comanda(CommandType tipo, byte[] dati)
+        {
+            uint n = idComando++;
+            Pausa(0.15);
+            a.Comando(n, tipo, dati);
+            CommandResultMsg r = null;
+            Aspetta(() => (r = a.Esito(n)) != null, 5);
+            return r;
+        }
+        // Mette l'attiva nel primo slot attivo, azzera le ricariche e la usa
+        // guardando verso +X (dove sta B), col punto (tx, tz) se c'e.
+        CommandResultMsg Prova(AbilityId id, float tx = 0f, float tz = 0f)
+        {
+            var r = Comanda(CommandType.SetAbilitySlot, P(new SetAbilitySlotCommand
+                { Kind = AbilitySlotKind.ClassActive, Slot = 0, Ability = id }));
+            if (r == null || !r.Success) Male($"{id} nello slot: {Visto(r)}");
+            Pausa(0.15); a.Admin("ricarica");
+            r = Comanda(CommandType.UseAbility, P(new UseAbilityCommand { Ability = id, Yaw = 90f, TargetX = tx, TargetZ = tz }));
+            Pausa(0.2);
+            return r;
+        }
+        void Atteso(string cosa, CommandResultMsg r, ErrorCode atteso)
+        {
+            bool giusto = r != null && (atteso == ErrorCode.None ? r.Success : !r.Success && r.ErrorCode == atteso);
+            Console.WriteLine($"  {cosa}: {Visto(r)}{(giusto ? "" : $" (atteso {(atteso == ErrorCode.None ? "riuscito" : atteso.ToString())})")}");
+            if (!giusto) Male($"{cosa}: atteso {(atteso == ErrorCode.None ? "riuscito" : "rifiutato " + atteso)}");
+        }
+        void Pulisci(params Sonda[] chi) { foreach (var s in chi) Effetto(a, $"azzera {s.Id}"); }
+        void Controlla(string cosa, float visto, float atteso)
+        {
+            Console.WriteLine($"  {cosa}: {visto} (atteso {atteso})");
+            if (visto != atteso) Male($"{cosa}: {visto} invece di {atteso}");
+        }
+        void Contiene(string cosa, string riga, string pezzo, bool deve = true)
+        {
+            Console.WriteLine($"  {cosa}: {riga}");
+            if (riga.Contains(pezzo) != deve) Male($"{cosa}: {(deve ? "manca" : "non doveva esserci")} '{pezzo}'");
+        }
+        // Quanto perde chi per un'azione (0 se niente in 1,5 s).
+        float Perde(Sonda chi, Action azione)
+        {
+            Piena(chi);
+            float prima = Vita(chi);
+            azione();
+            Aspetta(() => Vita(chi) < prima, 1.5);
+            Pausa(0.4);
+            return prima - Vita(chi);
+        }
+        float ColpoDiA() => Perde(b, () => a.Colpisci(0.1));
+        float ColpoDiB() => Perde(a, () => b.Colpisci(0.1));
+        float Magia(AbilityId id, float tx = 0f, float tz = 0f) =>
+            Perde(b, () => Atteso(id.ToString(), Prova(id, tx, tz), ErrorCode.None));
+
+        try
+        {
+            a.Admin("setfaction 1"); b.Admin("setfaction 2");
+            foreach (var s in new[] { a, b })
+            {
+                s.Admin("clearinv"); s.Admin("abilita azzera"); s.Admin("effetto azzera");
+                s.Admin("give StoneSword 1");
+                Aspetta(() => s.Istanze.Values.Any(v => v.Tipo == ItemType.StoneSword), 5);
+                s.Dotazione(ItemType.StoneSword, ItemType.None, SideItemType.None);
+                s.Posizione(0);
+            }
+            Tp(a, PX, PZ); Tp(b, PX + 1.5f, PZ);
+            Pausa(0.15); Console.WriteLine($"  {a.ChiediAdmin("classe mago", "classe: ")}");
+            Pausa(0.15); Console.WriteLine($"  {a.ChiediAdmin("evolvi accolito", "evolvi: ")}");
+            Pausa(0.15); a.Admin("abilita sblocca accolito");
+            Pausa(0.4);
+            foreach (var slot in new byte[] { 0, 1 })
+            {
+                var r = Comanda(CommandType.SetAbilitySlot, P(new SetAbilitySlotCommand
+                    { Kind = AbilitySlotKind.ClassPassive, Slot = slot, Ability = AbilityId.None }));
+                if (r == null || !r.Success) Male($"svuotare lo slot passivo {slot}: {Visto(r)}");
+            }
+            Pausa(0.3);
+            Piena(a, b);
+
+            // 0. Senza niente: A su B 22, B su A 22.
+            Controlla("colpo di A su B senza niente", ColpoDiA(), 22f);
+            Controlla("colpo di B su A senza niente", ColpoDiB(), 22f);
+
+            // 1. Tocco di cenere: 15 danni e B rallenta del 20%; a 5 m non parte.
+            Controlla("Tocco di cenere su B a 1,5 m", Magia(AbilityId.EchoAshTouch), 15f);
+            Contiene("Tocco di cenere, B", StatoDi(b), "rallentato 20%");
+            Pulisci(b);
+            Tp(b, PX + 5f, PZ);
+            Atteso("Tocco di cenere con B a 5 m", Prova(AbilityId.EchoAshTouch), ErrorCode.AbilityNotUsable);
+            Tp(b, PX + 1.5f, PZ);
+
+            // 2. Pelle scura: -25% danno subito, il colpo di B fa 17 (22 x 0,75).
+            Atteso("Pelle scura", Prova(AbilityId.EchoDarkSkin), ErrorCode.None);
+            Contiene("Pelle scura, A", StatoDi(a), "danno subito -25%");
+            Controlla("colpo di B su A con Pelle scura", ColpoDiB(), 17f);
+            Pulisci(a);
+
+            // 3. Catene d'ombra: a 14 m non parte; a 10 m B immobile.
+            Tp(b, PX + 14f, PZ);
+            Atteso("Catene d'ombra con B a 14 m", Prova(AbilityId.EchoShadowChains), ErrorCode.AbilityNotUsable);
+            Tp(b, PX + 10f, PZ);
+            Atteso("Catene d'ombra con B a 10 m", Prova(AbilityId.EchoShadowChains), ErrorCode.None);
+            Contiene("Catene d'ombra, B", StatoDi(b), "immobile ");
+            Pulisci(b);
+            Tp(b, PX + 1.5f, PZ);
+
+            // 4. Guscio: barriera del 12% della vita massima (100 -> 12).
+            Atteso("Guscio", Prova(AbilityId.EchoShell), ErrorCode.None);
+            Contiene("Guscio, A", StatoDi(a), "barriera 12 ");
+            Pulisci(a);
+
+            // 5. Eco del colpo: B colpisce A da vicino e rallenta del 30%.
+            Atteso("Eco del colpo", Prova(AbilityId.EchoOfTheBlow), ErrorCode.None);
+            Contiene("Eco del colpo, A", StatoDi(a), "accolito=eco30");
+            // Il rallentamento dura 1 s: si legge subito dopo il colpo.
+            Piena(a);
+            b.Colpisci(0.1);
+            Contiene("Eco del colpo, B subito dopo aver colpito", StatoDi(b), "rallentato 30%");
+            Pulisci(a, b);
+
+            // 6. Prigione: B chiuso 3 s, il colpo di A non gli fa niente e il
+            //    Tocco di cenere non lo trova; dopo i 3 s di nuovo 22.
+            Atteso("Prigione su B", Prova(AbilityId.EchoPrison), ErrorCode.None);
+            Contiene("Prigione, B", StatoDi(b), "prigione ");
+            Atteso("Tocco di cenere su B in prigione", Prova(AbilityId.EchoAshTouch), ErrorCode.AbilityNotUsable);
+            Controlla("colpo di A su B in prigione", ColpoDiA(), 0f);
+            Pausa(1.5);
+            Contiene("Prigione finita, B", StatoDi(b), "prigione", deve: false);
+            Controlla("colpo di A su B dopo la prigione", ColpoDiA(), 22f);
+            Pulisci(b);
+
+            // 7. Crepa: B a 5 m sulla linea, 30 danni e stordito; a 12 m parte a
+            //    vuoto.
+            Tp(b, PX + 5f, PZ);
+            Controlla("Crepa su B a 5 m", Magia(AbilityId.EchoCrack), 30f);
+            Contiene("Crepa, B", StatoDi(b), "stordito ");
+            Pulisci(b);
+            Tp(b, PX + 12f, PZ);
+            Controlla("Crepa con B a 12 m", Magia(AbilityId.EchoCrack), 0f);
+            Tp(b, PX + 1.5f, PZ);
+
+            // 8. Sonno: su un punto a 15 m da B niente; sul punto di B dorme, e
+            //    il colpo di A lo sveglia.
+            Atteso("Sonno lontano da B", Prova(AbilityId.EchoSleep, PX, PZ + 15f), ErrorCode.None);
+            Contiene("Sonno lontano, B", StatoDi(b), "addormentato", deve: false);
+            Atteso("Sonno su B", Prova(AbilityId.EchoSleep, PX + 1.5f, PZ), ErrorCode.None);
+            Contiene("Sonno, B", StatoDi(b), "addormentato ");
+            Controlla("colpo di A su B addormentato", ColpoDiA(), 22f);
+            string sveglio = StatoDi(b);
+            Contiene("dopo il colpo, B sveglio", sveglio, "addormentato", deve: false);
+            Contiene("dopo il colpo, B non piu stordito", sveglio, "stordito", deve: false);
+            Pulisci(b);
+
+            // 9. Corazza degli Echi: -35%, il colpo di B fa 14 (22 x 0,65), e B
+            //    perde il 10% di velocita d'attacco.
+            Atteso("Corazza degli Echi", Prova(AbilityId.EchoArmor), ErrorCode.None);
+            Contiene("Corazza degli Echi, A", StatoDi(a), "accolito=corazza");
+            Controlla("colpo di B su A con la Corazza", ColpoDiB(), 14f);
+            Contiene("Corazza degli Echi, B dopo aver colpito", StatoDi(b), "AttackSpeed -10%");
+        }
+        finally
+        {
+            foreach (var s in new[] { a, b }) { s.Admin("setfaction 1"); s.Admin("effetto azzera"); s.Admin("abilita azzera"); s.Admin("clearinv"); s.Admin("sethp 1000"); }
+            a.Dotazione(ItemType.None, ItemType.None, SideItemType.None);
+            b.Dotazione(ItemType.None, ItemType.None, SideItemType.None);
+            Pausa(0.5);
+        }
+
+        if (ok) Console.WriteLine("  OK: le nove attive dell'Accolito degli Echi fanno quello che dice il catalogo");
+        return ok;
+    }
     static readonly System.Globalization.CultureInfo Inv =
         System.Globalization.CultureInfo.InvariantCulture;
 }
