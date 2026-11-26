@@ -10588,6 +10588,225 @@ static class Regole
     }
 
     /// <summary>
+    /// A14j9a: le attive dell'Adepto dei Cristalli senza oggetti nel mondo. A e
+    /// l'Adepto (con "evolvi adepto"), B un nemico con la spada di pietra,
+    /// passive tolte. I danni si leggono sulla vita, gli effetti sulla riga di
+    /// "effetto stato". Come la prova dell'Accolito.
+    /// </summary>
+    public static bool Adepto(string tokenA, string tokenB, string host, int port)
+    {
+        Console.WriteLine("--- adepto: Scheggia, Raggio, Palla di fuoco, Pioggia di schegge, Sovraccarico, Lancia di cristallo, Esplosione, Cristallizzare, Furia arcana");
+        bool ok = true;
+        void Male(string m) { Console.WriteLine("  FALLITA: " + m); ok = false; }
+
+        using var a = new Sonda(tokenA, host, port);
+        using var b = new Sonda(tokenB, host, port);
+        if (!a.AttendiPronta() || !b.AttendiPronta())
+        { Console.WriteLine("  FALLITA: le sonde non sono entrate in gioco"); return false; }
+
+        const float PX = -150f, PZ = 250f;   // lo stesso punto delle prove delle armi
+        static byte[] P<T>(T v) => MessagePack.MessagePackSerializer.Serialize(v);
+        bool Aspetta(Func<bool> cosa, double secondi) =>
+            a.Attendi(() => { b.Attendi(() => true, 0.01); return cosa(); }, secondi);
+        void Pausa(double secondi) => Aspetta(() => false, secondi);
+        static string Visto(CommandResultMsg r) => r == null ? "nessuna risposta" : r.Success ? "riuscito" : "rifiutato " + r.ErrorCode;
+        float Vita(Sonda chi) => a.Stato(chi.Id).Vita;
+        void Tp(Sonda s, float x, float z)
+        {
+            s.Admin($"tp {x.ToString(Inv)} {z.ToString(Inv)}");
+            Aspetta(() => Dist(s.X, s.Z, x, z) < 0.5f, 6);
+            s.Cammina(0f, 0f, 0.1);
+        }
+        void Piena(params Sonda[] chi)
+        {
+            foreach (var s in chi) s.Admin("sethp 1000");
+            Aspetta(() => chi.All(s => Vita(s) >= 100f), 3);
+            Pausa(0.3);
+        }
+        string Effetto(Sonda s, string riga) { Pausa(0.15); return s.ChiediAdmin("effetto " + riga, "effetto: ") ?? "(nessuna risposta)"; }
+        string StatoDi(Sonda s) => Effetto(a, s == a ? "stato" : $"stato {s.Id}");
+        uint idComando = 900;
+        CommandResultMsg Comanda(CommandType tipo, byte[] dati)
+        {
+            uint n = idComando++;
+            Pausa(0.15);
+            a.Comando(n, tipo, dati);
+            CommandResultMsg r = null;
+            Aspetta(() => (r = a.Esito(n)) != null, 5);
+            return r;
+        }
+        // Mette l'attiva nel primo slot attivo, azzera le ricariche e la usa
+        // guardando verso +X (dove sta B), col punto (tx, tz) se c'e.
+        CommandResultMsg Prova(AbilityId id, float tx = 0f, float tz = 0f, double dopo = 0.2)
+        {
+            var r = Comanda(CommandType.SetAbilitySlot, P(new SetAbilitySlotCommand
+                { Kind = AbilitySlotKind.ClassActive, Slot = 0, Ability = id }));
+            if (r == null || !r.Success) Male($"{id} nello slot: {Visto(r)}");
+            Pausa(0.15); a.Admin("ricarica");
+            r = Comanda(CommandType.UseAbility, P(new UseAbilityCommand { Ability = id, Yaw = 90f, TargetX = tx, TargetZ = tz }));
+            Pausa(dopo);
+            return r;
+        }
+        void Atteso(string cosa, CommandResultMsg r, ErrorCode atteso)
+        {
+            bool giusto = r != null && (atteso == ErrorCode.None ? r.Success : !r.Success && r.ErrorCode == atteso);
+            Console.WriteLine($"  {cosa}: {Visto(r)}{(giusto ? "" : $" (atteso {(atteso == ErrorCode.None ? "riuscito" : atteso.ToString())})")}");
+            if (!giusto) Male($"{cosa}: atteso {(atteso == ErrorCode.None ? "riuscito" : "rifiutato " + atteso)}");
+        }
+        void Pulisci(params Sonda[] chi) { foreach (var s in chi) Effetto(a, $"azzera {s.Id}"); }
+        void Controlla(string cosa, float visto, float atteso)
+        {
+            Console.WriteLine($"  {cosa}: {visto} (atteso {atteso})");
+            if (visto != atteso) Male($"{cosa}: {visto} invece di {atteso}");
+        }
+        void Contiene(string cosa, string riga, string pezzo, bool deve = true)
+        {
+            Console.WriteLine($"  {cosa}: {riga}");
+            if (riga.Contains(pezzo) != deve) Male($"{cosa}: {(deve ? "manca" : "non doveva esserci")} '{pezzo}'");
+        }
+        // Quanto perde chi per un'azione (0 se niente in 1,5 s).
+        float Perde(Sonda chi, Action azione)
+        {
+            Piena(chi);
+            float prima = Vita(chi);
+            azione();
+            Aspetta(() => Vita(chi) < prima, 1.5);
+            Pausa(0.4);
+            return prima - Vita(chi);
+        }
+        float ColpoDiA() => Perde(b, () => a.Colpisci(0.1));
+        float Magia(AbilityId id, float tx = 0f, float tz = 0f) =>
+            Perde(b, () => Atteso(id.ToString(), Prova(id, tx, tz), ErrorCode.None));
+
+        try
+        {
+            a.Admin("setfaction 1"); b.Admin("setfaction 2");
+            foreach (var s in new[] { a, b })
+            {
+                s.Admin("clearinv"); s.Admin("abilita azzera"); s.Admin("effetto azzera");
+                s.Admin("give StoneSword 1");
+                Aspetta(() => s.Istanze.Values.Any(v => v.Tipo == ItemType.StoneSword), 5);
+                s.Dotazione(ItemType.StoneSword, ItemType.None, SideItemType.None);
+                s.Posizione(0);
+            }
+            Tp(a, PX, PZ); Tp(b, PX + 1.5f, PZ);
+            Pausa(0.15); Console.WriteLine($"  {a.ChiediAdmin("classe mago", "classe: ")}");
+            Pausa(0.15); Console.WriteLine($"  {a.ChiediAdmin("evolvi adepto", "evolvi: ")}");
+            Pausa(0.15); a.Admin("abilita sblocca adepto");
+            Pausa(0.4);
+            foreach (var slot in new byte[] { 0, 1 })
+            {
+                var r = Comanda(CommandType.SetAbilitySlot, P(new SetAbilitySlotCommand
+                    { Kind = AbilitySlotKind.ClassPassive, Slot = slot, Ability = AbilityId.None }));
+                if (r == null || !r.Success) Male($"svuotare lo slot passivo {slot}: {Visto(r)}");
+            }
+            Pausa(0.3);
+            Piena(a, b);
+
+            // 0. Senza niente: A su B 22.
+            Controlla("colpo di A su B senza niente", ColpoDiA(), 22f);
+
+            // 1. Scheggia: 25 danni; con B a 27 m non parte.
+            Controlla("Scheggia su B a 1,5 m", Magia(AbilityId.CrystalShard), 25f);
+            Tp(b, PX + 27f, PZ);
+            Atteso("Scheggia con B a 27 m", Prova(AbilityId.CrystalShard), ErrorCode.AbilityNotUsable);
+
+            // 2. Raggio: B a 5 m perde 30 in 1,5 s, A va piano mentre lo tiene;
+            //    A stordito subito dopo spezza il Raggio.
+            Tp(b, PX + 5f, PZ);
+            Piena(b);
+            float primaRaggio = Vita(b);
+            Atteso("Raggio su B a 5 m", Prova(AbilityId.CrystalBeam), ErrorCode.None);
+            string raggio = StatoDi(a);
+            Contiene("Raggio, A lo tiene", raggio, "adepto=raggio");
+            Contiene("Raggio, A va piano", raggio, "MoveSpeed -50%");
+            Pausa(2.0);
+            Controlla("Raggio, B perde in tutto", primaRaggio - Vita(b), 30f);
+            Contiene("Raggio finito, A", StatoDi(a), "adepto=raggio", deve: false);
+            Piena(b);
+            primaRaggio = Vita(b);
+            Atteso("Raggio su B, poi A stordito", Prova(AbilityId.CrystalBeam, dopo: 0.0), ErrorCode.None);
+            Effetto(a, "stordisci 2");
+            Pausa(2.0);
+            float spezzato = primaRaggio - Vita(b);
+            Console.WriteLine($"  Raggio spezzato, B perde: {spezzato} (atteso meno di 30)");
+            if (spezzato >= 30f) Male($"Raggio spezzato: B perde {spezzato}, il Raggio non si e spezzato");
+            Contiene("Raggio spezzato, A", StatoDi(a), "MoveSpeed -50%", deve: false);
+            Pulisci(a, b);
+
+            // 3. Palla di fuoco sul punto di B: 35 subito, poi brucia 15 in 3 s;
+            //    su un punto a 15 m da B niente.
+            Piena(b);
+            float primaFuoco = Vita(b);
+            Atteso("Palla di fuoco su B", Prova(AbilityId.CrystalFireball, PX + 5f, PZ, dopo: 0.5), ErrorCode.None);
+            Controlla("Palla di fuoco, B subito", primaFuoco - Vita(b), 35f);
+            Contiene("Palla di fuoco, B brucia", StatoDi(b), "(Palla di fuoco)");
+            Pausa(3.5);
+            Controlla("Palla di fuoco, B in tutto", primaFuoco - Vita(b), 50f);
+            Pulisci(b);
+            Controlla("Palla di fuoco lontano da B", Magia(AbilityId.CrystalFireball, PX + 5f, PZ + 15f), 0f);
+
+            // 4. Pioggia di schegge sul punto di B: 4 colpi da 10 in 2 s.
+            Piena(b);
+            float primaPioggia = Vita(b);
+            Atteso("Pioggia di schegge su B", Prova(AbilityId.CrystalShardRain, PX + 5f, PZ, dopo: 2.5), ErrorCode.None);
+            Controlla("Pioggia di schegge, B in tutto", primaPioggia - Vita(b), 40f);
+            Pulisci(b);
+
+            // 5. Sovraccarico: la Scheggia dopo fa 35 (25 x 1,4), quella dopo
+            //    ancora 25.
+            Atteso("Sovraccarico", Prova(AbilityId.CrystalOvercharge), ErrorCode.None);
+            Contiene("Sovraccarico, A", StatoDi(a), "adepto=sovraccarico40");
+            Controlla("Scheggia col Sovraccarico", Magia(AbilityId.CrystalShard), 35f);
+            Contiene("Sovraccarico consumato, A", StatoDi(a), "sovraccarico", deve: false);
+            Controlla("Scheggia dopo il Sovraccarico", Magia(AbilityId.CrystalShard), 25f);
+
+            // 6. Lancia di cristallo: B a 20 m sulla linea 45; a 32 m 0.
+            Tp(b, PX + 20f, PZ);
+            Controlla("Lancia di cristallo su B a 20 m", Magia(AbilityId.CrystalLance), 45f);
+            Tp(b, PX + 32f, PZ);
+            Controlla("Lancia di cristallo con B a 32 m", Magia(AbilityId.CrystalLance), 0f);
+
+            // 7. Esplosione: B a 3 m 40; a 6 m 0.
+            Tp(b, PX + 3f, PZ);
+            Controlla("Esplosione con B a 3 m", Magia(AbilityId.CrystalExplosion), 40f);
+            Tp(b, PX + 6f, PZ);
+            Controlla("Esplosione con B a 6 m", Magia(AbilityId.CrystalExplosion), 0f);
+
+            // 8. Cristallizzare: B a 10 m; subito niente, dopo 3 s 80.
+            Tp(b, PX + 10f, PZ);
+            Piena(b);
+            float primaCristallo = Vita(b);
+            Atteso("Cristallizzare su B a 10 m", Prova(AbilityId.CrystalCrystallize), ErrorCode.None);
+            Contiene("Cristallizzare, A", StatoDi(a), "cristalli1");
+            Controlla("Cristallizzare, B subito", primaCristallo - Vita(b), 0f);
+            Pausa(3.2);
+            Controlla("Cristallizzare, B dopo 3 s", primaCristallo - Vita(b), 80f);
+            Contiene("Cristallizzare esploso, A", StatoDi(a), "cristalli", deve: false);
+
+            // 9. Furia arcana: +30% danno delle abilita (la Scheggia fa 33) e
+            //    ricariche -30%; il colpo di spada resta 22.
+            Tp(b, PX + 1.5f, PZ);
+            Atteso("Furia arcana", Prova(AbilityId.CrystalArcaneFury), ErrorCode.None);
+            string furia = StatoDi(a);
+            Contiene("Furia arcana, A", furia, "adepto=furia30");
+            Contiene("Furia arcana, ricariche", furia, "CooldownReduction +30%");
+            Controlla("Scheggia con la Furia arcana", Magia(AbilityId.CrystalShard), 33f);
+            Controlla("colpo di A su B con la Furia arcana", ColpoDiA(), 22f);
+        }
+        finally
+        {
+            foreach (var s in new[] { a, b }) { s.Admin("setfaction 1"); s.Admin("effetto azzera"); s.Admin("abilita azzera"); s.Admin("clearinv"); s.Admin("sethp 1000"); }
+            a.Dotazione(ItemType.None, ItemType.None, SideItemType.None);
+            b.Dotazione(ItemType.None, ItemType.None, SideItemType.None);
+            Pausa(0.5);
+        }
+
+        if (ok) Console.WriteLine("  OK: le nove attive dell'Adepto dei Cristalli fanno quello che dice il catalogo");
+        return ok;
+    }
+
+    /// <summary>
     /// A14j8b: il Muro di cenere dell'Accolito degli Echi. A e l'Accolito
     /// (fazione 1) e guarda verso +X; B il nemico (fazione 2), con l'arco, a
     /// 3,5 m. Il muro nasce 2 m davanti ad A, lungo 6 m di traverso (lungo Z),
