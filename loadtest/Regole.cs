@@ -10981,6 +10981,215 @@ static class Regole
     }
 
     /// <summary>
+    /// A14j9c: le passive dell'Adepto dei Cristalli con un effetto loro. A e
+    /// l'Adepto, B un nemico a 5 m. Ogni passiva va da sola nel primo slot
+    /// passivo e si misura con la Scheggia (25 danni senza niente) letta sulla
+    /// vita di B: Brillanza 27, Vetro 31 e vita massima di A 90, Bruciatura 25
+    /// piu 3 in 3 s, Gittata arcana la Scheggia a 28 m, Critico arcano
+    /// l'ottava 50, Cuore freddo 30 su B rallentato o immobile, Risonanza 26 e
+    /// 28 dopo uno e due colpi, al piu 31 (+25%). Come la prova dell'Adepto.
+    /// </summary>
+    public static bool PassiveAdepto(string tokenA, string tokenB, string host, int port)
+    {
+        Console.WriteLine("--- passive dell'adepto: Brillanza, Vetro, Bruciatura, Gittata arcana, Critico arcano, Cuore freddo, Risonanza");
+        bool ok = true;
+        void Male(string m) { Console.WriteLine("  FALLITA: " + m); ok = false; }
+
+        using var a = new Sonda(tokenA, host, port);
+        using var b = new Sonda(tokenB, host, port);
+        if (!a.AttendiPronta() || !b.AttendiPronta())
+        { Console.WriteLine("  FALLITA: le sonde non sono entrate in gioco"); return false; }
+
+        const float PX = -150f, PZ = 250f;   // lo stesso punto delle prove delle armi
+        static byte[] P<T>(T v) => MessagePack.MessagePackSerializer.Serialize(v);
+        bool Aspetta(Func<bool> cosa, double secondi) =>
+            a.Attendi(() => { b.Attendi(() => true, 0.01); return cosa(); }, secondi);
+        void Pausa(double secondi) => Aspetta(() => false, secondi);
+        static string Visto(CommandResultMsg r) => r == null ? "nessuna risposta" : r.Success ? "riuscito" : "rifiutato " + r.ErrorCode;
+        float Vita(Sonda chi) => a.Stato(chi.Id).Vita;
+        void Tp(Sonda s, float x, float z)
+        {
+            s.Admin($"tp {x.ToString(Inv)} {z.ToString(Inv)}");
+            Aspetta(() => Dist(s.X, s.Z, x, z) < 0.5f, 6);
+            s.Cammina(0f, 0f, 0.1);
+        }
+        void Piena(params Sonda[] chi)
+        {
+            foreach (var s in chi) s.Admin("sethp 1000");
+            Aspetta(() => chi.All(s => Vita(s) >= 100f), 3);
+            Pausa(0.3);
+        }
+        string Effetto(Sonda s, string riga) { Pausa(0.15); return s.ChiediAdmin("effetto " + riga, "effetto: ") ?? "(nessuna risposta)"; }
+        string StatoDi(Sonda s) => Effetto(a, s == a ? "stato" : $"stato {s.Id}");
+        uint idComando = 1000;
+        CommandResultMsg Comanda(CommandType tipo, byte[] dati)
+        {
+            uint n = idComando++;
+            Pausa(0.15);
+            a.Comando(n, tipo, dati);
+            CommandResultMsg r = null;
+            Aspetta(() => (r = a.Esito(n)) != null, 5);
+            return r;
+        }
+        // La Scheggia su B (guardando verso +X), ricariche azzerate.
+        CommandResultMsg Scheggia(double dopo = 0.2)
+        {
+            Pausa(0.15); a.Admin("ricarica");
+            var r = Comanda(CommandType.UseAbility, P(new UseAbilityCommand { Ability = AbilityId.CrystalShard, Yaw = 90f }));
+            Pausa(dopo);
+            return r;
+        }
+        void Atteso(string cosa, CommandResultMsg r, ErrorCode atteso)
+        {
+            bool giusto = r != null && (atteso == ErrorCode.None ? r.Success : !r.Success && r.ErrorCode == atteso);
+            Console.WriteLine($"  {cosa}: {Visto(r)}{(giusto ? "" : $" (atteso {(atteso == ErrorCode.None ? "riuscito" : atteso.ToString())})")}");
+            if (!giusto) Male($"{cosa}: atteso {(atteso == ErrorCode.None ? "riuscito" : "rifiutato " + atteso)}");
+        }
+        void Controlla(string cosa, float visto, float atteso)
+        {
+            Console.WriteLine($"  {cosa}: {visto} (atteso {atteso})");
+            if (visto != atteso) Male($"{cosa}: {visto} invece di {atteso}");
+        }
+        void Contiene(string cosa, string riga, string pezzo, bool deve = true)
+        {
+            Console.WriteLine($"  {cosa}: {riga}");
+            if (riga.Contains(pezzo) != deve) Male($"{cosa}: {(deve ? "manca" : "non doveva esserci")} '{pezzo}'");
+        }
+        // Quanto perde B per una Scheggia (0 se niente in 1,5 s).
+        float ColpoScheggia()
+        {
+            Piena(b);
+            float prima = Vita(b);
+            Atteso("Scheggia", Scheggia(), ErrorCode.None);
+            Aspetta(() => Vita(b) < prima, 1.5);
+            Pausa(0.4);
+            return prima - Vita(b);
+        }
+        // Solo questa passiva nel primo slot (None = nessuna), e A ripulito.
+        void Passiva(AbilityId id)
+        {
+            foreach (var (slot, ab) in new[] { ((byte)0, id), ((byte)1, AbilityId.None) })
+            {
+                var r = Comanda(CommandType.SetAbilitySlot, P(new SetAbilitySlotCommand
+                    { Kind = AbilitySlotKind.ClassPassive, Slot = slot, Ability = ab }));
+                if (r == null || !r.Success) Male($"{(ab == AbilityId.None ? "svuotare" : ab.ToString())} nello slot passivo {slot}: {Visto(r)}");
+            }
+            Effetto(a, "azzera");   // si riparte senza Risonanza e senza conto del Critico
+            Effetto(a, $"azzera {b.Id}");
+            Pausa(0.3);
+        }
+        // La vita massima di A: gli si da' tutta la vita che puo' avere.
+        float VitaMaxA()
+        {
+            a.Admin("sethp 1000");
+            Pausa(0.6);
+            return Vita(a);
+        }
+
+        try
+        {
+            a.Admin("setfaction 1"); b.Admin("setfaction 2");
+            foreach (var s in new[] { a, b })
+            {
+                s.Admin("clearinv"); s.Admin("abilita azzera"); s.Admin("effetto azzera");
+                s.Admin("give StoneSword 1");
+                Aspetta(() => s.Istanze.Values.Any(v => v.Tipo == ItemType.StoneSword), 5);
+                s.Dotazione(ItemType.StoneSword, ItemType.None, SideItemType.None);
+                s.Posizione(0);
+            }
+            Tp(a, PX, PZ); Tp(b, PX + 5f, PZ);
+            Pausa(0.15); Console.WriteLine($"  {a.ChiediAdmin("classe mago", "classe: ")}");
+            Pausa(0.15); Console.WriteLine($"  {a.ChiediAdmin("evolvi adepto", "evolvi: ")}");
+            Pausa(0.15); a.Admin("abilita sblocca adepto");
+            Pausa(0.4);
+            var rs = Comanda(CommandType.SetAbilitySlot, P(new SetAbilitySlotCommand
+                { Kind = AbilitySlotKind.ClassActive, Slot = 0, Ability = AbilityId.CrystalShard }));
+            if (rs == null || !rs.Success) Male($"Scheggia nello slot: {Visto(rs)}");
+            Passiva(AbilityId.None);
+            Piena(a, b);
+
+            // 0. Senza passive: la Scheggia fa 25.
+            Controlla("Scheggia senza passive", ColpoScheggia(), 25f);
+
+            // 1. Brillanza: +8%, 27.
+            Passiva(AbilityId.CrystalBrilliance);
+            Contiene("Brillanza, A", StatoDi(a), "brillanza8");
+            Controlla("Scheggia con Brillanza", ColpoScheggia(), 27f);
+
+            // 2. Vetro: +25%, 31; la vita massima di A scende a 90 e torna a 100.
+            Passiva(AbilityId.CrystalGlass);
+            Controlla("Scheggia con Vetro", ColpoScheggia(), 31f);
+            Controlla("vita massima di A con Vetro", VitaMaxA(), 90f);
+            Passiva(AbilityId.None);
+            Controlla("vita massima di A senza Vetro", VitaMaxA(), 100f);
+
+            // 3. Bruciatura: 25 subito, poi brucia il 10% (3) in 3 s.
+            Passiva(AbilityId.CrystalBurn);
+            Piena(b);
+            float primaBrucia = Vita(b);
+            Atteso("Scheggia con Bruciatura", Scheggia(0.5), ErrorCode.None);
+            Contiene("Bruciatura, B", StatoDi(b), "(Bruciatura)");
+            Pausa(3.5);
+            Controlla("Bruciatura, B in tutto", primaBrucia - Vita(b), 28f);
+            Passiva(AbilityId.None);
+            Controlla("senza Bruciatura, B dopo la Scheggia", ColpoScheggia(), 25f);
+            Contiene("senza Bruciatura, B", StatoDi(b), "Bruciatura", deve: false);
+
+            // 4. Gittata arcana: +20%, la Scheggia (25 m) arriva a B a 28 m.
+            Tp(b, PX + 28f, PZ);
+            Atteso("Scheggia su B a 28 m senza Gittata arcana", Scheggia(), ErrorCode.AbilityNotUsable);
+            Passiva(AbilityId.CrystalArcaneRange);
+            Controlla("Scheggia su B a 28 m con Gittata arcana", ColpoScheggia(), 25f);
+            Tp(b, PX + 32f, PZ);
+            Atteso("Scheggia su B a 32 m con Gittata arcana", Scheggia(), ErrorCode.AbilityNotUsable);
+            Tp(b, PX + 5f, PZ);
+
+            // 5. Critico arcano: una su otto fa il doppio, contata.
+            Passiva(AbilityId.CrystalArcaneCritical);
+            Contiene("Critico arcano, A", StatoDi(a), "critico8:0");
+            var colpi = new List<float>();
+            for (int i = 0; i < 9; i++) colpi.Add(ColpoScheggia());
+            Console.WriteLine($"  Critico arcano, nove Schegge: {string.Join(" ", colpi)} (attese 25 x7, 50, 25)");
+            if (colpi.Take(7).Any(c => c != 25f) || colpi[7] != 50f || colpi[8] != 25f)
+                Male("Critico arcano: l'ottava Scheggia deve fare 50 e le altre 25");
+            Contiene("Critico arcano dopo nove, A", StatoDi(a), "critico8:1");
+
+            // 6. Cuore freddo: +20% su B rallentato o immobile, 30; se no 25.
+            Passiva(AbilityId.CrystalColdHeart);
+            Controlla("Scheggia con Cuore freddo, B libero", ColpoScheggia(), 25f);
+            Effetto(a, $"rallenta 30 6 {b.Id}");
+            Controlla("Scheggia con Cuore freddo, B rallentato", ColpoScheggia(), 30f);
+            Effetto(a, $"azzera {b.Id}");
+            Effetto(a, $"immobile 4 {b.Id}");
+            Controlla("Scheggia con Cuore freddo, B immobile", ColpoScheggia(), 30f);
+            Effetto(a, $"azzera {b.Id}");
+
+            // 7. Risonanza: ogni colpo +5% per 5 s, fino a +25%: 25, 26, 28,
+            //    29, 30, 31, 31.
+            Passiva(AbilityId.CrystalResonance);
+            var serie = new List<float>();
+            for (int i = 0; i < 7; i++) serie.Add(ColpoScheggia());
+            Console.WriteLine($"  Risonanza, sette Schegge: {string.Join(" ", serie)} (attese 25 26 28 29 30 31 31)");
+            if (!serie.SequenceEqual(new[] { 25f, 26f, 28f, 29f, 30f, 31f, 31f }))
+                Male("Risonanza: ogni Scheggia deve fare il 5% in piu' della prima, fino al 25%");
+            Contiene("Risonanza al tetto, A", StatoDi(a), "risonanza25(+25)");
+            Pausa(5.5);
+            Contiene("Risonanza dopo 5 s, A", StatoDi(a), "risonanza25(+0)");
+            Controlla("Scheggia con Risonanza scaduta", ColpoScheggia(), 25f);
+        }
+        finally
+        {
+            foreach (var s in new[] { a, b }) { s.Admin("setfaction 1"); s.Admin("effetto azzera"); s.Admin("abilita azzera"); s.Admin("clearinv"); s.Admin("sethp 1000"); }
+            a.Dotazione(ItemType.None, ItemType.None, SideItemType.None);
+            b.Dotazione(ItemType.None, ItemType.None, SideItemType.None);
+            Pausa(0.5);
+        }
+
+        if (ok) Console.WriteLine("  OK: le sette passive dell'Adepto dei Cristalli fanno quello che dice il catalogo");
+        return ok;
+    }
+
+    /// <summary>
     /// A14j8b: il Muro di cenere dell'Accolito degli Echi. A e l'Accolito
     /// (fazione 1) e guarda verso +X; B il nemico (fazione 2), con l'arco, a
     /// 3,5 m. Il muro nasce 2 m davanti ad A, lungo 6 m di traverso (lungo Z),
