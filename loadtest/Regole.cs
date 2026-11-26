@@ -10828,6 +10828,159 @@ static class Regole
     }
 
     /// <summary>
+    /// A14j9b: la Fiamma persistente dell'Adepto dei Cristalli, zona nel mondo.
+    /// A e l'Adepto, B un nemico a 8 m. La fiamma accesa su B si vede come
+    /// entita (tipo, raggio 4, fazione di A), brucia 10 al secondo per 6 s (60
+    /// in tutto, il primo colpo subito) e poi sparisce; una seconda fiamma
+    /// toglie la prima, e chi resta fuori dalla zona non brucia. Come la prova
+    /// dell'Adepto.
+    /// </summary>
+    public static bool FiammaPersistente(string tokenA, string tokenB, string host, int port)
+    {
+        Console.WriteLine("--- fiamma persistente: zona che brucia, una per giocatore");
+        bool ok = true;
+        void Male(string m) { Console.WriteLine("  FALLITA: " + m); ok = false; }
+
+        using var a = new Sonda(tokenA, host, port);
+        using var b = new Sonda(tokenB, host, port);
+        if (!a.AttendiPronta() || !b.AttendiPronta())
+        { Console.WriteLine("  FALLITA: le sonde non sono entrate in gioco"); return false; }
+
+        const float PX = -150f, PZ = 250f;   // lo stesso punto delle prove delle armi
+        static byte[] P<T>(T v) => MessagePack.MessagePackSerializer.Serialize(v);
+        bool Aspetta(Func<bool> cosa, double secondi) =>
+            a.Attendi(() => { b.Attendi(() => true, 0.01); return cosa(); }, secondi);
+        void Pausa(double secondi) => Aspetta(() => false, secondi);
+        static string Visto(CommandResultMsg r) => r == null ? "nessuna risposta" : r.Success ? "riuscito" : "rifiutato " + r.ErrorCode;
+        float Vita(Sonda chi) => a.Stato(chi.Id).Vita;
+        void Tp(Sonda s, float x, float z)
+        {
+            s.Admin($"tp {x.ToString(Inv)} {z.ToString(Inv)}");
+            Aspetta(() => Dist(s.X, s.Z, x, z) < 0.5f, 6);
+            s.Cammina(0f, 0f, 0.1);
+        }
+        void Piena(params Sonda[] chi)
+        {
+            foreach (var s in chi) s.Admin("sethp 1000");
+            Aspetta(() => chi.All(s => Vita(s) >= 100f), 3);
+            Pausa(0.3);
+        }
+        uint idComando = 950;
+        CommandResultMsg Comanda(CommandType tipo, byte[] dati)
+        {
+            uint n = idComando++;
+            Pausa(0.15);
+            a.Comando(n, tipo, dati);
+            CommandResultMsg r = null;
+            Aspetta(() => (r = a.Esito(n)) != null, 5);
+            return r;
+        }
+        // Mette la Fiamma nel primo slot attivo, azzera le ricariche e la accende
+        // sul punto (tx, tz), guardando verso +X (dove sta B).
+        void Fiamma(string cosa, float tx, float tz)
+        {
+            var r = Comanda(CommandType.SetAbilitySlot, P(new SetAbilitySlotCommand
+                { Kind = AbilitySlotKind.ClassActive, Slot = 0, Ability = AbilityId.CrystalLingeringFlame }));
+            if (r == null || !r.Success) Male($"Fiamma persistente nello slot: {Visto(r)}");
+            a.Admin("ricarica");
+            r = Comanda(CommandType.UseAbility, P(new UseAbilityCommand
+                { Ability = AbilityId.CrystalLingeringFlame, Yaw = 90f, TargetX = tx, TargetZ = tz }));
+            Console.WriteLine($"  {cosa}: {Visto(r)}");
+            if (r == null || !r.Success) Male($"{cosa}: atteso riuscito");
+        }
+        List<EntityState> Fiamme()
+        {
+            lock (a.Mondo) return a.Mondo.Values.Where(e => e.Type == EntityType.LingeringFlame && a.Vede(e.EntityId)).ToList();
+        }
+        void Controlla(string cosa, float visto, float atteso)
+        {
+            Console.WriteLine($"  {cosa}: {visto} (atteso {atteso})");
+            if (visto != atteso) Male($"{cosa}: {visto} invece di {atteso}");
+        }
+
+        try
+        {
+            a.Admin("setfaction 1"); b.Admin("setfaction 2");
+            foreach (var s in new[] { a, b })
+            {
+                s.Admin("clearinv"); s.Admin("abilita azzera"); s.Admin("effetto azzera");
+                s.Admin("give StoneSword 1");
+                Aspetta(() => s.Istanze.Values.Any(v => v.Tipo == ItemType.StoneSword), 5);
+                s.Dotazione(ItemType.StoneSword, ItemType.None, SideItemType.None);
+                s.Posizione(0);
+            }
+            Tp(a, PX, PZ); Tp(b, PX + 8f, PZ);
+            Pausa(0.15); Console.WriteLine($"  {a.ChiediAdmin("classe mago", "classe: ")}");
+            Pausa(0.15); Console.WriteLine($"  {a.ChiediAdmin("evolvi adepto", "evolvi: ")}");
+            Pausa(0.15); a.Admin("abilita sblocca adepto");
+            Pausa(0.4);
+            foreach (var slot in new byte[] { 0, 1 })
+            {
+                var r = Comanda(CommandType.SetAbilitySlot, P(new SetAbilitySlotCommand
+                    { Kind = AbilitySlotKind.ClassPassive, Slot = slot, Ability = AbilityId.None }));
+                if (r == null || !r.Success) Male($"svuotare lo slot passivo {slot}: {Visto(r)}");
+            }
+            Pausa(0.3);
+            Piena(a, b);
+
+            // 1. Accesa su B: si vede, brucia 60 in 6 s, poi sparisce.
+            float prima = Vita(b);
+            var orologio = System.Diagnostics.Stopwatch.StartNew();
+            Fiamma("Fiamma persistente su B", PX + 8f, PZ);
+            EntityState f = null;
+            Aspetta(() => (f = Fiamme().FirstOrDefault()) != null, 2);
+            if (f == null) Male("la fiamma non si vede");
+            else
+            {
+                uint fazione = (f.Flags >> 8) & 0xFF;
+                Console.WriteLine($"  la fiamma: id={f.EntityId} in ({f.X:F1}, {f.Z:F1}), raggio {f.Extra1}, secondi {f.Extra0}, fazione {fazione}");
+                if (Dist(f.X, f.Z, PX + 8f, PZ) > 0.5f) Male("la fiamma non e' sul punto del comando");
+                if (f.Extra1 != 4f) Male($"raggio {f.Extra1} invece di 4");
+                if (fazione != 1) Male($"fazione {fazione} invece di 1 (quella di A)");
+            }
+            bool primoSubito = Aspetta(() => Vita(b) < prima, 1.0);
+            Console.WriteLine($"  primo colpo entro un secondo: {primoSubito} (dopo {orologio.ElapsedMilliseconds} ms)");
+            if (!primoSubito) Male("la fiamma non brucia subito");
+            Aspetta(() => orologio.Elapsed.TotalSeconds >= 6.8, 8);
+            Controlla("B dentro la fiamma per tutta la durata perde", prima - Vita(b), 60f);
+            bool sparita = Aspetta(() => Fiamme().Count == 0, 2);
+            Console.WriteLine($"  dopo {orologio.ElapsedMilliseconds} ms la fiamma {(sparita ? "e' sparita" : "c'e' ancora")}");
+            if (!sparita) Male("la fiamma non sparisce dopo 6 s");
+            Pausa(0.5);
+            float dopo = Vita(b);
+            Pausa(1.2);
+            Controlla("finita la fiamma, B in un secondo perde", dopo - Vita(b), 0f);
+
+            // 2. Una seconda fiamma toglie la prima; fuori dalla zona non si brucia.
+            Piena(b);
+            prima = Vita(b);
+            Fiamma("Fiamma persistente su B, di nuovo", PX + 8f, PZ);
+            Aspetta(() => prima - Vita(b) >= 20f, 3);
+            Fiamma("Fiamma persistente lontano da B", PX, PZ + 10f);
+            Pausa(0.3);
+            float aDue = prima - Vita(b);
+            Pausa(2.2);
+            int quante = Fiamme().Count;
+            var ultima = Fiamme().FirstOrDefault();
+            Console.WriteLine($"  fiamme di A che si vedono: {quante}" + (ultima == null ? "" : $", in ({ultima.X:F1}, {ultima.Z:F1})"));
+            if (quante != 1) Male($"{quante} fiamme invece di una sola");
+            else if (Dist(ultima.X, ultima.Z, PX, PZ + 10f) > 0.5f) Male("e' rimasta la fiamma vecchia invece della nuova");
+            Controlla("B, spostata la fiamma lontano, perde ancora", prima - Vita(b) - aDue, 0f);
+            Controlla("B prima di spostare la fiamma aveva perso", aDue, 20f);
+        }
+        finally
+        {
+            foreach (var s in new[] { a, b }) { s.Admin("setfaction 1"); s.Admin("effetto azzera"); s.Admin("abilita azzera"); s.Admin("clearinv"); s.Admin("sethp 1000"); }
+            a.Dotazione(ItemType.None, ItemType.None, SideItemType.None);
+            b.Dotazione(ItemType.None, ItemType.None, SideItemType.None);
+            Pausa(0.5);
+        }
+
+        if (ok) Console.WriteLine("  OK: la Fiamma persistente brucia 10 al secondo per 6 s chi ci sta dentro, e se ne accende una sola");
+        return ok;
+    }
+
+    /// <summary>
     /// A14j8b: il Muro di cenere dell'Accolito degli Echi. A e l'Accolito
     /// (fazione 1) e guarda verso +X; B il nemico (fazione 2), con l'arco, a
     /// 3,5 m. Il muro nasce 2 m davanti ad A, lungo 6 m di traverso (lungo Z),

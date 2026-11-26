@@ -203,6 +203,7 @@ if (modoRegole)
         ("passive dell'accolito", () => Regole.PassiveDellAccolito(tokens[1], tokens[0], host, port)),
         ("punti e livelli",         () => Regole.PuntiELivelli(tokens[1], tokens[0], host, port)),
         ("adepto",                  () => Regole.Adepto(tokens[1], tokens[0], host, port)),
+        ("fiamma persistente",      () => Regole.FiammaPersistente(tokens[1], tokens[0], host, port)),
         ("silenzio",                () => Regole.Silenzio(tokens[0], TokenBersaglio(), host, port)),
         ("bando",                   () => Regole.Bando(tokens[0], TokenBersaglio, host, port)),
     };
