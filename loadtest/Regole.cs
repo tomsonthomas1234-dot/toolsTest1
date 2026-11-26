@@ -1396,7 +1396,8 @@ static class Regole
         {
             var r = s.Esito(c.Id);
             // Da A14g1 uso e slot ci sono davvero: senza spada e senza abilita
-            // sbloccate la sonda riceve "non usabile". Gli altri restano NotAllowed.
+            // sbloccate la sonda riceve "non usabile". Gli altri restano NotAllowed
+            // (da A14k SpendPoint c'e davvero: Affondo non sbloccato e NotAllowed).
             var atteso = c.Id == 107 ? ErrorCode.InvalidCommand
                        : c.Id is 101 or 102 ? ErrorCode.AbilityNotUsable : ErrorCode.NotAllowed;
             string visto = r == null ? "nessuna risposta" : $"{(r.Success ? "riuscito" : "rifiutato")} {r.ErrorCode}";
@@ -10155,6 +10156,201 @@ static class Regole
         }
 
         if (ok) Console.WriteLine("  OK: le nove attive dell'Accolito degli Echi fanno quello che dice il catalogo");
+        return ok;
+    }
+
+    // ---- punti e livelli (A14k) -----------------------------------------------
+    //
+    // Decisioni/abilita.md sezione 7: 1 punto d'arma ogni N uccisioni con
+    // un'arma di quel grado (Base 10), da spendere su abilita di quella
+    // famiglia e di quel grado, 1 punto a livello; 1 punto di classe ogni 25
+    // uccisioni con la principale sbloccata, costo base 1, Comune 1, Raro 2,
+    // Epico 3, unica 5; un giocatore nemico vale 3 uccisioni; tre livelli al
+    // massimo. A in fazione 1 col Guerriero sbloccato e la spada di pietra
+    // (Base), B in 2. Le uccisioni vere sono un lupo ucciso da un danno nel
+    // tempo di A e B uccisa da un colpo di spada; le uccisioni prima le
+    // fissano "punti uccisioni" e "classe uccisioni".
+    public static bool PuntiELivelli(string tokenA, string tokenB, string host, int port)
+    {
+        Console.WriteLine("--- punti e livelli: punti dalle uccisioni, spesi sui livelli");
+        bool ok = true;
+        void Male(string m) { Console.WriteLine("  FALLITA: " + m); ok = false; }
+
+        using var a = new Sonda(tokenA, host, port);
+        using var b = new Sonda(tokenB, host, port);
+        if (!a.AttendiPronta() || !b.AttendiPronta())
+        { Console.WriteLine("  FALLITA: le sonde non sono entrate in gioco"); return false; }
+
+        const float PX = -155f, PZ = 245f;   // lontano da tutto, come le altre prove delle abilita
+        static byte[] P<T>(T v) => MessagePack.MessagePackSerializer.Serialize(v);
+        bool Aspetta(Func<bool> cosa, double secondi) =>
+            a.Attendi(() => { b.Attendi(() => true, 0.01); return cosa(); }, secondi);
+        void Pausa(double secondi) => Aspetta(() => false, secondi);
+        void Tp(Sonda s, float x, float z)
+        {
+            s.Admin($"tp {x.ToString(Inv)} {z.ToString(Inv)}");
+            Aspetta(() => Dist(s.X, s.Z, x, z) < 0.5f, 6);
+            s.Cammina(0f, 0f, 0.1);
+        }
+        uint idComando = 140;
+        CommandResultMsg Manda(CommandType tipo, byte[] contenuto)
+        {
+            uint id = idComando++;
+            Pausa(0.15);
+            a.Comando(id, tipo, contenuto);
+            CommandResultMsg r = null;
+            Aspetta(() => (r = a.Esito(id)) != null, 5);
+            Pausa(0.2);   // lo stato delle abilita arriva subito dopo l'esito
+            return r;
+        }
+        void Atteso(string cosa, CommandResultMsg r, ErrorCode atteso)
+        {
+            string visto = r == null ? "nessuna risposta" : r.Success ? "riuscito" : $"rifiutato {r.ErrorCode}";
+            Console.WriteLine($"  {cosa}: {visto}");
+            bool va = r != null && (atteso == ErrorCode.None ? r.Success : !r.Success && r.ErrorCode == atteso);
+            if (!va) Male($"{cosa}: atteso {(atteso == ErrorCode.None ? "riuscito" : "rifiutato " + atteso)}");
+        }
+        CommandResultMsg Spendi(AbilityId ab) =>
+            Manda(CommandType.SpendPoint, P(new SpendPointCommand { Ability = ab }));
+        int Livello(AbilityId ab) => a.Abilita?.Unlocked?.FirstOrDefault(u => u.Id == ab)?.Level ?? 0;
+        // Punti e uccisioni d'arma della spada di un grado, e del Guerriero.
+        (int Punti, int Uccisioni) Arma(Grade g)
+        {
+            var p = a.Abilita?.WeaponPoints?.FirstOrDefault(w => w.Family == WeaponFamily.Sword && w.Grade == g);
+            return p == null ? (0, 0) : (p.Points, p.Kills);
+        }
+        (int Punti, int Uccisioni) Classe()
+        {
+            var c = a.Abilita?.Classes?.FirstOrDefault(x => x.Class == ClassId.Warrior);
+            return c == null ? (-1, -1) : (c.Points, c.Kills);
+        }
+        string Conti() => $"spada base {Arma(Grade.Base)}, guerriero {Classe()}";
+        // Un lupo vicino ad A, ucciso da un danno nel tempo di A. Vero se dopo
+        // arriva lo stato delle abilita che dice fatto (ogni uccisione lo manda).
+        bool UccidiLupo(Func<bool> fatto)
+        {
+            a.Admin("spawn wolf");
+            Pausa(0.5);
+            string lupo = a.ChiediAdmin("effetto stato vicino", "effetto: ") ?? "";
+            string idLupo = lupo.Split(' ').FirstOrDefault(p => p.StartsWith("id="))?[3..];
+            if (!lupo.Contains("tipo=Wolf") || idLupo == null) { Male($"il lupo fatto nascere non si trova ({lupo})"); return false; }
+            a.ChiediAdmin($"effetto sanguina 1000 2 {idLupo}", "effetto: ");
+            bool morto = Aspetta(fatto, 6);
+            Pausa(0.3);
+            a.Admin($"remove {idLupo}");
+            return morto;
+        }
+
+        a.Admin("setfaction 1"); b.Admin("setfaction 2");
+        foreach (var s in new[] { a, b }) { s.Admin("clearinv"); s.Admin("abilita azzera"); s.Admin("effetto azzera"); s.Admin("sethp 1000"); }
+        b.Dotazione(ItemType.None, ItemType.None, SideItemType.None);
+        Tp(a, PX, PZ); Tp(b, PX + 40f, PZ);   // B lontana: "effetto stato vicino" deve trovare il lupo
+        a.Admin("give StoneSword 1");
+        Aspetta(() => a.Istanze.Values.Any(v => v.Tipo == ItemType.StoneSword), 5);
+        a.Dotazione(ItemType.StoneSword, ItemType.None, SideItemType.None);
+        a.Posizione(0);
+        Pausa(0.4);
+        a.ChiediAdmin("classe guerriero", "classe: ");
+        a.ChiediAdmin("classe sblocca", "classe: ");
+        // Toccare gli slot della spada sblocca le quattro base (A14g1).
+        Atteso("Affondo nello slot della spada", Manda(CommandType.SetAbilitySlot, P(new SetAbilitySlotCommand
+               { Kind = AbilitySlotKind.Weapon, Family = WeaponFamily.Sword, Slot = 0, Ability = AbilityId.SwordLunge })), ErrorCode.None);
+        Console.WriteLine($"  all'inizio: {Conti()}, Affondo livello {Livello(AbilityId.SwordLunge)}, Sfida livello {Livello(AbilityId.WarriorChallenge)}");
+        if (Livello(AbilityId.SwordLunge) != 1 || Livello(AbilityId.WarriorChallenge) != 1)
+            Male("Affondo e Sfida devono partire dal livello 1");
+
+        // 1. senza punti non si sale; un'abilita non sbloccata nemmeno.
+        Atteso("Affondo senza punti", Spendi(AbilityId.SwordLunge), ErrorCode.NotAllowed);
+        Atteso("Sfida senza punti", Spendi(AbilityId.WarriorChallenge), ErrorCode.NotAllowed);
+        Atteso("Vortice non sbloccato", Spendi(AbilityId.SwordWhirlwind), ErrorCode.NotAllowed);
+        Atteso("un'abilita che non esiste", Spendi((AbilityId)9999), ErrorCode.InvalidCommand);
+        if (Livello(AbilityId.SwordLunge) != 1) Male("un punto rifiutato non deve alzare il livello");
+
+        // 2. un lupo: la decima uccisione con la spada Base da' un punto
+        //    d'arma, la 25esima col Guerriero un punto di classe.
+        Console.WriteLine($"  punti uccisioni base 9 -> {a.ChiediAdmin("punti uccisioni base 9", "punti: ")}");
+        Console.WriteLine($"  classe uccisioni 24 -> {a.ChiediAdmin("classe uccisioni 24", "classe: ")}");
+        if (!UccidiLupo(() => Arma(Grade.Base).Punti == 1 && Classe().Punti == 1)) Male("dopo il lupo i punti non sono arrivati");
+        Console.WriteLine($"  dopo il lupo: {Conti()} (attesi (1, 0) e (1, 0))");
+        if (Arma(Grade.Base) != (1, 0)) Male("la decima uccisione con la spada Base deve dare un punto d'arma");
+        if (Classe() != (1, 0)) Male("la 25esima uccisione col Guerriero deve dare un punto di classe");
+        if (!Aspetta(() => a.HaLetto("abilita di spada di grado Base"), 3)) Male("il punto d'arma non e' stato detto in chat");
+        if (!Aspetta(() => a.HaLetto("abilita da Guerriero"), 3)) Male("il punto di classe non e' stato detto in chat");
+
+        // 3. spenderli: Affondo al 2, Sfida al 2; poi i punti sono finiti.
+        Atteso("Affondo con un punto d'arma", Spendi(AbilityId.SwordLunge), ErrorCode.None);
+        Atteso("Sfida con un punto di classe", Spendi(AbilityId.WarriorChallenge), ErrorCode.None);
+        Console.WriteLine($"  Affondo livello {Livello(AbilityId.SwordLunge)}, Sfida livello {Livello(AbilityId.WarriorChallenge)}; {Conti()}");
+        if (Livello(AbilityId.SwordLunge) != 2 || Livello(AbilityId.WarriorChallenge) != 2) Male("un punto speso deve alzare di un livello");
+        if (Arma(Grade.Base).Punti != 0 || Classe().Punti != 0) Male("i punti spesi devono sparire");
+        Atteso("Affondo di nuovo, punti finiti", Spendi(AbilityId.SwordLunge), ErrorCode.NotAllowed);
+
+        // 4. il livello massimo e' 3; i punti d'arma valgono solo per il loro
+        //    grado: con i Base non si alza Ferita (Comune).
+        a.ChiediAdmin("punti arma base 5", "punti: ");
+        Atteso("Affondo al livello 3", Spendi(AbilityId.SwordLunge), ErrorCode.None);
+        Atteso("Affondo oltre il livello 3", Spendi(AbilityId.SwordLunge), ErrorCode.NotAllowed);
+        a.ChiediAdmin("abilita sblocca 110", "abilita sblocca: ");
+        Pausa(0.2);
+        Atteso("Ferita (Comune) coi punti Base", Spendi(AbilityId.SwordWound), ErrorCode.NotAllowed);
+        a.ChiediAdmin("punti arma comune 1", "punti: ");
+        Atteso("Ferita coi punti Comuni", Spendi(AbilityId.SwordWound), ErrorCode.None);
+        Console.WriteLine($"  Affondo livello {Livello(AbilityId.SwordLunge)}, Ferita livello {Livello(AbilityId.SwordWound)}; " +
+                          $"punti spada base {Arma(Grade.Base).Punti} (attesi 4), comune {Arma(Grade.Common).Punti} (attesi 0)");
+        if (Livello(AbilityId.SwordLunge) != 3 || Livello(AbilityId.SwordWound) != 2) Male("livelli sbagliati dopo i punti");
+        if (Arma(Grade.Base).Punti != 4) Male("oltre il livello 3 il punto non deve essere speso");
+
+        // 5. costo di classe secondo il grado: Resistere (Rara) ne costa 2,
+        //    Signore della guerra (unica) 5.
+        a.ChiediAdmin("abilita sblocca 1020", "abilita sblocca: ");
+        a.ChiediAdmin("punti classe 1", "punti: ");
+        Atteso("Resistere (Rara) con un punto di classe", Spendi(AbilityId.WarriorEndure), ErrorCode.NotAllowed);
+        a.ChiediAdmin("punti classe 2", "punti: ");
+        Atteso("Resistere con due punti di classe", Spendi(AbilityId.WarriorEndure), ErrorCode.None);
+        a.ChiediAdmin("abilita sblocca 1040", "abilita sblocca: ");
+        a.ChiediAdmin("punti classe 4", "punti: ");
+        Atteso("Signore della guerra con quattro punti", Spendi(AbilityId.WarriorWarlord), ErrorCode.NotAllowed);
+        a.ChiediAdmin("punti classe 5", "punti: ");
+        Atteso("Signore della guerra con cinque punti", Spendi(AbilityId.WarriorWarlord), ErrorCode.None);
+        Console.WriteLine($"  Resistere livello {Livello(AbilityId.WarriorEndure)}, Signore della guerra livello {Livello(AbilityId.WarriorWarlord)}; punti di classe {Classe().Punti} (attesi 0)");
+        if (Livello(AbilityId.WarriorEndure) != 2 || Livello(AbilityId.WarriorWarlord) != 2 || Classe().Punti != 0)
+            Male("il costo di classe deve seguire il grado (Rara 2, unica 5)");
+
+        // 6. un giocatore nemico vale 3: con 7 uccisioni di spada e 22 di
+        //    classe, B uccisa da un colpo di spada da' un punto di ciascuno.
+        a.ChiediAdmin("punti arma base 0", "punti: ");
+        a.ChiediAdmin("punti uccisioni base 7", "punti: ");
+        a.ChiediAdmin("classe uccisioni 22", "classe: ");
+        Tp(b, PX + 1f, PZ);
+        a.Posizione(0);
+        b.Admin("sethp 1");
+        Aspetta(() => a.Stato(b.Id).Vita <= 1f, 3);
+        Pausa(0.3);
+        int ricevute = a.AbilitaRicevute;
+        a.Colpisci(0.2);
+        bool bMorta = Aspetta(() => a.AbilitaRicevute > ricevute && Arma(Grade.Base).Punti == 1, 4);
+        Pausa(0.3);
+        Console.WriteLine($"  dopo aver ucciso B: {Conti()} (attesi (1, 0) e (1, 0))");
+        if (!bMorta || Arma(Grade.Base) != (1, 0)) Male("un giocatore nemico deve valere 3 uccisioni d'arma");
+        if (Classe() != (1, 0)) Male("un giocatore nemico deve valere 3 uccisioni di classe");
+
+        // 7. a mani vuote: solo le uccisioni di classe.
+        a.Dotazione(ItemType.None, ItemType.None, SideItemType.None);
+        Pausa(0.4);
+        Tp(b, PX + 40f, PZ);
+        a.ChiediAdmin("classe uccisioni 0", "classe: ");
+        var primaArma = Arma(Grade.Base);
+        if (!UccidiLupo(() => Classe().Uccisioni == 1)) Male("dopo il secondo lupo l'uccisione di classe non e' arrivata");
+        Console.WriteLine($"  lupo a mani vuote: {Conti()} (spada invariata {primaArma}, guerriero 1 uccisione)");
+        if (Arma(Grade.Base) != primaArma) Male("a mani vuote non si guadagnano uccisioni d'arma");
+        if (Classe() != (1, 1)) Male("a mani vuote le uccisioni di classe contano");
+
+        // Si lascia pulito.
+        foreach (var s in new[] { a, b }) { s.Admin("setfaction 1"); s.Admin("clearinv"); s.Admin("abilita azzera"); s.Admin("effetto azzera"); s.Admin("sethp 1000"); }
+        a.Dotazione(ItemType.None, ItemType.None, SideItemType.None);
+        Pausa(0.5);
+
+        if (ok) Console.WriteLine("  OK: le uccisioni danno punti d'arma e di classe, i punti alzano i livelli fino al 3");
         return ok;
     }
 

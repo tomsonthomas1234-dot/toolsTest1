@@ -201,6 +201,7 @@ if (modoRegole)
         ("accolito",                () => Regole.Accolito(tokens[1], tokens[0], host, port)),
         ("muro di cenere",          () => Regole.MuroDiCenere(tokens[1], tokens[0], host, port)),
         ("passive dell'accolito", () => Regole.PassiveDellAccolito(tokens[1], tokens[0], host, port)),
+        ("punti e livelli",         () => Regole.PuntiELivelli(tokens[1], tokens[0], host, port)),
         ("silenzio",                () => Regole.Silenzio(tokens[0], TokenBersaglio(), host, port)),
         ("bando",                   () => Regole.Bando(tokens[0], TokenBersaglio, host, port)),
     };
