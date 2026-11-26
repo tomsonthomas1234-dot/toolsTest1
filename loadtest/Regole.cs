@@ -10478,6 +10478,24 @@ static class Regole
         }
         float ColpoDiA() => Perde(b, () => a.Colpisci(0.1));
         float ColpoDiB() => Perde(a, () => b.Colpisci(0.1));
+        // A colpisce B e legge lo stato di B appena il colpo e' finito, piu'
+        // volte per mezzo secondo, finche' compare cerca (P5). Un effetto di
+        // 1 s non si puo' leggere dopo ColpoDiA: Colpisci tiene 0,4 s, Perde
+        // aspetta il danno e poi altri 0,4 s, e si arriva a circa un secondo.
+        // Rende il danno e l'ultima riga letta.
+        (float perso, string stato) ColpoDiAELeggi(string cerca)
+        {
+            Piena(b);
+            float prima = Vita(b);
+            var orologio = System.Diagnostics.Stopwatch.StartNew();
+            a.Colpisci(0.1);
+            string st = "(nessuna lettura)";
+            Aspetta(() => (st = StatoDi(b)).Contains(cerca), 0.5);
+            Console.WriteLine($"  (letto {orologio.ElapsedMilliseconds} ms dopo l'inizio del colpo)");
+            Aspetta(() => Vita(b) < prima, 1.5);
+            Pausa(0.4);
+            return (prima - Vita(b), st);
+        }
 
         try
         {
@@ -10499,13 +10517,16 @@ static class Regole
             Piena(a, b);
 
             // 1. Cenere: senza, il colpo di A non rallenta B; con, B rallenta
-            //    del 10% (il rallentamento dura 1 s: si legge subito).
-            Controlla("colpo di A su B senza Cenere", ColpoDiA(), 22f);
-            Contiene("senza Cenere, B", StatoDi(b), "rallentato", deve: false);
+            //    del 10%. Il rallentamento dura 1 s: si legge subito dopo il
+            //    colpo, non dopo aver aspettato il danno (P5).
+            var (persoSenza, stSenza) = ColpoDiAELeggi("rallentato");
+            Controlla("colpo di A su B senza Cenere", persoSenza, 22f);
+            Contiene("senza Cenere, B subito dopo il colpo", stSenza, "rallentato", deve: false);
             Passiva(AbilityId.EchoAsh);
             Contiene("Cenere in slot, A", StatoDi(a), "echi=cenere10");
-            Controlla("colpo di A su B con Cenere", ColpoDiA(), 22f);
-            Contiene("Cenere, B", StatoDi(b), "rallentato 10%");
+            var (persoCon, stCon) = ColpoDiAELeggi("rallentato 10%");
+            Controlla("colpo di A su B con Cenere", persoCon, 22f);
+            Contiene("Cenere, B subito dopo il colpo", stCon, "rallentato 10%");
             Pulisci(b);
 
             // 2. Guscio duro: il Guscio vale 15 invece di 12 (12 x 1,25).
