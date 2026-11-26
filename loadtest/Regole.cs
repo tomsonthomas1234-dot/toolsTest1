@@ -10157,6 +10157,173 @@ static class Regole
         if (ok) Console.WriteLine("  OK: le nove attive dell'Accolito degli Echi fanno quello che dice il catalogo");
         return ok;
     }
+
+    /// <summary>
+    /// A14j8b: il Muro di cenere dell'Accolito degli Echi. A e l'Accolito
+    /// (fazione 1) e guarda verso +X; B il nemico (fazione 2), con l'arco, a
+    /// 3,5 m. Il muro nasce 2 m davanti ad A, lungo 6 m di traverso (lungo Z),
+    /// per 5 s. Con il muro su: il Tiro mirato di B su A non parte (non c'e
+    /// bersaglio), B che cammina verso A si ferma davanti al muro, A che
+    /// cammina verso B ci passa. Finito il muro: sparisce, B passa e il Tiro
+    /// mirato su A parte.
+    /// </summary>
+    public static bool MuroDiCenere(string tokenA, string tokenB, string host, int port)
+    {
+        Console.WriteLine("--- muro di cenere: ferma il passo e le frecce dei nemici, non di chi l'ha fatto");
+        bool ok = true;
+        void Male(string m) { Console.WriteLine("  FALLITA: " + m); ok = false; }
+
+        using var a = new Sonda(tokenA, host, port);
+        using var b = new Sonda(tokenB, host, port);
+        if (!a.AttendiPronta() || !b.AttendiPronta())
+        { Console.WriteLine("  FALLITA: le sonde non sono entrate in gioco"); return false; }
+
+        const float PX = -150f, PZ = 250f;   // lo stesso punto delle prove delle armi
+        const float MX = PX + 2f;            // l'asse del muro
+        static byte[] P<T>(T v) => MessagePack.MessagePackSerializer.Serialize(v);
+        bool Aspetta(Func<bool> cosa, double secondi) =>
+            a.Attendi(() => { b.Attendi(() => true, 0.01); return cosa(); }, secondi);
+        void Pausa(double secondi) => Aspetta(() => false, secondi);
+        static string Visto(CommandResultMsg r) => r == null ? "nessuna risposta" : r.Success ? "riuscito" : "rifiutato " + r.ErrorCode;
+        float Vita(Sonda chi) => a.Stato(chi.Id).Vita;
+        void Tp(Sonda s, float x, float z)
+        {
+            s.Admin($"tp {x.ToString(Inv)} {z.ToString(Inv)}");
+            Aspetta(() => Dist(s.X, s.Z, x, z) < 0.5f, 6);
+            s.Cammina(0f, 0f, 0.1);
+        }
+        void Piena(params Sonda[] chi)
+        {
+            foreach (var s in chi) s.Admin("sethp 1000");
+            Aspetta(() => chi.All(s => Vita(s) >= 100f), 3);
+            Pausa(0.3);
+        }
+        uint idComando = 940;
+        CommandResultMsg Comanda(Sonda s, CommandType tipo, byte[] dati)
+        {
+            uint n = idComando++;
+            Pausa(0.15);
+            s.Comando(n, tipo, dati);
+            CommandResultMsg r = null;
+            Aspetta(() => (r = s.Esito(n)) != null, 5);
+            return r;
+        }
+        void Atteso(string cosa, CommandResultMsg r, ErrorCode atteso)
+        {
+            bool giusto = r != null && (atteso == ErrorCode.None ? r.Success : !r.Success && r.ErrorCode == atteso);
+            Console.WriteLine($"  {cosa}: {Visto(r)}{(giusto ? "" : $" (atteso {(atteso == ErrorCode.None ? "riuscito" : atteso.ToString())})")}");
+            if (!giusto) Male($"{cosa}: atteso {(atteso == ErrorCode.None ? "riuscito" : "rifiutato " + atteso)}");
+        }
+        // A alza il muro guardando verso +X.
+        CommandResultMsg Muro()
+        {
+            a.Admin("ricarica");
+            return Comanda(a, CommandType.UseAbility, P(new UseAbilityCommand { Ability = AbilityId.EchoAshWall, Yaw = 90f }));
+        }
+        // B tira un Tiro mirato su A (bersaglio dato, guardando verso -X).
+        CommandResultMsg TiroDiB()
+        {
+            b.Admin("ricarica");
+            return Comanda(b, CommandType.UseAbility, P(new UseAbilityCommand { Ability = AbilityId.BowAimedShot, Yaw = 270f, TargetEntityId = a.Id }));
+        }
+        List<EntityState> Muri()
+        {
+            lock (a.Mondo) return a.Mondo.Values.Where(e => e.Type == EntityType.AshWall && !a.Spariti.Contains(e.EntityId)
+                                                          && Dist(e.X, e.Z, PX, PZ) < 15f).ToList();
+        }
+        string Dove(List<EntityState> l) => l.Count == 0 ? "nessuno" : string.Join(" ", l.Select(e => $"({e.X:F1}, {e.Z:F1}) {e.Extra0}s {e.Extra1}m {e.Extra2}gradi"));
+
+        try
+        {
+            a.Admin("setfaction 1"); b.Admin("setfaction 2");
+            foreach (var s in new[] { a, b }) { s.Admin("clearinv"); s.Admin("abilita azzera"); s.Admin("effetto azzera"); }
+            a.Dotazione(ItemType.None, ItemType.None, SideItemType.None);
+            Tp(a, PX, PZ); Tp(b, PX + 3.5f, PZ);
+            Pausa(0.15); Console.WriteLine($"  {a.ChiediAdmin("classe mago", "classe: ")}");
+            Pausa(0.15); Console.WriteLine($"  {a.ChiediAdmin("evolvi accolito", "evolvi: ")}");
+            Pausa(0.15); a.Admin("abilita sblocca accolito");
+            Pausa(0.4);
+            var rs = Comanda(a, CommandType.SetAbilitySlot, P(new SetAbilitySlotCommand
+                { Kind = AbilitySlotKind.ClassActive, Slot = 0, Ability = AbilityId.EchoAshWall }));
+            if (rs == null || !rs.Success) Male($"Muro di cenere nello slot: {Visto(rs)}");
+            {
+                Pausa(0.15);
+                var r = b.ChiediAdmin("dai Bow epico", "dai: ");
+                ulong id = r != null && ulong.TryParse(r.Split("id=").Last(), out var n) ? n : 0;
+                if (id == 0 || !Aspetta(() => { lock (b.Zaino) return b.Istanze.ContainsKey(id); }, 5))
+                    Male($"'dai Bow epico' non ha dato l'arco a B ({r ?? "nessuna risposta"})");
+                b.Dotazione(ItemType.Bow, ItemType.None, SideItemType.None);
+                b.Posizione(0);
+                Pausa(0.15); b.Admin("abilita sblocca arco");
+                b.Admin("give Arrow 20");
+                Aspetta(() => b.Quanti(ItemType.Arrow) == 20, 3);
+                Pausa(0.3);
+                rs = Comanda(b, CommandType.SetAbilitySlot, P(new SetAbilitySlotCommand
+                    { Kind = AbilitySlotKind.Weapon, Family = WeaponFamily.Bow, Slot = 0, Ability = AbilityId.BowAimedShot }));
+                if (rs == null || !rs.Success) Male($"Tiro mirato nello slot di B: {Visto(rs)}");
+            }
+            Piena(a, b);
+
+            // 0. Senza muro il Tiro mirato di B su A parte.
+            Atteso("Tiro mirato di B su A, senza muro", TiroDiB(), ErrorCode.None);
+            Piena(a, b);
+
+            // 1. Il muro nasce 2 m davanti ad A, lungo 6 m, di traverso (180 gradi), per 5 s.
+            Atteso("Muro di cenere", Muro(), ErrorCode.None);
+            Aspetta(() => Muri().Count > 0, 3);
+            var muri = Muri();
+            Console.WriteLine($"  muro visto da A: {Dove(muri)} (atteso a ({MX}, {PZ}), 6 m, 180 gradi, 5 s)");
+            if (muri.Count != 1 || Dist(muri[0].X, muri[0].Z, MX, PZ) > 0.6f) Male("il muro deve nascere 2 m davanti ad A");
+            else if (muri[0].Extra1 != 6 || MathF.Abs(muri[0].Extra2 - 180f) > 1f) Male("il muro deve essere lungo 6 m, di traverso allo sguardo di A");
+            else if (muri[0].Extra0 > 5f || muri[0].Extra0 < 3f) Male("il muro deve durare 5 s");
+
+            // 2. Con il muro in mezzo il Tiro mirato di B su A non trova il bersaglio.
+            Atteso("Tiro mirato di B su A, muro in mezzo", TiroDiB(), ErrorCode.AbilityNotUsable);
+
+            // 3. B cammina verso A: si ferma davanti al muro.
+            // Le sonde camminano piano (circa 1 m/s): B parte a 1,5 m dal muro
+            // e cammina 2,5 s, che senza muro lo porterebbe oltre.
+            b.Cammina(-1f, 0f, 2.5);
+            Pausa(0.2);
+            Console.WriteLine($"  B cammina verso A: arriva a x={b.X:F2} (il muro e' a x={MX}, B parte da {PX + 3.5f})");
+            if (b.X < MX + 0.2f) Male("B non deve passare il muro di A");
+            if (b.X > PX + 3.3f) Male("B deve essersi mosso fino al muro");
+
+            // 4. Un muro nuovo (toglie il primo): A, che l'ha fatto, ci passa
+            //    partendo a 1 m dal muro.
+            Tp(b, PX + 3.5f, PZ);
+            Atteso("Muro di cenere, di nuovo", Muro(), ErrorCode.None);
+            Tp(a, PX + 1f, PZ);
+            a.Cammina(1f, 0f, 2.0);
+            Pausa(0.2);
+            Console.WriteLine($"  A cammina verso B: arriva a x={a.X:F2} (il muro e' a x={MX})");
+            if (a.X < MX + 0.5f) Male("A deve passare il suo muro");
+            Tp(a, PX, PZ);
+            if (Muri().Count != 1) Male($"col secondo muro deve essercene uno solo, visti: {Dove(Muri())}");
+
+            // 5. Finito il muro sparisce; B passa e il Tiro mirato su A riparte.
+            bool finito = Aspetta(() => Muri().Count == 0, 7);
+            Console.WriteLine($"  muro finito: {(finito ? "sparito" : "ancora li: " + Dove(Muri()))}");
+            if (!finito) Male("il muro deve sparire dopo 5 s");
+            Piena(a, b);
+            Atteso("Tiro mirato di B su A, muro finito", TiroDiB(), ErrorCode.None);
+            Tp(b, PX + 3.5f, PZ);
+            b.Cammina(-1f, 0f, 3.0);
+            Pausa(0.2);
+            Console.WriteLine($"  B cammina verso A, senza muro: arriva a x={b.X:F2}");
+            if (b.X > MX - 0.5f) Male("finito il muro B deve passare");
+        }
+        finally
+        {
+            foreach (var s in new[] { a, b }) { s.Admin("setfaction 1"); s.Admin("effetto azzera"); s.Admin("abilita azzera"); s.Admin("clearinv"); s.Admin("sethp 1000"); }
+            a.Dotazione(ItemType.None, ItemType.None, SideItemType.None);
+            b.Dotazione(ItemType.None, ItemType.None, SideItemType.None);
+            Pausa(0.5);
+        }
+
+        if (ok) Console.WriteLine("  OK: il muro di cenere ferma il passo e le frecce dei nemici, e lascia passare chi l'ha fatto");
+        return ok;
+    }
     static readonly System.Globalization.CultureInfo Inv =
         System.Globalization.CultureInfo.InvariantCulture;
 }
