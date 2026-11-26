@@ -10159,6 +10159,239 @@ static class Regole
     }
 
     /// <summary>
+    /// A14j8c: le passive dell'Accolito degli Echi con un effetto loro. A e
+    /// l'Accolito (con "evolvi accolito"), B un nemico con la spada di pietra
+    /// a 1,5 m; per Sordo B diventa un Mago e tira il Dardo magico su A. Una
+    /// passiva alla volta negli slot. I danni si leggono sulla vita, gli
+    /// effetti e le durate sulla riga di "effetto stato".
+    /// </summary>
+    public static bool PassiveDellAccolito(string tokenA, string tokenB, string host, int port)
+    {
+        Console.WriteLine("--- passive dell'accolito: Cenere, Guscio duro, Immoto, Incanto pesante, Vendetta, Ultimo eco, Sordo");
+        bool ok = true;
+        void Male(string m) { Console.WriteLine("  FALLITA: " + m); ok = false; }
+
+        using var a = new Sonda(tokenA, host, port);
+        using var b = new Sonda(tokenB, host, port);
+        if (!a.AttendiPronta() || !b.AttendiPronta())
+        { Console.WriteLine("  FALLITA: le sonde non sono entrate in gioco"); return false; }
+
+        const float PX = -150f, PZ = 250f;   // lo stesso punto delle prove delle armi
+        static byte[] P<T>(T v) => MessagePack.MessagePackSerializer.Serialize(v);
+        bool Aspetta(Func<bool> cosa, double secondi) =>
+            a.Attendi(() => { b.Attendi(() => true, 0.01); return cosa(); }, secondi);
+        void Pausa(double secondi) => Aspetta(() => false, secondi);
+        static string Visto(CommandResultMsg r) => r == null ? "nessuna risposta" : r.Success ? "riuscito" : "rifiutato " + r.ErrorCode;
+        float Vita(Sonda chi) => a.Stato(chi.Id).Vita;
+        void Tp(Sonda s, float x, float z)
+        {
+            s.Admin($"tp {x.ToString(Inv)} {z.ToString(Inv)}");
+            Aspetta(() => Dist(s.X, s.Z, x, z) < 0.5f, 6);
+            s.Cammina(0f, 0f, 0.1);
+        }
+        void Piena(params Sonda[] chi)
+        {
+            foreach (var s in chi) s.Admin("sethp 1000");
+            Aspetta(() => chi.All(s => Vita(s) >= 100f), 3);
+            Pausa(0.3);
+        }
+        void Ferita(Sonda s, int vita)
+        {
+            s.Admin($"sethp {vita}");
+            Aspetta(() => Vita(s) <= vita, 3);
+            Pausa(0.2);
+        }
+        string Effetto(Sonda s, string riga) { Pausa(0.15); return s.ChiediAdmin("effetto " + riga, "effetto: ") ?? "(nessuna risposta)"; }
+        string StatoDi(Sonda s) => Effetto(a, s == a ? "stato" : $"stato {s.Id}");
+        uint idComando = 1020;
+        CommandResultMsg ComandaDi(Sonda chi, CommandType tipo, byte[] dati)
+        {
+            uint n = idComando++;
+            Pausa(0.15);
+            chi.Comando(n, tipo, dati);
+            CommandResultMsg r = null;
+            Aspetta(() => (r = chi.Esito(n)) != null, 5);
+            return r;
+        }
+        CommandResultMsg Comanda(CommandType tipo, byte[] dati) => ComandaDi(a, tipo, dati);
+        // Mette l'attiva nel primo slot attivo di chi, azzera le ricariche e la
+        // usa guardando verso yaw, col bersaglio o col punto (tx, tz) se ci sono.
+        CommandResultMsg ProvaDi(Sonda chi, AbilityId id, float yaw = 90f, ulong bersaglio = 0, float tx = 0f, float tz = 0f)
+        {
+            var r = ComandaDi(chi, CommandType.SetAbilitySlot, P(new SetAbilitySlotCommand
+                { Kind = AbilitySlotKind.ClassActive, Slot = 0, Ability = id }));
+            if (r == null || !r.Success) Male($"{id} nello slot: {Visto(r)}");
+            Pausa(0.15); chi.Admin("ricarica");
+            r = ComandaDi(chi, CommandType.UseAbility, P(new UseAbilityCommand
+                { Ability = id, Yaw = yaw, TargetEntityId = bersaglio, TargetX = tx, TargetZ = tz }));
+            Pausa(0.2);
+            return r;
+        }
+        CommandResultMsg Prova(AbilityId id, float tx = 0f, float tz = 0f) => ProvaDi(a, id, 90f, 0, tx, tz);
+        void Passiva(AbilityId p0)
+        {
+            foreach (var (slot, ab) in new[] { ((byte)0, p0), ((byte)1, AbilityId.None) })
+            {
+                var r = Comanda(CommandType.SetAbilitySlot, P(new SetAbilitySlotCommand
+                    { Kind = AbilitySlotKind.ClassPassive, Slot = slot, Ability = ab }));
+                if (r == null || !r.Success) Male($"{(ab == AbilityId.None ? "svuotare" : ab.ToString())} nello slot passivo {slot}: {Visto(r)}");
+            }
+            Pausa(0.3);
+        }
+        void Atteso(string cosa, CommandResultMsg r, ErrorCode atteso)
+        {
+            bool giusto = r != null && (atteso == ErrorCode.None ? r.Success : !r.Success && r.ErrorCode == atteso);
+            Console.WriteLine($"  {cosa}: {Visto(r)}{(giusto ? "" : $" (atteso {(atteso == ErrorCode.None ? "riuscito" : atteso.ToString())})")}");
+            if (!giusto) Male($"{cosa}: atteso {(atteso == ErrorCode.None ? "riuscito" : "rifiutato " + atteso)}");
+        }
+        void Pulisci(params Sonda[] chi) { foreach (var s in chi) Effetto(a, $"azzera {s.Id}"); }
+        void Controlla(string cosa, float visto, float atteso)
+        {
+            Console.WriteLine($"  {cosa}: {visto} (atteso {atteso})");
+            if (visto != atteso) Male($"{cosa}: {visto} invece di {atteso}");
+        }
+        void Contiene(string cosa, string riga, string pezzo, bool deve = true)
+        {
+            Console.WriteLine($"  {cosa}: {riga}");
+            if (riga.Contains(pezzo) != deve) Male($"{cosa}: {(deve ? "manca" : "non doveva esserci")} '{pezzo}'");
+        }
+        // I secondi che restano a una voce della riga ("stordito 2.3s"), NaN se non c'e.
+        static float Secondi(string riga, string voce)
+        {
+            int i = riga.IndexOf(voce + " ", StringComparison.Ordinal);
+            if (i < 0) return float.NaN;
+            i += voce.Length + 1;
+            int f = riga.IndexOf('s', i);
+            return f > i && float.TryParse(riga[i..f], System.Globalization.NumberStyles.Float, Inv, out var v) ? v : float.NaN;
+        }
+        void DurataFra(string cosa, string riga, string voce, float minimo, float massimo)
+        {
+            float v = Secondi(riga, voce);
+            Console.WriteLine($"  {cosa}: {riga} -> {voce} {v} s (atteso fra {minimo} e {massimo})");
+            if (float.IsNaN(v) || v < minimo || v > massimo) Male($"{cosa}: {voce} {v} s invece di {minimo}-{massimo}");
+        }
+        // Quanto perde chi per un'azione (0 se niente in 1,5 s).
+        float Perde(Sonda chi, Action azione)
+        {
+            Piena(chi);
+            float prima = Vita(chi);
+            azione();
+            Aspetta(() => Vita(chi) < prima, 1.5);
+            Pausa(0.4);
+            return prima - Vita(chi);
+        }
+        float ColpoDiA() => Perde(b, () => a.Colpisci(0.1));
+        float ColpoDiB() => Perde(a, () => b.Colpisci(0.1));
+
+        try
+        {
+            a.Admin("setfaction 1"); b.Admin("setfaction 2");
+            foreach (var s in new[] { a, b })
+            {
+                s.Admin("clearinv"); s.Admin("abilita azzera"); s.Admin("effetto azzera");
+                s.Admin("give StoneSword 1");
+                Aspetta(() => s.Istanze.Values.Any(v => v.Tipo == ItemType.StoneSword), 5);
+                s.Dotazione(ItemType.StoneSword, ItemType.None, SideItemType.None);
+                s.Posizione(0);
+            }
+            Tp(a, PX, PZ); Tp(b, PX + 1.5f, PZ);
+            Pausa(0.15); Console.WriteLine($"  {a.ChiediAdmin("classe mago", "classe: ")}");
+            Pausa(0.15); Console.WriteLine($"  {a.ChiediAdmin("evolvi accolito", "evolvi: ")}");
+            Pausa(0.15); a.Admin("abilita sblocca accolito");
+            Pausa(0.4);
+            Passiva(AbilityId.None);
+            Piena(a, b);
+
+            // 1. Cenere: senza, il colpo di A non rallenta B; con, B rallenta
+            //    del 10% (il rallentamento dura 1 s: si legge subito).
+            Controlla("colpo di A su B senza Cenere", ColpoDiA(), 22f);
+            Contiene("senza Cenere, B", StatoDi(b), "rallentato", deve: false);
+            Passiva(AbilityId.EchoAsh);
+            Contiene("Cenere in slot, A", StatoDi(a), "echi=cenere10");
+            Controlla("colpo di A su B con Cenere", ColpoDiA(), 22f);
+            Contiene("Cenere, B", StatoDi(b), "rallentato 10%");
+            Pulisci(b);
+
+            // 2. Guscio duro: il Guscio vale 15 invece di 12 (12 x 1,25).
+            Passiva(AbilityId.EchoHardShell);
+            Atteso("Guscio con Guscio duro", Prova(AbilityId.EchoShell), ErrorCode.None);
+            Contiene("Guscio duro, A", StatoDi(a), "barriera 15 ");
+            Pulisci(a);
+
+            // 3. Immoto: uno stordimento di 4 s su A dura 2,4 s, e anche
+            //    un'immobilizzazione; senza, 4 s.
+            Passiva(AbilityId.None);
+            DurataFra("stordimento di 4 s senza Immoto", Effetto(a, "stordisci 4"), "stordito", 3.6f, 4.0f);
+            Pulisci(a);
+            Passiva(AbilityId.EchoUnmoved);
+            DurataFra("stordimento di 4 s con Immoto", Effetto(a, "stordisci 4"), "stordito", 2.0f, 2.4f);
+            Pulisci(a);
+            DurataFra("immobilizzazione di 4 s con Immoto", Effetto(a, "immobile 4"), "immobile", 2.0f, 2.4f);
+            Pulisci(a);
+
+            // 4. Incanto pesante: il Sonno su B dura 5,2 s invece di 4.
+            Passiva(AbilityId.None);
+            Atteso("Sonno su B senza Incanto pesante", Prova(AbilityId.EchoSleep, PX + 1.5f, PZ), ErrorCode.None);
+            DurataFra("Sonno senza Incanto pesante, B", StatoDi(b), "addormentato", 3.2f, 4.0f);
+            Pulisci(b);
+            Passiva(AbilityId.EchoHeavySpell);
+            Atteso("Sonno su B con Incanto pesante", Prova(AbilityId.EchoSleep, PX + 1.5f, PZ), ErrorCode.None);
+            DurataFra("Sonno con Incanto pesante, B", StatoDi(b), "addormentato", 4.4f, 5.2f);
+            Pulisci(b);
+
+            // 5. Vendetta: A col Guscio (12), B colpisce (22): la barriera si
+            //    rompe e B perde 20.
+            Passiva(AbilityId.EchoVengeance);
+            Piena(a);
+            Atteso("Guscio con Vendetta", Prova(AbilityId.EchoShell), ErrorCode.None);
+            Contiene("Guscio, A", StatoDi(a), "barriera 12 ");
+            Controlla("Vendetta: B colpisce A e perde", Perde(b, () => b.Colpisci(0.1)), 20f);
+            Contiene("dopo il colpo, A senza barriera", StatoDi(a), "barriera", deve: false);
+            Pulisci(a, b);
+            Piena(a, b);
+
+            // 6. Ultimo eco: A scende a 15 (sotto il 20%) con B a 1,5 m: B
+            //    stordito; la seconda volta riposa.
+            Passiva(AbilityId.EchoLastEcho);
+            Contiene("Ultimo eco in slot, A", StatoDi(a), "ultimoeco20(pronto)");
+            Ferita(a, 15);
+            Contiene("Ultimo eco, B", StatoDi(b), "stordito ");
+            Contiene("Ultimo eco dopo, A", StatoDi(a), "ultimoeco20(riposa)");
+            Pulisci(b);
+            Piena(a);
+            Ferita(a, 10);
+            Contiene("Ultimo eco che riposa, B", StatoDi(b), "stordito", deve: false);
+            Pulisci(a, b);
+            Piena(a, b);
+
+            // 7. Sordo: B (Mago) tira il Dardo magico su A, 20; con Sordo 18.
+            //    Il colpo di spada di B resta 22: non e un'abilita.
+            Passiva(AbilityId.None);
+            Pausa(0.15); Console.WriteLine($"  {b.ChiediAdmin("classe mago", "classe: ")}");
+            Pausa(0.15); Console.WriteLine($"  {b.ChiediAdmin("classe sblocca", "classe: ")}");
+            Pausa(0.15); b.Admin("abilita sblocca mago");
+            Pausa(0.4);
+            Controlla("Dardo magico di B su A senza Sordo",
+                Perde(a, () => Atteso("Dardo magico di B", ProvaDi(b, AbilityId.MageMagicBolt, 270f, a.Id), ErrorCode.None)), 20f);
+            Passiva(AbilityId.EchoDeaf);
+            Contiene("Sordo in slot, A", StatoDi(a), "echi=sordo10");
+            Controlla("Dardo magico di B su A con Sordo",
+                Perde(a, () => Atteso("Dardo magico di B", ProvaDi(b, AbilityId.MageMagicBolt, 270f, a.Id), ErrorCode.None)), 18f);
+            Controlla("colpo di spada di B su A con Sordo", ColpoDiB(), 22f);
+        }
+        finally
+        {
+            foreach (var s in new[] { a, b }) { s.Admin("setfaction 1"); s.Admin("effetto azzera"); s.Admin("abilita azzera"); s.Admin("clearinv"); s.Admin("sethp 1000"); }
+            a.Dotazione(ItemType.None, ItemType.None, SideItemType.None);
+            b.Dotazione(ItemType.None, ItemType.None, SideItemType.None);
+            Pausa(0.5);
+        }
+
+        if (ok) Console.WriteLine("  OK: le sette passive dell'Accolito degli Echi fanno quello che dice il catalogo");
+        return ok;
+    }
+
+    /// <summary>
     /// A14j8b: il Muro di cenere dell'Accolito degli Echi. A e l'Accolito
     /// (fazione 1) e guarda verso +X; B il nemico (fazione 2), con l'arco, a
     /// 3,5 m. Il muro nasce 2 m davanti ad A, lungo 6 m di traverso (lungo Z),
