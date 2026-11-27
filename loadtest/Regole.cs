@@ -4912,7 +4912,7 @@ static class Regole
             int fine = resto.IndexOf(',');
             return int.TryParse(fine < 0 ? resto : resto[..fine], out int v) ? v : -1;
         }
-        return new[] { Cifra("solo dono"), Cifra("dono e conseguenza"), Cifra("solo conseguenza"), Cifra("gravi") };
+        return new[] { Cifra("solo dono"), Cifra("dono e conseguenza"), Cifra("solo conseguenza"), Cifra("gravi"), Cifra("niente") };
     }
 
     public static bool RitualiERischio(string token, string host, int port)
@@ -4927,7 +4927,10 @@ static class Regole
         // Atteso (MetaStrada 20, tetto 95): Comune 20% di conti al primo
         // rituale, 70% al quarantesimo, gravi da 0 a 27% dei conti; Epico da 55%
         // a 82%, gravi da 25% a 58%. Si lascia un margine di 4 punti al caso.
-        foreach (var (grado, contoPrima, contoDopo) in new[] { ("Common", 20, 70), ("Epic", 55, 82) })
+        // Torna l'esito "niente" (A14m1): ne' dono ne' conto, cioe' (1 - dono) x
+        // (1 - conto): Comune 15% x 80% = 12% al primo rituale, Epico 35% x 45%
+        // = 16%.
+        foreach (var (grado, contoPrima, contoDopo, nientePrima) in new[] { ("Common", 20, 70, 12), ("Epic", 55, 82, 16) })
         {
             var prima = Rischio(s, grado, 0);
             var dopo  = Rischio(s, grado, 40);
@@ -4951,6 +4954,15 @@ static class Regole
             { Console.WriteLine($"  FALLITA: {grado}, dopo 40 rituali si esce puliti quanto prima"); ok = false; }
             if (grado == "Common" && prima[3] != 0)
             { Console.WriteLine("  FALLITA: un Comune al primo rituale non deve mai avere un conto grave"); ok = false; }
+
+            int NientePct(int[] v) => (int)Math.Round(100.0 * v[4] / 2000);
+            Console.WriteLine($"  {grado}, niente: {prima[4]} al primo rituale ({NientePct(prima)}%), {dopo[4]} dopo 40 ({NientePct(dopo)}%)");
+            if (Math.Abs(NientePct(prima) - nientePrima) > 4)
+            { Console.WriteLine($"  FALLITA: {grado}, esito niente atteso circa {nientePrima}% al primo rituale"); ok = false; }
+            if (prima[0] + prima[1] + prima[2] + prima[4] != 2000)
+            { Console.WriteLine($"  FALLITA: {grado}, le quattro uscite non fanno 2000"); ok = false; }
+            if (dopo[4] >= prima[4])
+            { Console.WriteLine($"  FALLITA: {grado}, dopo 40 rituali esce niente quanto prima"); ok = false; }
         }
 
         // Il contatore vero: si parte da 3, un rituale Comune all'altarino a nord del
@@ -5084,6 +5096,188 @@ static class Regole
         }
 
         if (ok) Console.WriteLine("  OK: sette altarini al loro posto, il centro e' vuoto, l'oggetto del comando si controlla");
+        return ok;
+    }
+
+    // ---- 15a3. il tiro nuovo: il dono ------------------------------------------
+    //
+    // Decisione di Tommaso (A14m1, decisioni/abilita.md sezione 8): dono e conto
+    // si tirano separati e, se non esce nessuno dei due, non succede niente. Il
+    // dono non e' piu' una statistica per sempre: con un oggetto sotto il grado
+    // del cristallo, 6 volte su 10 sale di grado e 4 su 10 sblocca un'abilita'
+    // della sua famiglia di quel grado; gia' di quel grado, sempre un'abilita';
+    // armature e scudo solo il grado; sopra il grado, dono vuoto. Col solo
+    // cristallo, un'abilita' della classe principale del grado del cristallo.
+    // I dadi li fissa "tirorituale", che c'e' solo sul server delle prove.
+
+    public static bool TiroNuovo(string token, string host, int port)
+    {
+        Console.WriteLine("--- tiro nuovo: niente, dono sull'oggetto e sulla classe, niente statistiche per sempre");
+
+        using var s = new Sonda(token, host, port);
+        if (!s.AttendiPronta()) { Console.WriteLine("  FALLITA: la sonda non e' entrata in gioco"); return false; }
+
+        bool ok = true;
+        void Male(string perche) { Console.WriteLine($"  FALLITA: {perche}"); ok = false; }
+        void Pausa(double secondi) => s.Attendi(() => false, secondi);
+
+        const ulong Sito = 20_001;
+        const float AX = -222f, AZ = -224f;
+        s.Admin($"tp {AX.ToString(Inv)} {AZ.ToString(Inv)}");
+        if (!s.Attendi(() => Dist(s.X, s.Z, AX, AZ) < 3f, 10)) { Male("teletrasporto all'altarino non riuscito"); return false; }
+        if (!s.Attendi(() => s.UltimaPartita != null && !s.UltimaPartita.InFamine, 6))
+        { Male("il mondo di prova e' in carestia, il rituale non tirerebbe l'esito"); return false; }
+        s.Admin("clearinv");
+        s.Admin("abilita azzera");
+        Pausa(0.6);
+
+        string Tiro(string esito, string sale) => s.ChiediAdmin($"tirorituale {esito} {sale}", "tirorituale: ");
+        if (Tiro("niente", "caso") == null) { Male("il comando tirorituale non risponde"); return false; }
+
+        HashSet<AbilityId> Sbloccate() =>
+            (s.Abilita?.Unlocked ?? Array.Empty<AbilityProgress>()).Select(u => u.Id).ToHashSet();
+        byte Grado(ulong id) { lock (s.Zaino) return s.GradiIstanze.TryGetValue(id, out var g) ? g : (byte)255; }
+        ulong Dai(string cosa)
+        {
+            var r = s.ChiediAdmin($"dai {cosa}", "dai: ") ?? "";
+            int i = r.IndexOf("id=", StringComparison.Ordinal);
+            ulong id = i >= 0 && ulong.TryParse(r[(i + 3)..].Split(',')[0], out var v) ? v : 0;
+            if (id == 0) Male($"dai {cosa}: risposta '{r}'");
+            else s.Attendi(() => Grado(id) != 255, 5);
+            return id;
+        }
+        // Un rituale: dà il cristallo, celebra, aspetta l'esito e un attimo per
+        // lo zaino e le abilita'.
+        RitualResultMsg Rito(ulong oggetto, CrystalType g, string cosa)
+        {
+            int c0 = s.Cristalli(g);
+            s.Admin($"give Crystal 1 {g}");
+            s.Attendi(() => s.Cristalli(g) > c0, 5);
+            s.Rituale(Sito, g, oggetto);
+            if (!s.Attendi(() => s.UltimoRituale != null, 6)) { Male($"{cosa}: nessuna risposta al rituale"); return null; }
+            Pausa(0.5);
+            var r = s.UltimoRituale;
+            Console.WriteLine($"  {cosa}: accettato={r.Accepted} ({r.Refusal}), dono='{r.Boon}', conto='{r.Bane}'");
+            if (!r.Accepted) { Male($"{cosa}: rituale rifiutato"); return null; }
+            return r;
+        }
+        // Un rituale che deve sbloccare una e una sola abilita' fra quelle attese.
+        void UnaNuova(ulong oggetto, CrystalType g, string cosa, Func<AbilityId, bool> attesa)
+        {
+            var prima = Sbloccate();
+            var r = Rito(oggetto, g, cosa);
+            if (r == null) return;
+            s.Attendi(() => Sbloccate().Count > prima.Count, 3);
+            var nuove = Sbloccate().Except(prima).ToArray();
+            Console.WriteLine($"    nuove: {string.Join(",", nuove)}");
+            if (nuove.Length != 1 || !attesa(nuove[0])) Male($"{cosa}: attesa una sola abilita' nuova del tipo giusto, viste {nuove.Length}");
+            if (!r.Boon.StartsWith("Impari ")) Male($"{cosa}: il dono non dice cosa si e' imparato");
+        }
+        void Vuoto(ulong oggetto, CrystalType g, string cosa)
+        {
+            var prima = Sbloccate();
+            var r = Rito(oggetto, g, cosa);
+            if (r == null) return;
+            if (!r.Boon.Contains("non trova niente")) Male($"{cosa}: atteso il dono vuoto");
+            if (Sbloccate().Count != prima.Count) Male($"{cosa}: un dono vuoto ha sbloccato un'abilita'");
+        }
+
+        // 1. ne' dono ne' conto: non succede nulla
+        {
+            var prima = Sbloccate();
+            var r = Rito(0, CrystalType.Common, "niente");
+            if (r != null && (!r.Boon.Contains("Non succede nulla") || r.Bane.Length > 0)) Male("niente: atteso 'non succede nulla' e nessun conto");
+            if (Sbloccate().Count != prima.Count) Male("niente: e' cambiato qualcosa nelle abilita'");
+        }
+
+        // 2. una spada Base con un Comune, dado sul grado: sale a Comune
+        Tiro("dono", "grado");
+        ulong spada = Dai("StoneSword base");
+        if (spada != 0)
+        {
+            var r = Rito(spada, CrystalType.Common, "spada Base, sale di grado");
+            if (Grado(spada) != (byte)Grade.Common) Male($"la spada doveva salire a Comune, e' a {Grado(spada)}");
+            if (r != null && !r.Boon.Contains("Comune")) Male("il dono non dice il grado nuovo");
+
+            // 3. gia' Comune: sempre un'abilita', anche col dado sul grado, mai due
+            //    volte la stessa; finite le tre Comuni della spada, dono vuoto
+            for (int i = 1; i <= 3; i++)
+                UnaNuova(spada, CrystalType.Common, $"spada Comune, abilita' {i}",
+                         a => AbilityIds.FamilyOf(a) == WeaponFamily.Sword && AbilityIds.GradeOf(a) == Grade.Common);
+            Vuoto(spada, CrystalType.Common, "spada Comune con le tre Comuni gia' avute");
+            if (Grado(spada) != (byte)Grade.Common) Male("la spada non doveva cambiare grado");
+        }
+
+        // 4. il 4 su 10: una lancia Base col dado sull'abilita' resta Base e da'
+        //    una Comune della lancia; una spada di ferro Base, con le Comuni della
+        //    spada gia' finite, sale di grado lo stesso
+        Tiro("dono", "abilita");
+        ulong lancia = Dai("WoodSpear base");
+        if (lancia != 0)
+        {
+            UnaNuova(lancia, CrystalType.Common, "lancia Base, dado sull'abilita'",
+                     a => AbilityIds.FamilyOf(a) == WeaponFamily.Spear && AbilityIds.GradeOf(a) == Grade.Common);
+            if (Grado(lancia) != (byte)Grade.Base) Male("la lancia doveva restare Base");
+        }
+        ulong ferro = Dai("IronSword base");
+        if (ferro != 0)
+        {
+            Rito(ferro, CrystalType.Common, "spada di ferro Base, niente abilita' da dare");
+            if (Grado(ferro) != (byte)Grade.Common) Male($"la spada di ferro doveva salire a Comune, e' a {Grado(ferro)}");
+        }
+
+        // 5. un arco Raro con un Comune: sopra il grado del cristallo, dono vuoto
+        Tiro("dono", "grado");
+        ulong arco = Dai("Bow raro");
+        if (arco != 0)
+        {
+            Vuoto(arco, CrystalType.Common, "arco Raro con un Comune");
+            if (Grado(arco) != (byte)Grade.Rare) Male("l'arco Raro non doveva cambiare grado");
+        }
+
+        // 6. un cappuccio di cuoio Base: sale anche col dado sull'abilita' (le
+        //    armature non ne hanno); gia' Comune, dono vuoto
+        Tiro("dono", "abilita");
+        ulong cappuccio = Dai("LeatherHood base");
+        if (cappuccio != 0)
+        {
+            Rito(cappuccio, CrystalType.Common, "cappuccio Base");
+            if (Grado(cappuccio) != (byte)Grade.Common) Male($"il cappuccio doveva salire a Comune, e' a {Grado(cappuccio)}");
+            Vuoto(cappuccio, CrystalType.Common, "cappuccio gia' Comune");
+        }
+
+        // 7. col solo cristallo: una Comune della classe principale; il Mago non
+        //    ha Rare, quindi un Raro da Mago e' un dono vuoto (lo sblocco
+        //    dell'Adepto e' A14p)
+        Tiro("dono", "caso");
+        s.ChiediAdmin("classe mago", "classe: ");
+        s.ChiediAdmin("classe sblocca", "classe: ");
+        Pausa(0.4);
+        UnaNuova(0, CrystalType.Common, "solo cristallo Comune da Mago",
+                 a => AbilityIds.ClassOf(a) == ClassId.Mage && AbilityIds.GradeOf(a) == Grade.Common);
+        Vuoto(0, CrystalType.Rare, "solo cristallo Raro da Mago");
+
+        // 8. solo il conto: niente dono, e il conto c'e'
+        Tiro("conto", "caso");
+        {
+            var r = Rito(0, CrystalType.Common, "solo conto");
+            if (r != null && (r.Boon.Length > 0 || r.Bane.Length == 0)) Male("solo conto: atteso un conto e nessun dono");
+        }
+
+        // 9. nessun dono di statistica per sempre, dopo tutti questi rituali
+        Pausa(0.4);
+        var perSempre = (s.Statistiche?.Modifiers ?? Array.Empty<StatModifierInfo>())
+            .Where(m => m.Origin.StartsWith("rituale") && m.Percent > 0).ToArray();
+        Console.WriteLine($"  modificatori positivi dai rituali: {perSempre.Length}");
+        if (perSempre.Length > 0) Male("un rituale ha dato ancora una statistica");
+
+        // Le prove dopo che usano questa sonda la trovano come prima: senza
+        // classe, senza abilita' e con lo zaino vuoto.
+        Tiro("caso", "caso");
+        s.Admin("abilita azzera");
+        s.Admin("clearinv");
+        Pausa(0.5);
+        if (ok) Console.WriteLine("  OK: niente, sale di grado, abilita' d'arma e di classe, dono vuoto quando non c'e' niente da dare");
         return ok;
     }
 

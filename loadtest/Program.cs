@@ -171,6 +171,7 @@ if (modoRegole)
         // vero non devono finire addosso a chi raccoglie nelle prove di prima.
         ("rituali e rischio",       () => Regole.RitualiERischio(tokens[4], host, port)),
         ("altarini",                () => Regole.Altarini(tokens[4], host, port)),
+        ("tiro nuovo",              () => Regole.TiroNuovo(tokens[4], host, port)),
         ("persistenza al rientro",  () => Regole.PersistenzaAlRientro(tokens[3], host, port)),
         // In fondo: l'era rigogliosa conta il tempo dall'avvio, e queste due
         // non devono spostarla.
