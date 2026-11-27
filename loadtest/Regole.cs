@@ -162,6 +162,11 @@ sealed class Sonda : IDisposable
     public volatile AbilityStateMsg Abilita;
     public int AbilitaRicevute;
 
+    /// L'ultimo stato dei Doni di Torak mandato dal server (A14n4), e quanti
+    /// ne sono arrivati.
+    public volatile UniquesStateMsg Doni;
+    public int DoniRicevuti;
+
     /// Lo stato delle abilita in una riga secondo il server (comando admin
     /// "abilita", piu' eventuali argomenti); null se la risposta non arriva.
     public string AbilitaInRiga(string argomenti = "") =>
@@ -503,6 +508,11 @@ sealed class Sonda : IDisposable
                     case NetMsgType.PlayerStats:
                         Statistiche = MessagePack.MessagePackSerializer.Deserialize<PlayerStatsMsg>(env.Payload);
                         Interlocked.Increment(ref StatisticheRicevute);
+                        break;
+
+                    case NetMsgType.UniquesState:
+                        Doni = MessagePack.MessagePackSerializer.Deserialize<UniquesStateMsg>(env.Payload);
+                        Interlocked.Increment(ref DoniRicevuti);
                         break;
 
                     case NetMsgType.EquipmentState:
@@ -7700,6 +7710,103 @@ static class Regole
         Pausa(0.6);
         if (Stato(1) != "libero" || Stato(4) != "libero") Male($"dopo la pulizia Lama e Arco non sono liberi: '{Stato(1)}', '{Stato(4)}'");
         if (ok) Console.WriteLine("  OK: con un Dono addosso il secondo resta a terra, nel baule o dove cade il morto");
+        return ok;
+    }
+
+    // ---- lo stato dei Doni al client (A14n4) -------------------------------------
+    //
+    // Il messaggio UniquesState arriva all'ingresso, con tutto il catalogo
+    // (14 Doni; i fuori catalogo solo se qualcuno li porta), e di nuovo a tutti
+    // quando il registro cambia: il Dono nasce (qui col comando admin), passa
+    // di mano (raccolto da terra da un altro: il contatore sale di uno) e torna
+    // libero. "Tuo" e vero solo per chi lo porta; chi lo porta agli altri non
+    // si dice.
+    public static bool StatoDeiDoni(string tokenA, string tokenB, string host, int port)
+    {
+        Console.WriteLine("--- stato dei doni: il client sa quali Doni sono liberi, quale e' suo e quante volte sono passati di mano");
+        bool ok = true;
+        void Male(string m) { Console.WriteLine("  FALLITA: " + m); ok = false; }
+
+        using var a = new Sonda(tokenA, host, port);
+        using var b = new Sonda(tokenB, host, port);
+        if (!a.AttendiPronta() || !b.AttendiPronta())
+        { Console.WriteLine("  FALLITA: le sonde non sono entrate in gioco"); return false; }
+
+        bool Aspetta(Func<bool> cosa, double secondi) =>
+            a.Attendi(() => { b.Attendi(() => true, 0.01); return cosa(); }, secondi);
+        void Pausa(double secondi) => Aspetta(() => false, secondi);
+        bool Tp(Sonda s, float x, float z)
+        {
+            s.Admin($"tp {x.ToString(Inv)} {z.ToString(Inv)}");
+            bool arrivata = Aspetta(() => Dist(s.X, s.Z, x, z) < 0.6f, 8);
+            s.Cammina(0f, 0f, 0.1);
+            return arrivata;
+        }
+        static UniqueInfo Voce(Sonda s, uint id) => s.Doni?.Uniques?.FirstOrDefault(u => u.Id == id);
+        static string Riga(UniqueInfo u) =>
+            u == null ? "(manca)" : $"{(u.Free ? "libero" : "preso")}{(u.Yours ? ", tuo" : "")}, passaggi {u.TimesTaken}";
+
+        const float PX = 70f, PZ = -306f;   // a terra, come la prova di prima
+        foreach (var s in new[] { a, b }) { s.Admin("clearinv"); s.Admin("effetto azzera"); s.Admin("sethp 1000"); }
+        if (!Tp(a, PX, PZ) || !Tp(b, PX - 6f, PZ)) { Male("teletrasporto non riuscito"); return false; }
+        Pausa(1.0);
+
+        // 1. all'ingresso: c'e' tutto il catalogo, e la Lama e' libera.
+        if (!Aspetta(() => a.Doni != null && b.Doni != null, 5)) { Male("lo stato dei Doni non e' arrivato all'ingresso"); return false; }
+        var catalogo = a.Doni.Uniques.Where(u => !u.Retired).Select(u => u.Id).OrderBy(i => i).ToArray();
+        Console.WriteLine($"  all'ingresso: {a.Doni.Uniques.Length} voci, del catalogo {string.Join(",", catalogo)}; Lama: {Riga(Voce(a, 1))}");
+        if (catalogo.Length != 14) Male($"il catalogo deve avere 14 Doni, ne arrivano {catalogo.Length}");
+        if (a.Doni.Uniques.Any(u => u.Retired && u.Free)) Male("un Dono fuori catalogo e libero non deve arrivare");
+        var lama0 = Voce(a, 1);
+        if (lama0 == null || !lama0.Free || lama0.Yours || lama0.Name != "Lama dell'Ultima Alba")
+        { Male($"la Lama deve essere nel messaggio, libera e di nessuno: {Riga(lama0)} '{lama0?.Name}'"); return false; }
+        int passaggi0 = lama0.TimesTaken;
+
+        // 2. nasce: A riceve la Lama. A tutti arriva che non e' piu' libera;
+        //    "tuo" solo ad A.
+        int primaA = Volatile.Read(ref a.DoniRicevuti), primaB = Volatile.Read(ref b.DoniRicevuti);
+        var dato = a.ChiediAdmin("unico dai 1", "unico: ");
+        if (dato == null || !dato.StartsWith("1 ")) { Male($"Lama non data: '{dato}'"); return false; }
+        bool arrivato = Aspetta(() => Volatile.Read(ref a.DoniRicevuti) > primaA && Volatile.Read(ref b.DoniRicevuti) > primaB
+                                      && Voce(a, 1)?.Free == false && Voce(b, 1)?.Free == false, 4);
+        Console.WriteLine($"  A riceve la Lama: per A {Riga(Voce(a, 1))}; per B {Riga(Voce(b, 1))}");
+        if (!arrivato) Male("lo stato nuovo doveva arrivare a tutti e due");
+        else
+        {
+            if (Voce(a, 1)?.Yours != true) Male("per A la Lama doveva essere sua");
+            if (Voce(b, 1)?.Yours != false) Male("per B la Lama non e' sua");
+            if (Voce(a, 1)?.TimesTaken != passaggi0) Male("nascendo il contatore non sale");
+        }
+
+        // 3. passa di mano: A la butta, B la raccoglie. Il contatore sale di
+        //    uno, e ora e' di B.
+        var aTerra = a.ChiediAdmin("unico butta", "unico: ");
+        var pezzi = aTerra?.Split(' ');
+        if (pezzi == null || pezzi.Length < 5 || pezzi[0] != "a") { Male($"la Lama non e' stata buttata ('{aTerra}')"); }
+        else
+        {
+            float lx = float.Parse(pezzi[3], Inv), lz = float.Parse(pezzi[4], Inv);
+            Tp(a, PX + 8f, PZ);
+            Tp(b, lx, lz);
+            bool passata = Aspetta(() => Voce(b, 1)?.Yours == true && Voce(a, 1)?.Yours == false, 5);
+            if (!passata) { b.Raccogli(ulong.Parse(pezzi[2])); passata = Aspetta(() => Voce(b, 1)?.Yours == true, 3); }
+            Console.WriteLine($"  B raccoglie la Lama buttata da A: per A {Riga(Voce(a, 1))}; per B {Riga(Voce(b, 1))}");
+            if (!passata) Male("raccolta da B, la Lama doveva risultare sua e non piu' di A");
+            else if (Voce(a, 1)?.TimesTaken != passaggi0 + 1 || Voce(b, 1)?.TimesTaken != passaggi0 + 1)
+                Male($"passando di mano il contatore doveva salire a {passaggi0 + 1}");
+        }
+
+        // 4. torna libera: B si svuota lo zaino. A tutti arriva libera, e il
+        //    contatore resta com'era.
+        b.Admin("clearinv");
+        bool libera = Aspetta(() => Voce(a, 1)?.Free == true && Voce(b, 1)?.Free == true, 4);
+        Console.WriteLine($"  B lascia la Lama: per A {Riga(Voce(a, 1))}; per B {Riga(Voce(b, 1))}");
+        if (!libera) Male("tornata libera, lo stato doveva dirlo a tutti e due");
+        else if (Voce(b, 1)?.Yours != false) Male("libera, non e' piu' di B");
+
+        foreach (var s in new[] { a, b }) { s.Admin("clearinv"); s.Admin("effetto azzera"); s.Admin("sethp 1000"); }
+        Pausa(0.6);
+        if (ok) Console.WriteLine("  OK: lo stato dei Doni arriva all'ingresso e a ogni cambio, con il proprio e il contatore");
         return ok;
     }
 
