@@ -7316,6 +7316,247 @@ static class Regole
         return PersistenzaVerifica(token, host, port, "al rientro");
     }
 
+    // ---- le abilita dei Doni di Torak (A14n2) ---------------------------------
+    //
+    // Decisioni/abilita.md sezione 2: ogni arma Dono di Torak ha un'abilita
+    // sua, che sta sull'oggetto e si usa solo col Dono in mano, senza slot.
+    // Tempesta di lame: per 6 s ogni colpo prende tutti entro 4 m, immune.
+    // Lancia del cielo: salto fino a 12 m, triplo danno entro 4 m e 2 s di
+    // stordimento. Freccia del destino: carica 2 s, fino a 60 m, x5, insegue.
+    // Corsa del vento: 8 s di velocita doppia, immune ai rallentamenti, chi
+    // si attraversa prende il colpo del bastone e cade.
+    public static bool AbilitaDeiDoni(string tokenA, string tokenB, string tokenC, string host, int port)
+    {
+        Console.WriteLine("--- abilita dei doni: solo col Dono in mano, le quattro abilita di grado massimo");
+        bool ok = true;
+        void Male(string m) { Console.WriteLine("  FALLITA: " + m); ok = false; }
+
+        using var a = new Sonda(tokenA, host, port);
+        using var b = new Sonda(tokenB, host, port);
+        using var c = new Sonda(tokenC, host, port);
+        if (!a.AttendiPronta() || !b.AttendiPronta() || !c.AttendiPronta())
+        { Console.WriteLine("  FALLITA: le sonde non sono entrate in gioco"); return false; }
+
+        const float PX = -150f, PZ = 250f;   // lo stesso punto delle prove della spada
+        static byte[] P<T>(T v) => MessagePack.MessagePackSerializer.Serialize(v);
+        bool Aspetta(Func<bool> cosa, double secondi) =>
+            a.Attendi(() => { b.Attendi(() => true, 0.01); c.Attendi(() => true, 0.01); return cosa(); }, secondi);
+        void Pausa(double secondi) => Aspetta(() => false, secondi);
+        static string Visto(CommandResultMsg r) => r == null ? "nessuna risposta" : r.Success ? "riuscito" : "rifiutato " + r.ErrorCode;
+        float Vita(Sonda chi) => a.Stato(chi.Id).Vita;
+        void Tp(Sonda s, float x, float z)
+        {
+            s.Admin($"tp {x.ToString(Inv)} {z.ToString(Inv)}");
+            Aspetta(() => Dist(s.X, s.Z, x, z) < 0.5f, 6);
+            s.Cammina(0f, 0f, 0.1);
+        }
+        void Piena(params Sonda[] chi)
+        {
+            foreach (var s in chi) s.Admin("sethp 1000");
+            Aspetta(() => chi.All(s => Vita(s) >= 100f), 3);
+            Pausa(0.3);
+        }
+        string Effetto(Sonda s, string riga) { Pausa(0.15); return s.ChiediAdmin("effetto " + riga, "effetto: ") ?? "(nessuna risposta)"; }
+        static (float X, float Z) Pos(string riga)
+        {
+            int i = riga.IndexOf("pos=", StringComparison.Ordinal);
+            if (i < 0) return (float.NaN, float.NaN);
+            int f = riga.IndexOf(' ', i);
+            var p = (f < 0 ? riga[(i + 4)..] : riga[(i + 4)..f]).Split(',');
+            return p.Length == 2 && float.TryParse(p[0], System.Globalization.NumberStyles.Float, Inv, out var x)
+                   && float.TryParse(p[1], System.Globalization.NumberStyles.Float, Inv, out var z) ? (x, z) : (float.NaN, float.NaN);
+        }
+        uint seq = 140;
+        CommandResultMsg Usa(Sonda s, AbilityId id, float yaw = 90f, ulong bersaglio = 0, float tx = 0f, float tz = 0f)
+        {
+            Pausa(0.15);
+            uint n = ++seq;
+            s.Comando(n, CommandType.UseAbility, P(new UseAbilityCommand
+                { Ability = id, Yaw = yaw, TargetEntityId = bersaglio, TargetX = tx, TargetZ = tz }));
+            CommandResultMsg r = null;
+            Aspetta(() => (r = s.Esito(n)) != null, 5);
+            return r;
+        }
+        void Atteso(string cosa, CommandResultMsg r, ErrorCode atteso)
+        {
+            bool giusto = r != null && (atteso == ErrorCode.None ? r.Success : !r.Success && r.ErrorCode == atteso);
+            Console.WriteLine($"  {cosa}: {Visto(r)}{(giusto ? "" : $" (atteso {(atteso == ErrorCode.None ? "riuscito" : atteso.ToString())})")}");
+            if (!giusto) Male($"{cosa}: atteso {(atteso == ErrorCode.None ? "riuscito" : "rifiutato " + atteso)}");
+        }
+        void Controlla(string cosa, float visto, float atteso)
+        {
+            Console.WriteLine($"  {cosa}: {visto} (atteso {atteso})");
+            if (visto != atteso) Male($"{cosa}: {visto} invece di {atteso}");
+        }
+        void Pulisci(params Sonda[] chi) { foreach (var s in chi) Effetto(a, $"azzera {s.Id}"); }
+        string Stato(uint dono) => a.ChiediAdmin($"unico stato {dono}", "unico: ") ?? "(nessuna risposta)";
+        // A prende il Dono numero dono e lo impugna (arma nella posizione 0).
+        bool Dono(uint dono, ItemType arma)
+        {
+            a.Admin("clearinv");
+            Pausa(0.4);
+            var r = a.ChiediAdmin($"unico dai {dono}", "unico: ");
+            if (r == null || !r.StartsWith($"{dono} "))
+            { Male($"'unico dai {dono}' non ha dato il Dono ({r ?? "nessuna risposta"})"); return false; }
+            Console.WriteLine($"  unico dai {dono}: {r}");
+            Aspetta(() => { lock (a.Zaino) return a.Istanze.Values.Any(i => i.Tipo == arma); }, 5);
+            a.Dotazione(arma, ItemType.None, SideItemType.None);
+            a.Posizione(0);
+            Pausa(0.4);
+            return true;
+        }
+
+        a.Admin("setfaction 1"); b.Admin("setfaction 2"); c.Admin("setfaction 2");
+        foreach (var s in new[] { a, b, c }) { s.Admin("clearinv"); s.Admin("abilita azzera"); s.Admin("effetto azzera"); }
+        b.Dotazione(ItemType.None, ItemType.None, SideItemType.None);
+        c.Dotazione(ItemType.None, ItemType.None, SideItemType.None);
+        Tp(a, PX, PZ); Tp(b, PX + 1.5f, PZ); Tp(c, PX + 3f, PZ);
+        Piena(a, b, c);
+
+        // 1. Senza il Dono, con una spada di ferro Epica qualunque, la
+        //    Tempesta di lame non parte.
+        {
+            var r = a.ChiediAdmin("dai IronSword epico", "dai: ");
+            ulong id = r != null && ulong.TryParse(r.Split("id=").Last(), out var n) ? n : 0;
+            if (id == 0 || !Aspetta(() => { lock (a.Zaino) return a.Istanze.ContainsKey(id); }, 5))
+                Male($"'dai IronSword epico' non ha dato la spada ({r ?? "nessuna risposta"})");
+            a.Dotazione(ItemType.IronSword, ItemType.None, SideItemType.None);
+            a.Posizione(0);
+            Pausa(0.4);
+            Atteso("Tempesta di lame con una spada Epica che non e' il Dono", Usa(a, AbilityId.SwordBladeTempest), ErrorCode.AbilityNotUsable);
+        }
+
+        // 2. La Lama dell'Ultima Alba: un colpo normale prende solo B (a 1,5 m);
+        //    con la Tempesta prende anche C (a 3 m, fuori dalla portata della
+        //    spada ma entro 4 m), 30 a testa; A e' immune; la seconda volta e'
+        //    in ricarica.
+        if (Dono(1, ItemType.IronSword))
+        {
+            float pb = Vita(b), pc = Vita(c);
+            a.Colpisci(0.1);
+            Aspetta(() => Vita(b) < pb, 1.5);
+            Pausa(0.3);
+            Controlla("colpo normale con la Lama, B perde", pb - Vita(b), 30f);
+            Controlla("colpo normale con la Lama, C perde", pc - Vita(c), 0f);
+            Piena(b, c);
+            Pausa(0.5);   // il colpo normale ha la sua cadenza
+            Atteso("Tempesta di lame con la Lama in mano", Usa(a, AbilityId.SwordBladeTempest), ErrorCode.None);
+            string stA = Effetto(a, "stato");
+            Console.WriteLine($"  Tempesta di lame, A: {stA}");
+            if (!stA.Contains("immune")) Male("durante la Tempesta A deve essere immune");
+            pb = Vita(b); pc = Vita(c);
+            a.Colpisci(0.1);
+            Aspetta(() => Vita(b) < pb && Vita(c) < pc, 1.5);
+            Pausa(0.3);
+            Controlla("Tempesta di lame, B perde", pb - Vita(b), 30f);
+            Controlla("Tempesta di lame, C perde", pc - Vita(c), 30f);
+            Atteso("Tempesta di lame di nuovo", Usa(a, AbilityId.SwordBladeTempest), ErrorCode.AbilityOnCooldown);
+            Atteso("Lancia del cielo con la Lama in mano", Usa(a, AbilityId.SpearSkySpear), ErrorCode.AbilityNotUsable);
+            Pulisci(a, b, c);
+            a.Admin("ricarica");
+        }
+
+        // 3. La Lancia del Cielo Spezzato: salto verso B, a 10 m; all'atterraggio
+        //    B perde 84 (il triplo dei 28 della lancia di ferro) ed e'
+        //    stordito; C, a 30 m, niente.
+        Tp(b, PX + 10f, PZ); Tp(c, PX + 30f, PZ);
+        Piena(b, c);
+        if (Dono(6, ItemType.IronSpear))
+        {
+            float pb = Vita(b), pc = Vita(c);
+            Atteso("Lancia del cielo", Usa(a, AbilityId.SpearSkySpear, 90f, 0, PX + 10f, PZ), ErrorCode.None);
+            string stB = Effetto(a, $"stato {b.Id}");
+            Console.WriteLine($"  Lancia del cielo, B: {stB}");
+            if (!stB.Contains("stordito")) Male("la Lancia del cielo deve stordire chi e' entro 4 m");
+            var (ax, az) = Pos(Effetto(a, "stato"));
+            Console.WriteLine($"  Lancia del cielo, A atterra a ({ax:F2}, {az:F2})");
+            if (float.IsNaN(ax) || Dist(ax, az, PX + 10f, PZ) > 0.6f) Male($"A doveva atterrare in ({PX + 10f}, {PZ})");
+            Aspetta(() => Vita(b) < pb, 1.5);
+            Pausa(0.3);
+            Controlla("Lancia del cielo, B perde", pb - Vita(b), 84f);
+            Controlla("Lancia del cielo, C perde", pc - Vita(c), 0f);
+            Pulisci(a, b, c);
+            a.Admin("ricarica");
+        }
+
+        // 4. L'Arco del Destino: B a 30 m (oltre i 20 del tiro pieno). La
+        //    freccia parte dopo 2 s: a 1 s B e' ancora intero. Intanto B si
+        //    sposta di lato, e la freccia lo insegue. B prende il 25% del danno
+        //    (prova), cosi' i 200 della freccia (40 x 5) diventano 50 e non
+        //    muore.
+        Tp(a, PX, PZ); Tp(b, PX + 30f, PZ); Tp(c, PX - 30f, PZ);
+        Piena(b);
+        if (Dono(4, ItemType.Bow))
+        {
+            a.Admin("give Arrow 3");
+            Aspetta(() => { lock (a.Zaino) return a.Zaino.TryGetValue((ItemType.Arrow, (byte)0), out int f) && f >= 3; }, 5);
+            Effetto(a, $"subito -75 10 {b.Id}");
+            float pb = Vita(b);
+            var t0 = DateTime.UtcNow;
+            Atteso("Freccia del destino su B a 30 m", Usa(a, AbilityId.BowArrowOfFate, 90f, b.Id), ErrorCode.None);
+            Tp(b, PX + 25f, PZ + 12f);
+            Aspetta(() => (DateTime.UtcNow - t0).TotalSeconds >= 1.0, 2);
+            float aUnSecondo = pb - Vita(b);
+            Console.WriteLine($"  Freccia del destino: a {(DateTime.UtcNow - t0).TotalSeconds:F1} s B ha perso {aUnSecondo}");
+            if (aUnSecondo != 0f) Male("la Freccia del destino deve partire solo dopo la carica di 2 s");
+            Aspetta(() => Vita(b) < pb, 3);
+            double arrivo = (DateTime.UtcNow - t0).TotalSeconds;
+            Pausa(0.3);
+            Console.WriteLine($"  Freccia del destino: arrivata dopo {arrivo:F1} s");
+            if (arrivo < 1.7) Male($"la Freccia del destino e' arrivata troppo presto ({arrivo:F1} s)");
+            Controlla("Freccia del destino, B (spostato) perde", pb - Vita(b), 50f);
+            int frecce; lock (a.Zaino) frecce = a.Zaino.TryGetValue((ItemType.Arrow, (byte)0), out int f) ? f : 0;
+            Controlla("frecce rimaste ad A", frecce, 2f);
+            Pulisci(a, b, c);
+            a.Admin("ricarica");
+        }
+
+        // 5. Il Bastone del Vento: A rallentata del 50%; con la Corsa +100% di
+        //    velocita' e niente piu' rallentamento, e un rallentamento nuovo non
+        //    attacca. B accanto ad A e' travolto subito (12, stordito);
+        //    camminando A travolge anche C, e B non una seconda volta.
+        Tp(a, PX, PZ); Tp(b, PX + 0.5f, PZ); Tp(c, PX + 4f, PZ);
+        Piena(a, b, c);
+        if (Dono(7, ItemType.Staff))
+        {
+            Effetto(a, "rallenta 50 10");
+            float pb = Vita(b), pc = Vita(c);
+            Atteso("Corsa del vento", Usa(a, AbilityId.StaffWindRun), ErrorCode.None);
+            string stB = Effetto(a, $"stato {b.Id}");
+            Console.WriteLine($"  Corsa del vento, B: {stB}");
+            if (!stB.Contains("stordito")) Male("chi e' travolto dalla Corsa del vento deve cadere (stordito)");
+            Effetto(a, "rallenta 50 10");
+            string stA = Effetto(a, "stato");
+            Console.WriteLine($"  Corsa del vento, A: {stA}");
+            if (!stA.Contains("MoveSpeed +100%")) Male("la Corsa del vento deve dare +100% di velocita'");
+            if (!stA.Contains("immune ai rallentamenti")) Male("durante la Corsa del vento A deve essere immune ai rallentamenti");
+            if (stA.Contains("rallentato")) Male("durante la Corsa del vento A non deve essere rallentata");
+            Aspetta(() => Vita(b) < pb, 1.5);
+            // B fuori dalla strada, 3 m di lato; A cammina verso C (a 4 m) per
+            // 1,5 s. Al primo giro, con mezzo secondo, A si era spostata di un
+            // metro solo e C non era stata raggiunta.
+            Tp(b, PX + 0.5f, PZ + 3f);
+            var (x0, _) = Pos(Effetto(a, "stato"));
+            a.Cammina(1f, 0f, 1.5);
+            Aspetta(() => Vita(c) < pc, 1.5);
+            var (x1, _) = Pos(Effetto(a, "stato"));
+            Console.WriteLine($"  Corsa del vento: A cammina da x={x0:F2} a x={x1:F2} (C a x={PX + 4f})");
+            Pausa(0.3);
+            Controlla("Corsa del vento, B perde", pb - Vita(b), 12f);
+            Controlla("Corsa del vento, C (attraversata) perde", pc - Vita(c), 12f);
+            Pulisci(a, b, c);
+        }
+
+        // Pulizia: i Doni tornano liberi, e le prove dopo trovano gli zaini
+        // vuoti e le abilita azzerate.
+        foreach (var s in new[] { a, b, c }) { s.Admin("clearinv"); s.Admin("abilita azzera"); s.Admin("effetto azzera"); }
+        Pausa(0.6);
+        foreach (uint d in new uint[] { 1, 4, 6, 7 })
+            if (Stato(d) != "libero") Male($"dopo la pulizia il Dono {d} non e' libero: '{Stato(d)}'");
+        if (ok) Console.WriteLine("  OK: le quattro abilita dei Doni di Torak partono solo col Dono in mano e fanno quello che dicono");
+        return ok;
+    }
+
     // ---- passiva dello scudo e Pietraviva (A14h) --------------------------------
     //
     // Decisioni/abilita.md sezione 3: con lo scudo nella mano libera, quando
