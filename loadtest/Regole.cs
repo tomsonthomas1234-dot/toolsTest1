@@ -183,7 +183,8 @@ sealed class Sonda : IDisposable
                             new DeleteJournalEntryCommand { EntryId = id }),
         });
 
-    public void Rituale(ulong sito, CrystalType grado)
+    /// oggetto: l'esemplare su cui si celebra (A14l), 0 per il solo cristallo.
+    public void Rituale(ulong sito, CrystalType grado, ulong oggetto = 0)
     {
         UltimoRituale = null;
         Manda(NetMsgType.Command, new CommandMsg
@@ -191,7 +192,7 @@ sealed class Sonda : IDisposable
             CommandId = 9,
             Type      = CommandType.Ritual,
             Payload   = MessagePack.MessagePackSerializer.Serialize(new RitualCommand
-            { SiteId = sito, Tier = grado }),
+            { SiteId = sito, Tier = grado, ItemInstanceId = oggetto }),
         });
     }
 
@@ -4673,10 +4674,10 @@ static class Regole
         if (!s.AttendiPronta() || !o.AttendiPronta())
         { Console.WriteLine("  FALLITA: le sonde non sono entrate in gioco"); return false; }
 
-        // Il cerchio al centro dell'isola centrale: SpawnDevWorld lo mette li'
-        // con questo identificativo.
-        const ulong Sito = 20_000;
-        const float RX = 2f, RZ = 0f;
+        // L'altarino a nord del centro (A14l): SpawnDevWorld lo mette li'
+        // con questo identificativo, a 55 metri dal centro.
+        const ulong Sito = 20_005;
+        const float RX = 2f, RZ = -55f;
         s.Admin($"tp {RX.ToString(Inv)} {RZ.ToString(Inv)}");
         s.Admin("give Crystal 1 Common");
         if (!s.Attendi(() => Dist(s.X, s.Z, RX, RZ) < 3f && s.Cristalli(CrystalType.Common) >= 1, 10))
@@ -4768,8 +4769,8 @@ static class Regole
         if (!s.AttendiPronta() || !o.AttendiPronta())
         { Console.WriteLine("  FALLITA: le sonde non sono entrate in gioco"); return false; }
 
-        const ulong Sito = 20_000;   // il cerchio al centro dell'isola centrale
-        const float RX = 2f, RZ = 0f;
+        const ulong Sito = 20_005;   // l'altarino a nord del centro (A14l)
+        const float RX = 2f, RZ = -55f;
 
         // Si parte senza Echi: un giro precedente andato male potrebbe averne
         // lasciati.
@@ -4778,8 +4779,8 @@ static class Regole
 
         s.Admin($"tp {RX.ToString(Inv)} {RZ.ToString(Inv)}");
         s.Admin("give Crystal 1 Epic");
-        o.Admin("tp 2 -20");
-        if (!s.Attendi(() => { o.Poll(); return Dist(s.X, s.Z, RX, RZ) < 3f && Dist(o.X, o.Z, 2f, -20f) < 3f
+        o.Admin("tp 2 -75");
+        if (!s.Attendi(() => { o.Poll(); return Dist(s.X, s.Z, RX, RZ) < 3f && Dist(o.X, o.Z, 2f, -75f) < 3f
                                                && s.Cristalli(CrystalType.Epic) >= 1; }, 10))
         { Console.WriteLine("  FALLITA: preparazione non riuscita (posizioni o cristallo)"); return false; }
 
@@ -4794,10 +4795,11 @@ static class Regole
             // subito a 70 metri (entro i 150 dal sito): gli Eco nascono a 10-15
             // metri e corrono a 6,5 al secondo, restando li' sarebbe morto prima
             // della prova. L'osservatore resta a 20 dal sito, piu' vicino agli
-            // Echi: devono andare dal primo.
+            // Echi: devono andare dal primo. Dall'altarino a nord si scappa
+            // verso il centro dell'isola, lontano dagli angoli del santuario.
             int vitaO = Vita(o, o.Id), vitaOMin = vitaO;
             s.Rituale(Sito, CrystalType.Epic);
-            s.Admin("tp 2 70");
+            s.Admin("tp 2 15");
             if (!s.Attendi(() => s.UltimoRituale != null, 6))
             { Console.WriteLine("  FALLITA: nessuna risposta al rituale"); return false; }
             var r = s.UltimoRituale;
@@ -4831,7 +4833,10 @@ static class Regole
 
             // L'osservatore si allontana prima che gli Echi tornino al sito, e
             // chi ha celebrato scappa oltre i 150 metri: lo dimenticano.
-            o.Admin("tp 2 -60");
+            // L'osservatore va a 64 metri dal sito, verso ovest: oltre
+            // l'altarino c'e' il mare, e la strada fra il sito e chi e' scappato
+            // resta a piu' di 45 metri (gli Echi vedono a 30).
+            o.Admin("tp -45 -10");
             s.Admin("tp 300 300");
             // Smettono subito di cacciare, ma i Vaganti tornano al sito a 3,5
             // metri al secondo: si aspetta che siano tutti a casa, cosi' tutti
@@ -4948,10 +4953,10 @@ static class Regole
             { Console.WriteLine("  FALLITA: un Comune al primo rituale non deve mai avere un conto grave"); ok = false; }
         }
 
-        // Il contatore vero: si parte da 3, un rituale Comune al cerchio del
+        // Il contatore vero: si parte da 3, un rituale Comune all'altarino a nord del
         // centro lo porta a 4.
-        const ulong Sito = 20_000;
-        const float RX = 2f, RZ = 0f;
+        const ulong Sito = 20_005;
+        const float RX = 2f, RZ = -55f;
         int partenza = s.RitualiFatti(3);
         s.Admin($"tp {RX.ToString(Inv)} {RZ.ToString(Inv)}");
         s.Admin("give Crystal 1 Common");
@@ -4971,6 +4976,114 @@ static class Regole
         if (dopoRito != 4) { Console.WriteLine("  FALLITA: il rituale non ha contato"); ok = false; }
 
         if (ok) Console.WriteLine("  OK: piu' rituali alle spalle, piu' conti e piu' gravi; il contatore sale");
+        return ok;
+    }
+
+    // ---- 15a2. gli altarini ----------------------------------------------------
+    //
+    // Decisione di Tommaso (A14l, decisioni/abilita.md sezione 8): i rituali che
+    // non sono la riparazione si fanno su sette altarini fissi, quattro sulle
+    // isole intermedie e tre sull'isola centrale fuori dal santuario. Il cerchio
+    // unico al centro esatto non c'e' piu'. Il comando del rituale dice se si
+    // celebra su un oggetto: un oggetto che non si ha viene rifiutato prima di
+    // consumare il cristallo.
+
+    static readonly (ulong Id, float X, float Z)[] AltariniAttesi =
+    {
+        (20_001, -224f, -224f), (20_002, 224f, -224f), (20_003, -224f, 224f), (20_004, 224f, 224f),
+        (20_005, 0f, -55f), (20_006, -55f, 0f), (20_007, 55f, 0f),
+    };
+
+    public static bool Altarini(string token, string host, int port)
+    {
+        Console.WriteLine("--- altarini: sette siti fissi, niente cerchio al centro, l'oggetto nel comando");
+
+        using var s = new Sonda(token, host, port);
+        if (!s.AttendiPronta()) { Console.WriteLine("  FALLITA: la sonda non e' entrata in gioco"); return false; }
+
+        bool ok = true;
+        void Male(string perche) { Console.WriteLine($"  FALLITA: {perche}"); ok = false; }
+
+        bool Vicino(float x, float z) =>
+            s.Attendi(() => Dist(s.X, s.Z, x, z) < 3f, 10);
+        EntityState SitoVisto(ulong id)
+        {
+            lock (s.Mondo) return s.Mondo.TryGetValue(id, out var e) && e.Type == EntityType.RitualSite ? e : null;
+        }
+
+        // 1. ognuno dei sette al suo posto
+        int trovati = 0;
+        foreach (var (id, x, z) in AltariniAttesi)
+        {
+            s.Admin($"tp {(x + 2f).ToString(Inv)} {z.ToString(Inv)}");
+            if (!Vicino(x + 2f, z)) { Male($"teletrasporto vicino all'altarino {id} non riuscito"); continue; }
+            EntityState visto = null;
+            s.Attendi(() => (visto = SitoVisto(id)) != null, 5);
+            if (visto == null) { Male($"l'altarino {id} non si vede da due metri"); continue; }
+            if (Dist(visto.X, visto.Z, x, z) > 0.5f) { Male($"l'altarino {id} e' in ({visto.X:F0}, {visto.Z:F0}), atteso ({x:F0}, {z:F0})"); continue; }
+            trovati++;
+        }
+        Console.WriteLine($"  altarini al loro posto: {trovati} su {AltariniAttesi.Length}");
+
+        // 2. al centro esatto non c'e' piu' niente, e il vecchio id viene rifiutato
+        s.Admin("tp 2 0");
+        if (!Vicino(2f, 0f)) Male("teletrasporto al centro non riuscito");
+        s.Attendi(() => false, 1.0);
+        if (SitoVisto(20_000) != null) Male("il vecchio cerchio al centro c'e' ancora");
+        s.Admin("give Crystal 2 Common");
+        s.Attendi(() => s.Cristalli(CrystalType.Common) >= 2, 5);
+        int c0 = s.Cristalli(CrystalType.Common);
+        s.Rituale(20_000, CrystalType.Common);
+        if (!s.Attendi(() => s.UltimoRituale != null, 6)) Male("nessuna risposta al rituale sul vecchio cerchio");
+        else
+        {
+            Console.WriteLine($"  rituale sul vecchio cerchio: accettato={s.UltimoRituale.Accepted}, rifiuto='{s.UltimoRituale.Refusal}'");
+            if (s.UltimoRituale.Accepted) Male("il vecchio cerchio al centro accetta ancora rituali");
+        }
+
+        // 3. su un altarino delle isole intermedie, con un oggetto che non si ha:
+        //    rifiutato, e il cristallo resta.
+        var (pid, px, pz) = AltariniAttesi[0];
+        s.Admin($"tp {(px + 2f).ToString(Inv)} {pz.ToString(Inv)}");
+        if (!Vicino(px + 2f, pz)) { Male("teletrasporto all'altarino di nord-ovest non riuscito"); return false; }
+        if (!s.Attendi(() => s.UltimaPartita != null && !s.UltimaPartita.InFamine, 6))
+        { Male("il mondo di prova e' in carestia"); return false; }
+        s.Rituale(pid, CrystalType.Common, 987_654_321UL);
+        if (!s.Attendi(() => s.UltimoRituale != null, 6)) Male("nessuna risposta al rituale con un oggetto che non si ha");
+        else
+        {
+            s.Attendi(() => false, 0.5);
+            Console.WriteLine($"  rituale su un oggetto che non si ha: accettato={s.UltimoRituale.Accepted}, " +
+                              $"rifiuto='{s.UltimoRituale.Refusal}', cristalli {c0} -> {s.Cristalli(CrystalType.Common)}");
+            if (s.UltimoRituale.Accepted) Male("accettato un rituale su un oggetto che non si ha");
+            if (s.Cristalli(CrystalType.Common) != c0) Male("il cristallo e' stato consumato da un rituale rifiutato");
+        }
+
+        // 4. con un oggetto vero, nello zaino: accettato, il cristallo si consuma
+        s.Admin("give StoneSword 1");
+        ulong spada = 0;
+        s.Attendi(() =>
+        {
+            lock (s.Zaino) spada = s.Istanze.Where(kv => kv.Value.Tipo == ItemType.StoneSword).Select(kv => kv.Key).FirstOrDefault();
+            return spada != 0;
+        }, 5);
+        if (spada == 0) Male("la spada di pietra non e' arrivata nello zaino");
+        else
+        {
+            s.Rituale(pid, CrystalType.Common, spada);
+            if (!s.Attendi(() => s.UltimoRituale != null, 6)) Male("nessuna risposta al rituale sulla spada");
+            else
+            {
+                s.Attendi(() => s.Cristalli(CrystalType.Common) < c0, 3);
+                var r = s.UltimoRituale;
+                Console.WriteLine($"  rituale sulla spada all'altarino {pid}: accettato={r.Accepted} ({r.Refusal}), " +
+                                  $"dono='{r.Boon}', conto='{r.Bane}', cristalli {c0} -> {s.Cristalli(CrystalType.Common)}");
+                if (!r.Accepted) Male("rifiutato un rituale su un altarino delle isole intermedie con un oggetto che si ha");
+                if (s.Cristalli(CrystalType.Common) >= c0) Male("il cristallo non e' stato consumato");
+            }
+        }
+
+        if (ok) Console.WriteLine("  OK: sette altarini al loro posto, il centro e' vuoto, l'oggetto del comando si controlla");
         return ok;
     }
 
