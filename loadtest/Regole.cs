@@ -7713,6 +7713,202 @@ static class Regole
         return ok;
     }
 
+    // ---- le abilita uniche di classe (A14o1) --------------------------------------
+    //
+    // Una sola al mondo, la tiene il registro. Col solo cristallo Dono di Torak
+    // si ottiene quella della propria classe, se e' libera e se non si porta
+    // gia' un Dono; chi la porta non prende un Dono oggetto ne' ne fa nascere
+    // uno. Uccisi da un giocatore: meta' passa a chi uccide (se non porta gia'
+    // un Dono, se no resta), meta' va persa. 14 giorni senza entrare e la si
+    // perde. Gli effetti delle sei uniche non ci sono ancora.
+    public static bool AbilitaUniche(string tokenA, string tokenB, string tokenC, string host, int port)
+    {
+        Console.WriteLine("--- abilita uniche: una sola al mondo, dal rituale, meta' a chi uccide, persa con l'inattivita'");
+        bool ok = true;
+        void Male(string m) { Console.WriteLine("  FALLITA: " + m); ok = false; }
+
+        using var a = new Sonda(tokenA, host, port);
+        using var b = new Sonda(tokenB, host, port);
+        if (!a.AttendiPronta() || !b.AttendiPronta())
+        { Console.WriteLine("  FALLITA: le sonde non sono entrate in gioco"); return false; }
+
+        bool Aspetta(Func<bool> cosa, double secondi) =>
+            a.Attendi(() => { b.Attendi(() => true, 0.01); return cosa(); }, secondi);
+        void Pausa(double secondi) => Aspetta(() => false, secondi);
+        bool Tp(Sonda s, float x, float z)
+        {
+            s.Admin($"tp {x.ToString(Inv)} {z.ToString(Inv)}");
+            bool arrivata = Aspetta(() => Dist(s.X, s.Z, x, z) < 3f, 10);
+            s.Cammina(0f, 0f, 0.1);
+            return arrivata;
+        }
+        string Stato(string id) => a.ChiediAdmin($"unica stato {id}", "unica: ") ?? "(nessuna risposta)";
+        static string Chi(string stato) => stato.StartsWith("di ") ? stato.Split(' ')[1] : "";
+        static bool Ha(Sonda s, AbilityId id) => (s.Abilita?.Unlocked ?? Array.Empty<AbilityProgress>()).Any(u => u.Id == id);
+        static int Eventi(Sonda s, WorldEventKind k) { lock (s.Registro) return s.Registro.Count(e => e.Kind == k); }
+        static byte Grado(Sonda s, ulong id) { lock (s.Zaino) return s.GradiIstanze.TryGetValue(id, out var g) ? g : (byte)255; }
+        const AbilityId Signore = AbilityId.WarriorWarlord;   // 1040
+        const CrystalType T = CrystalType.Precursor;
+
+        const ulong Sito = 20_001;
+        const float AX = -222f, AZ = -224f;    // l'altarino
+        const float PX = -150f, PZ = 250f;     // lontano da tutto, per le morti
+
+        void Pulisci(Sonda s) { s.Admin("clearinv"); s.Admin("abilita azzera"); s.Admin("effetto azzera"); s.Admin("sethp 1000"); }
+        a.Admin("setfaction 1"); b.Admin("setfaction 2");
+        Pulisci(a); Pulisci(b);
+        a.ChiediAdmin("unica libera 1040", "unica: ");
+        a.ChiediAdmin("unica libera 1140", "unica: ");
+        if (a.ChiediAdmin("unica dado caso", "unica: ") == null) { Male("il comando 'unica' non risponde"); return false; }
+        if (!Tp(a, AX, AZ) || !Tp(b, AX + 2f, AZ)) { Male("teletrasporto all'altarino non riuscito"); return false; }
+        if (!a.Attendi(() => a.UltimaPartita != null && !a.UltimaPartita.InFamine, 6))
+        { Male("il mondo di prova e' in carestia, il rituale non tirerebbe l'esito"); return false; }
+        Pausa(0.6);
+        if (Stato("1040") != "libera") { Male($"Signore della guerra non e' libera all'inizio: '{Stato("1040")}'"); return false; }
+
+        foreach (var s in new[] { a, b })
+        {
+            s.ChiediAdmin("classe guerriero", "classe: ");
+            s.ChiediAdmin("classe sblocca", "classe: ");
+            s.ChiediAdmin("tirorituale dono caso", "tirorituale: ");   // il dono esce, niente conto
+        }
+
+        RitualResultMsg Rito(Sonda s, ulong oggetto, string cosa)
+        {
+            int c0 = s.Cristalli(T);
+            s.Admin($"give Crystal 1 {T}");
+            s.Attendi(() => s.Cristalli(T) > c0, 5);
+            s.Rituale(Sito, T, oggetto);
+            if (!s.Attendi(() => s.UltimoRituale != null, 6)) { Male($"{cosa}: nessuna risposta al rituale"); return null; }
+            Pausa(0.8);
+            var r = s.UltimoRituale;
+            Console.WriteLine($"  {cosa}: accettato={r.Accepted} ({r.Refusal}), dono='{r.Boon}', unico='{r.UniqueName}'");
+            if (!r.Accepted) { Male($"{cosa}: rituale rifiutato"); return null; }
+            return r;
+        }
+        bool Uccide(Sonda chi, Sonda vittima)
+        {
+            // Tutti e due in piedi: chi uccide puo' essere appena morto lui.
+            Aspetta(() => { var v = vittima.Stato(vittima.Id); return !v.Morto && v.Vita > 0f; }, 10);
+            Aspetta(() => { var v = chi.Stato(chi.Id); return !v.Morto && v.Vita > 0f; }, 10);
+            Pausa(0.5);
+            Tp(chi, PX, PZ); Tp(vittima, PX + 1f, PZ);
+            chi.Admin("sethp 1000"); vittima.Admin("sethp 1000");
+            Pausa(0.5);
+            vittima.Admin("sethp 8");
+            Pausa(0.4);
+            chi.ChiediAdmin($"effetto stordisci 10 {vittima.Id}", "effetto: ");
+            chi.ChiediAdmin($"effetto sanguina 20 2 {vittima.Id}", "effetto: ");
+            bool morto = Aspetta(() => chi.Stato(vittima.Id).Morto, 5);
+            Pausa(1.0);
+            if (!morto) Male("la vittima doveva morire");
+            return morto;
+        }
+
+        // 1. A, Guerriero, col solo cristallo Dono di Torak: impara Signore
+        //    della guerra, e il registro la segna ad A.
+        int ottenuteB = Eventi(b, WorldEventKind.UniqueAbilityObtained);
+        var r1 = Rito(a, 0, "A col cristallo Dono di Torak");
+        Aspetta(() => Ha(a, Signore), 3);
+        string diA = Chi(Stato("1040"));
+        Console.WriteLine($"  registro '{Stato("1040")}', fra le sbloccate di A {(Ha(a, Signore) ? "c'e'" : "non c'e'")}, avvisi 'ottenuta' a B {Eventi(b, WorldEventKind.UniqueAbilityObtained) - ottenuteB}");
+        if (r1 == null || r1.UniqueName != "Signore della guerra" || !r1.Boon.StartsWith("Impari Signore della guerra"))
+            Male("il rituale doveva dare Signore della guerra");
+        if (diA == "" || !Ha(a, Signore)) { Male("Signore della guerra doveva essere di A, nel registro e fra le sbloccate"); return false; }
+        if (Eventi(b, WorldEventKind.UniqueAbilityObtained) <= ottenuteB) Male("B doveva ricevere l'avviso 'ottenuta'");
+
+        // 2. B, Guerriero anche lui: e' gia' di A, dono vuoto.
+        Rito(b, 0, "B col cristallo Dono di Torak, unica gia' presa");
+        if (b.UltimoRituale == null || !b.UltimoRituale.Boon.Contains("non trova niente")) Male("per B il dono doveva essere vuoto");
+        if (Ha(b, Signore) || Chi(Stato("1040")) != diA) Male("Signore della guerra doveva restare di A");
+
+        // 3. un solo Dono: A con una spada Epica e il cristallo Dono di
+        //    Torak non fa nascere la Lama.
+        var rd = a.ChiediAdmin("dai StoneSword epico", "dai: ") ?? "";
+        int iid = rd.IndexOf("id=", StringComparison.Ordinal);
+        ulong spada = iid >= 0 && ulong.TryParse(rd[(iid + 3)..].Split(',')[0], out var sv) ? sv : 0;
+        if (spada == 0) Male($"dai StoneSword epico: risposta '{rd}'");
+        else
+        {
+            a.Attendi(() => Grado(a, spada) != 255, 5);
+            var r3 = Rito(a, spada, "A con l'unica e una spada Epica");
+            if (r3 != null && !r3.Boon.Contains("non trova niente")) Male("con l'unica addosso la spada non doveva diventare la Lama");
+            if (Grado(a, spada) != (byte)Grade.Epic) Male($"la spada doveva restare Epica, e' a {Grado(a, spada)}");
+        }
+        a.Admin("clearinv");
+
+        // 4. ucciso da chi porta gia' un Dono: col dado su "passa", l'unica
+        //    resta ad A.
+        b.ChiediAdmin("unico dai 4", "unico: ");   // l'Arco del Destino a B
+        a.ChiediAdmin("unica dado passa", "unica: ");
+        if (Uccide(b, a))
+        {
+            Console.WriteLine($"  B con l'Arco uccide A: registro '{Stato("1040")}'");
+            if (Chi(Stato("1040")) != diA || Ha(b, Signore)) Male("B porta gia' un Dono: l'unica doveva restare ad A");
+        }
+        b.Admin("clearinv");   // l'Arco torna libero
+
+        // 5. B senza Doni uccide A, dado su "passa": passa a B, un passaggio.
+        int passateA = Eventi(a, WorldEventKind.UniqueAbilityChangedHands);
+        if (Uccide(b, a))
+        {
+            Aspetta(() => Ha(b, Signore) && !Ha(a, Signore), 3);
+            string dopo = Stato("1040");
+            Console.WriteLine($"  B uccide A: registro '{dopo}', B {(Ha(b, Signore) ? "ce l'ha" : "non ce l'ha")}, A {(Ha(a, Signore) ? "ce l'ha ancora" : "non ce l'ha piu'")}");
+            if (Chi(dopo) == "" || Chi(dopo) == diA || !dopo.Contains("passaggi 1")) Male("l'unica doveva passare a B con un passaggio");
+            if (!Ha(b, Signore) || Ha(a, Signore)) Male("le sbloccate dovevano seguire il registro");
+            if (Eventi(a, WorldEventKind.UniqueAbilityChangedHands) <= passateA) Male("A doveva ricevere l'avviso 'passata di mano'");
+        }
+
+        // 6. A uccide B, dado su "perde": persa, torna libera.
+        a.ChiediAdmin("unica dado perde", "unica: ");
+        int perseA = Eventi(a, WorldEventKind.UniqueAbilityLost);
+        if (Uccide(a, b))
+        {
+            Aspetta(() => !Ha(b, Signore), 3);
+            Console.WriteLine($"  A uccide B col dado su 'perde': registro '{Stato("1040")}', B {(Ha(b, Signore) ? "ce l'ha ancora" : "non ce l'ha piu'")}, A {(Ha(a, Signore) ? "ce l'ha" : "non ce l'ha")}");
+            if (Stato("1040") != "libera" || Ha(b, Signore) || Ha(a, Signore)) Male("l'unica doveva andare persa e tornare libera");
+            if (Eventi(a, WorldEventKind.UniqueAbilityLost) <= perseA) Male("A doveva ricevere l'avviso 'persa'");
+        }
+        a.ChiediAdmin("unica dado caso", "unica: ");
+
+        // 7. inattivita': C prende Predatore supremo ed esce; quindici giorni
+        //    di server acceso dopo, e' libera.
+        using (var c = new Sonda(tokenC, host, port))
+        {
+            if (!c.AttendiPronta()) Male("la terza sonda non e' entrata in gioco");
+            else
+            {
+                c.ChiediAdmin("unica dai 1140", "unica: ");
+                Pausa(0.6);
+                Console.WriteLine($"  C prende Predatore supremo: registro '{Stato("1140")}'");
+                if (Chi(Stato("1140")) == "") Male("Predatore supremo doveva essere di C");
+            }
+        }
+        Pausa(1.0);
+        string unGiorno = a.ChiediAdmin("unica invecchia 1140 1", "unica: ");
+        Pausa(1.0);
+        Console.WriteLine($"  C fuori da un giorno: registro '{Stato("1140")}' ({unGiorno})");
+        if (Chi(Stato("1140")) == "") Male("dopo un giorno Predatore supremo doveva restare di C");
+        int perse = Eventi(a, WorldEventKind.UniqueAbilityLost);
+        a.ChiediAdmin("unica invecchia 1140 14", "unica: ");
+        bool libera = Aspetta(() => Stato("1140") == "libera", 4);
+        Console.WriteLine($"  C fuori da quindici giorni: registro '{Stato("1140")}', avvisi 'persa' {Eventi(a, WorldEventKind.UniqueAbilityLost) - perse}");
+        if (!libera) Male("dopo quattordici giorni senza entrare Predatore supremo doveva tornare libera");
+        if (Eventi(a, WorldEventKind.UniqueAbilityLost) <= perse) Male("doveva arrivare l'avviso 'persa'");
+
+        // Pulizia.
+        Aspetta(() => { var v = b.Stato(b.Id); return !v.Morto && v.Vita > 0f; }, 10);
+        Aspetta(() => { var v = a.Stato(a.Id); return !v.Morto && v.Vita > 0f; }, 10);
+        foreach (var s in new[] { a, b }) { s.ChiediAdmin("tirorituale caso", "tirorituale: "); s.Admin("setfaction 1"); Pulisci(s); }
+        a.ChiediAdmin("unica libera 1040", "unica: ");
+        a.ChiediAdmin("unica libera 1140", "unica: ");
+        Pausa(0.6);
+        if (Stato("1040") != "libera" || Stato("1140") != "libera") Male("dopo la pulizia le uniche devono essere libere");
+        if (ok) Console.WriteLine("  OK: l'unica e' una sola, dal rituale, meta' a chi uccide, persa con l'inattivita'");
+        return ok;
+    }
+
     // ---- lo stato dei Doni al client (A14n4) -------------------------------------
     //
     // Il messaggio UniquesState arriva all'ingresso, con tutto il catalogo

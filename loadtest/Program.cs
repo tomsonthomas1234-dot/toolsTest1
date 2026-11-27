@@ -188,6 +188,7 @@ if (modoRegole)
         ("abilita dei doni",        () => Regole.AbilitaDeiDoni(tokens[1], tokens[0], tokens[4], host, port)),
         ("un solo dono",            () => Regole.UnSoloDono(tokens[1], tokens[0], host, port)),
         ("stato dei doni",          () => Regole.StatoDeiDoni(tokens[1], tokens[0], host, port)),
+        ("abilita uniche",          () => Regole.AbilitaUniche(tokens[1], tokens[0], tokens[4], host, port)),
         ("passiva dello scudo",     () => Regole.PassivaDelloScudo(tokens[1], host, port)),
         ("classi",                  () => Regole.Classi(tokens[1], tokens[0], host, port)),
         ("guerriero",               () => Regole.Guerriero(tokens[1], tokens[0], tokens[4], host, port)),
