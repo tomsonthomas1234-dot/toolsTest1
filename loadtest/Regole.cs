@@ -5281,6 +5281,191 @@ static class Regole
         return ok;
     }
 
+    // ---- 15a4. il tiro nuovo: i conti -----------------------------------------
+    //
+    // Decisione di Tommaso (A14m2, decisioni/abilita.md sezione 8): ogni conto
+    // e' un malus su una statistica, anche quelle nuove delle armature. Comune
+    // 5 minuti (grave 30), Raro 30 minuti (grave un giorno), Epico tre
+    // settimane, Dono di Torak per sempre. L'Epico toglie anche il 10% di
+    // vitalita' a tutta la terraferma, il Dono di Torak il 25%; il loro grave
+    // aggiunge la cicatrice. Le durate sono in tempo di server acceso: passano
+    // anche a giocatore scollegato. "orologio avanti" (solo server delle prove)
+    // fa passare il tempo senza aspettarlo; "malus azzera" pulisce.
+
+    public static bool ContiNuovi(string token, string tokenAltro, string host, int port)
+    {
+        Console.WriteLine("--- conti nuovi: durate a server acceso, vitalita' del mondo, cicatrice del grave");
+
+        var s = new Sonda(token, host, port);
+        try
+        {
+            if (!s.AttendiPronta()) { Console.WriteLine("  FALLITA: la sonda non e' entrata in gioco"); return false; }
+
+            bool ok = true;
+            void Male(string perche) { Console.WriteLine($"  FALLITA: {perche}"); ok = false; }
+            void Pausa(double secondi) => s.Attendi(() => false, secondi);
+
+            const ulong Sito = 20_001;
+            const float AX = -222f, AZ = -224f;
+            void AllAltarino(Sonda q)
+            {
+                q.Admin($"tp {AX.ToString(Inv)} {AZ.ToString(Inv)}");
+                q.Attendi(() => Dist(q.X, q.Z, AX, AZ) < 3f, 10);
+            }
+            AllAltarino(s);
+            if (Dist(s.X, s.Z, AX, AZ) >= 3f) { Male("teletrasporto all'altarino non riuscito"); return false; }
+            s.Admin("setvitality 1");
+            if (!s.Attendi(() => s.UltimaPartita != null && !s.UltimaPartita.InFamine && ChunkPiuArido(s) == 255, 6))
+            { Male("il mondo di prova non torna sano"); return false; }
+            if (s.ChiediAdmin("malus azzera", "malus: ") == null) { Male("il comando malus non risponde"); return false; }
+
+            StatModifierInfo[] Malus(Sonda q) => (q.Statistiche?.Modifiers ?? Array.Empty<StatModifierInfo>())
+                .Where(m => m.Origin.StartsWith("rituale")).ToArray();
+            RitualResultMsg Rito(CrystalType g, string grave, string cosa)
+            {
+                if (s.ChiediAdmin($"tirorituale conto caso {grave}", "tirorituale: ") == null)
+                { Male($"{cosa}: tirorituale non risponde"); return null; }
+                int c0 = s.Cristalli(g);
+                s.Admin($"give Crystal 1 {g}");
+                s.Attendi(() => s.Cristalli(g) > c0, 5);
+                s.Rituale(Sito, g);
+                if (!s.Attendi(() => s.UltimoRituale != null, 6)) { Male($"{cosa}: nessuna risposta al rituale"); return null; }
+                Pausa(0.5);
+                var r = s.UltimoRituale;
+                Console.WriteLine($"  {cosa}: accettato={r.Accepted} ({r.Refusal}), dono='{r.Boon}', conto='{r.Bane}'");
+                if (!r.Accepted) { Male($"{cosa}: rituale rifiutato"); return null; }
+                return r;
+            }
+            long Orologio(Sonda q, string avanti = "")
+            {
+                var r = q.ChiediAdmin(("orologio " + avanti).Trim(), "orologio: acceso ");
+                return r != null && long.TryParse(r.Split(' ')[0], out var v) ? v : -1;
+            }
+
+            // 1. durate e vitalita' del mondo, grado per grado, da un mondo sano
+            //    e senza malus. Il chunk piu' arido dice di quanto e' scesa la
+            //    terra: 255 e' sana, 0,90 fa 229-230, 0,75 fa 191.
+            var casi = new (CrystalType G, string Grave, int Secondi, int AridoMin, int AridoMax, bool Cicatrice)[]
+            {
+                (CrystalType.Common,    "lieve", 300,       254, 255, false),
+                (CrystalType.Common,    "grave", 1800,      254, 255, false),
+                (CrystalType.Rare,      "lieve", 1800,      254, 255, false),
+                (CrystalType.Rare,      "grave", 86400,     254, 255, false),
+                (CrystalType.Epic,      "lieve", 1814400,   227, 232, false),
+                (CrystalType.Epic,      "grave", 1814400,   0,   232, true),
+                (CrystalType.Precursor, "lieve", -1,        189, 193, false),
+                (CrystalType.Precursor, "grave", -1,        0,   193, true),
+            };
+            foreach (var c in casi)
+            {
+                string cosa = $"{c.G} {c.Grave}";
+                s.ChiediAdmin("malus azzera", "malus: ");
+                s.Admin("setvitality 1");
+                s.Attendi(() => ChunkPiuArido(s) == 255 && Malus(s).Length == 0, 5);
+                int chat0;
+                lock (s.Chat) chat0 = s.Chat.Count;
+
+                var r = Rito(c.G, c.Grave, cosa);
+                if (r == null) continue;
+                bool cala = c.AridoMax < 254;
+                if (cala) s.Attendi(() => ChunkPiuArido(s) <= c.AridoMax, 4);
+                s.Attendi(() => Malus(s).Length > 0, 3);
+                var m = Malus(s);
+                int arido = ChunkPiuArido(s);
+                bool annuncio;
+                lock (s.Chat) annuncio = s.Chat.Skip(chat0).Any(t => t.Contains("ha tolto vita a tutta la terra"));
+                Console.WriteLine($"    malus: {string.Join(", ", m.Select(x => $"{x.Stat} {x.Percent}% {x.SecondsLeft}s"))}; " +
+                                  $"chunk piu' arido {arido}/255; annuncio a tutti={annuncio}");
+
+                if (m.Length != 1) Male($"{cosa}: atteso un malus, visti {m.Length}");
+                else
+                {
+                    if (m[0].Percent >= 0) Male($"{cosa}: il malus non e' negativo");
+                    bool durata = c.Secondi < 0 ? m[0].SecondsLeft == -1
+                                                : m[0].SecondsLeft <= c.Secondi && m[0].SecondsLeft >= c.Secondi - 3;
+                    if (!durata) Male($"{cosa}: durata attesa {c.Secondi} s, vista {m[0].SecondsLeft} s");
+                }
+                if (arido < c.AridoMin || arido > c.AridoMax)
+                    Male($"{cosa}: chunk piu' arido atteso fra {c.AridoMin} e {c.AridoMax}, visto {arido}");
+                if (cala != annuncio) Male(cala ? $"{cosa}: nessun annuncio della terra ferita" : $"{cosa}: annuncio senza ragione");
+                if (cala != r.Bane.Contains("Tutta la terra perde")) Male($"{cosa}: il conto non dice (o dice a torto) della terra");
+                bool cicatrice = r.Bane.Contains("voragine") || r.Bane.Contains("annerisce");
+                if (cicatrice != c.Cicatrice) Male(c.Cicatrice ? $"{cosa}: manca la cicatrice del grave" : $"{cosa}: cicatrice senza grave alto");
+            }
+
+            // 2. le statistiche nuove delle armature: in sedici conti Comuni
+            //    almeno una delle tre esce (non succede una volta su duemila).
+            s.ChiediAdmin("malus azzera", "malus: ");
+            Pausa(0.3);
+            var viste = new HashSet<StatKind>();
+            for (int i = 0; i < 16 && ok; i++)
+            {
+                var r = Rito(CrystalType.Common, "lieve", $"conto Comune {i + 1}");
+                if (r == null) break;
+                foreach (var x in Malus(s)) viste.Add(x.Stat);
+            }
+            Console.WriteLine($"  statistiche colpite in sedici conti: {string.Join(",", viste)}");
+            if (!viste.Overlaps(new[] { StatKind.AttackSpeed, StatKind.CooldownReduction, StatKind.CombatRegen }))
+                Male("nessun malus sulle statistiche nuove delle armature");
+
+            // 3. il tempo passa anche da scollegati: un Comune, fuori per cinque
+            //    secondi, rientra con almeno quattro secondi in meno.
+            s.ChiediAdmin("malus azzera", "malus: ");
+            Rito(CrystalType.Common, "lieve", "Comune prima di uscire");
+            s.Attendi(() => Malus(s).Length == 1, 3);
+            int prima = Malus(s).FirstOrDefault()?.SecondsLeft ?? -99;
+            s.Dispose();
+            Thread.Sleep(5000);
+            s = new Sonda(token, host, port);
+            if (!s.AttendiPronta()) { Male("la sonda non rientra"); return false; }
+            s.Attendi(() => Malus(s).Length == 1, 5);
+            int dopo = Malus(s).FirstOrDefault()?.SecondsLeft ?? -99;
+            Console.WriteLine($"  fuori dal gioco per 5 s: il malus Comune passa da {prima} a {dopo} s");
+            if (prima < 290 || dopo < 0 || prima - dopo < 4) Male("il malus non e' andato avanti mentre si era fuori");
+
+            // 4. "orologio avanti": a giocatore collegato il malus finisce...
+            long ora = Orologio(s);
+            long spostato = Orologio(s, "avanti 400");
+            bool finito = s.Attendi(() => Malus(s).Length == 0, 4);
+            Console.WriteLine($"  orologio {ora} -> {spostato} s; malus Comune finito={finito}");
+            if (ora < 0 || spostato < ora + 400) Male("l'orologio di server acceso non va avanti");
+            if (!finito) Male("il malus Comune non finisce dopo 400 s di server acceso");
+
+            // ...e a giocatore scollegato: un grave Raro (un giorno) finisce
+            //    mentre un altro sposta l'orologio di 25 ore.
+            AllAltarino(s);
+            Rito(CrystalType.Rare, "grave", "Raro grave prima di uscire");
+            s.Attendi(() => Malus(s).Length == 1, 3);
+            int raro = Malus(s).FirstOrDefault()?.SecondsLeft ?? -99;
+            s.Dispose();
+            using (var altro = new Sonda(tokenAltro, host, port))
+            {
+                if (!altro.AttendiPronta()) Male("l'altra sonda non entra");
+                else Orologio(altro, "avanti 90000");
+            }
+            s = new Sonda(token, host, port);
+            if (!s.AttendiPronta()) { Male("la sonda non rientra"); return false; }
+            s.Attendi(() => s.Statistiche != null, 5);
+            Pausa(0.5);
+            Console.WriteLine($"  Raro grave a {raro} s, 25 ore di server acceso da scollegati: malus al rientro {Malus(s).Length}");
+            if (raro < 86000) Male("il Raro grave non durava un giorno");
+            if (Malus(s).Length != 0) Male("il malus del Raro grave c'e' ancora dopo 25 ore di server acceso");
+
+            if (ok) Console.WriteLine("  OK: durate nuove a server acceso, il mondo paga Epico e Dono di Torak, cicatrice col grave");
+            return ok;
+        }
+        finally
+        {
+            // Le prove dopo trovano la sonda senza malus, i dadi liberi e il
+            // mondo sano.
+            s.ChiediAdmin("malus azzera", "malus: ");
+            s.ChiediAdmin("tirorituale caso caso caso", "tirorituale: ");
+            s.Admin("setvitality 1");
+            s.Attendi(() => s.UltimaPartita != null && !s.UltimaPartita.InFamine, 6);
+            s.Dispose();
+        }
+    }
+
     // ---- 15b. riparazione ed era rigogliosa -----------------------------------
     //
     // La formula di Tommaso (backlog A1a): ogni fazione 12,5%, ogni Epico 12,5%,
