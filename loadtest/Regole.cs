@@ -7557,6 +7557,152 @@ static class Regole
         return ok;
     }
 
+    // ---- un solo Dono a testa (A14n3) -------------------------------------------
+    //
+    // Decisioni/abilita.md sezione 9: un giocatore porta un solo Dono di Torak,
+    // e vale anche raccogliendo, prendendo da un baule e uccidendo. Chi ne ha
+    // gia' uno non prende il secondo: da terra resta a terra, nel baule resta
+    // nel baule, e uccidendo chi porta un Dono questo cade a terra dove cade il
+    // morto (scelta dell'agente: non va al dado, resta del morto nel registro
+    // finche' qualcuno non lo raccoglie). A porta la Lama (Dono 1), B l'Arco
+    // (Dono 4). Il baule si costruisce a terra (70, -300), la morte si fa a
+    // (-150, 250), il punto delle prove degli effetti.
+
+    public static bool UnSoloDono(string tokenA, string tokenB, string host, int port)
+    {
+        Console.WriteLine("--- un solo dono: chi ne porta uno non prende il secondo, ne' da terra, ne' dal baule, ne' uccidendo");
+        bool ok = true;
+        void Male(string m) { Console.WriteLine("  FALLITA: " + m); ok = false; }
+
+        using var a = new Sonda(tokenA, host, port);
+        using var b = new Sonda(tokenB, host, port);
+        if (!a.AttendiPronta() || !b.AttendiPronta())
+        { Console.WriteLine("  FALLITA: le sonde non sono entrate in gioco"); return false; }
+
+        bool Aspetta(Func<bool> cosa, double secondi) =>
+            a.Attendi(() => { b.Attendi(() => true, 0.01); return cosa(); }, secondi);
+        void Pausa(double secondi) => Aspetta(() => false, secondi);
+        bool Tp(Sonda s, float x, float z)
+        {
+            s.Admin($"tp {x.ToString(Inv)} {z.ToString(Inv)}");
+            bool arrivata = Aspetta(() => Dist(s.X, s.Z, x, z) < 0.6f, 8);
+            s.Cammina(0f, 0f, 0.1);
+            return arrivata;
+        }
+        string Stato(uint d) => a.ChiediAdmin($"unico stato {d}", "unico: ") ?? "(nessuna risposta)";
+        static string Chi(string stato) => stato.StartsWith("di ") ? stato.Split(' ')[1] : "";
+        ulong Arco(Sonda s) { lock (s.Zaino) return s.Istanze.FirstOrDefault(i => i.Value.Tipo == ItemType.Bow).Key; }
+        bool Avvisato(Sonda s, int da) { lock (s.Chat) return s.Chat.Skip(da).Any(t => t.Contains("Porti gia un Dono")); }
+        int Righe(Sonda s) { lock (s.Chat) return s.Chat.Count; }
+
+        const float BX = 70f, BZ = -300f;      // a terra, per il baule
+        const float PX = -150f, PZ = 250f;     // lontano da tutto, per la morte
+        a.Admin("setfaction 1"); b.Admin("setfaction 2");
+        foreach (var s in new[] { a, b }) { s.Admin("clearinv"); s.Admin("effetto azzera"); s.Admin("sethp 1000"); }
+        if (!Tp(a, BX, BZ - 6f) || !Tp(b, BX - 6f, BZ - 6f)) { Male("teletrasporto non riuscito"); return false; }
+        Pausa(0.6);
+        if (Stato(1) != "libero" || Stato(4) != "libero")
+        { Male($"Lama e Arco devono essere liberi all'inizio: '{Stato(1)}', '{Stato(4)}'"); return false; }
+
+        var lama = a.ChiediAdmin("unico dai 1", "unico: ");
+        var arco = b.ChiediAdmin("unico dai 4", "unico: ");
+        if (lama == null || !lama.StartsWith("1 ") || arco == null || !arco.StartsWith("4 "))
+        { Male($"Doni non dati: '{lama}', '{arco}'"); return false; }
+        Aspetta(() => Arco(b) != 0, 5);
+        string diA = Chi(Stato(1)), diB = Chi(Stato(4));
+        Console.WriteLine($"  A ha la Lama (conto {diA}), B l'Arco (conto {diB})");
+        if (diA == "" || diB == "" || diA == diB) { Male("nel registro i due Doni non sono di A e di B"); return false; }
+
+        // 1. da terra: B butta l'Arco, A ci passa sopra e poi prova a
+        //    raccoglierlo a mano. Resta a terra, ed e' ancora di B.
+        var aTerra = b.ChiediAdmin("unico butta", "unico: ");
+        var pezzi = aTerra?.Split(' ');
+        if (pezzi == null || pezzi.Length < 5 || pezzi[0] != "a") { Male($"l'Arco non e' stato buttato ('{aTerra}')"); return false; }
+        ulong entita = ulong.Parse(pezzi[2]);
+        float ax = float.Parse(pezzi[3], Inv), az = float.Parse(pezzi[4], Inv);
+        int chatA = Righe(a);
+        Tp(a, ax, az);
+        Pausa(1.0);
+        a.Raccogli(entita);
+        Pausa(0.8);
+        string dopoTerra = Stato(4);
+        bool avvisoTerra = Avvisato(a, chatA);
+        Console.WriteLine($"  A sopra l'Arco a terra: registro '{dopoTerra}', nello zaino di A {(Arco(a) != 0 ? "c'e'" : "non c'e'")}, avviso {(avvisoTerra ? "si" : "no")}");
+        if (Arco(a) != 0 || Chi(dopoTerra) != diB) Male("A porta gia' la Lama: l'Arco doveva restare a terra, di B");
+        if (!avvisoTerra) Male("A doveva leggere in chat che porta gia' un Dono");
+
+        // B, che non porta Doni, lo riprende: era rimasto davvero a terra.
+        Tp(a, BX, BZ - 6f);
+        Tp(b, ax, az);
+        if (!Aspetta(() => Arco(b) != 0, 4)) { Male("B non ha ripreso l'Arco rimasto a terra"); return false; }
+
+        // 2. dal baule: B mette l'Arco in un baule, A prova a prenderlo e il
+        //    baule risponde di no. Poi B lo riprende.
+        b.Admin($"build Chest {BX.ToString(Inv)} {BZ.ToString(Inv)}");   // come nella prova dei bauli, dalla fazione 2
+        EntityState baule = null;
+        if (!Aspetta(() => (baule = a.PiuVicina(EntityType.Chest, BX, BZ)) != null && Dist(baule.X, baule.Z, BX, BZ) < 2f, 8))
+        { Male("il baule non e' stato costruito"); return false; }
+        Tp(a, BX + 1.5f, BZ); Tp(b, BX - 1.5f, BZ);
+        ulong idArco = Arco(b);
+        b.SpostaNelBaule(baule.EntityId, ItemType.Bow, 1, idArco, deposita: true);
+        if (!Aspetta(() => b.UltimoBaule != null && b.UltimoBaule.Items.Any(i => i.InstanceId == idArco), 6))
+        { Male("l'Arco non e' entrato nel baule"); return false; }
+        a.SpostaNelBaule(baule.EntityId, ItemType.Bow, 1, idArco, deposita: false);
+        Aspetta(() => a.UltimoBaule != null, 6);
+        Pausa(0.4);
+        var risposta = a.UltimoBaule;
+        bool ancoraDentro = risposta?.Items.Any(i => i.InstanceId == idArco) == true;
+        Console.WriteLine($"  A prende l'Arco dal baule: '{risposta?.Message}', nel baule {(ancoraDentro ? "c'e' ancora" : "non c'e' piu'")}, registro '{Stato(4)}'");
+        if (risposta == null || !ancoraDentro || Arco(a) != 0) Male("A porta gia' la Lama: l'Arco doveva restare nel baule");
+        else if (risposta.Message == null || !risposta.Message.Contains("Dono di Torak")) Male("il baule doveva dire perche'");
+        b.SpostaNelBaule(baule.EntityId, ItemType.Bow, 1, idArco, deposita: false);
+        if (!Aspetta(() => Arco(b) != 0, 5)) { Male("B non ha ripreso l'Arco dal baule"); return false; }
+        if (Chi(Stato(4)) != diB) Male($"ripreso da B, l'Arco doveva restare di B: '{Stato(4)}'");
+
+        // 3. uccidendo: A uccide B. L'Arco non passa ad A, cade a terra dove
+        //    cade B e resta di B nel registro.
+        Tp(a, PX, PZ); Tp(b, PX + 1f, PZ);
+        foreach (var s in new[] { a, b }) s.Admin("sethp 1000");
+        Pausa(0.5);
+        float mx = b.X, mz = b.Z;
+        b.Admin("sethp 8");
+        Pausa(0.4);
+        a.ChiediAdmin($"effetto stordisci 10 {b.Id}", "effetto: ");
+        a.ChiediAdmin($"effetto sanguina 20 2 {b.Id}", "effetto: ");
+        bool morto = Aspetta(() => a.Stato(b.Id).Morto, 5);
+        Pausa(0.8);
+        string dopoMorte = Stato(4);
+        Console.WriteLine($"  A uccide B: {(morto ? "morto" : "vivo")}; registro '{dopoMorte}', nello zaino di A {(Arco(a) != 0 ? "c'e'" : "non c'e'")}, Lama '{Stato(1)}'");
+        if (!morto) { Male("B doveva morire"); }
+        else
+        {
+            if (Arco(a) != 0 || Chi(dopoMorte) == diA) Male("A porta gia' la Lama: uccidendo non doveva prendere l'Arco");
+            if (Chi(dopoMorte) != diB) Male($"caduto a terra, l'Arco doveva restare di B nel registro: '{dopoMorte}'");
+            if (Chi(Stato(1)) != diA) Male("la Lama doveva restare ad A");
+
+            // A lascia la Lama (si svuota lo zaino: torna libera) e torna dove
+            // e' caduto B: ora l'Arco lo prende, ed era davvero a terra.
+            a.Admin("clearinv");
+            Pausa(0.5);
+            Tp(a, mx + 3f, mz);
+            Tp(a, mx, mz);
+            bool preso = Aspetta(() => Arco(a) != 0, 4);
+            if (!preso) { a.Cammina(1f, 0f, 0.4); preso = Aspetta(() => Arco(a) != 0, 2); }
+            if (!preso) { a.Cammina(-1f, 0f, 0.8); preso = Aspetta(() => Arco(a) != 0, 2); }
+            Pausa(0.4);
+            Console.WriteLine($"  A senza Doni dove e' caduto B: Arco {(preso ? "raccolto" : "non trovato")}, registro '{Stato(4)}'");
+            if (!preso || Chi(Stato(4)) != diA) Male("senza Doni A doveva raccogliere l'Arco caduto con B");
+        }
+
+        // Pulizia: i Doni tornano liberi, le prove dopo trovano zaini vuoti.
+        Aspetta(() => { var v = b.Stato(b.Id); return !v.Morto && v.Vita > 0f; }, 8);
+        foreach (var s in new[] { a, b }) { s.Admin("clearinv"); s.Admin("effetto azzera"); s.Admin("sethp 1000"); }
+        Pausa(0.6);
+        if (Stato(1) != "libero" || Stato(4) != "libero") Male($"dopo la pulizia Lama e Arco non sono liberi: '{Stato(1)}', '{Stato(4)}'");
+        if (ok) Console.WriteLine("  OK: con un Dono addosso il secondo resta a terra, nel baule o dove cade il morto");
+        return ok;
+    }
+
     // ---- passiva dello scudo e Pietraviva (A14h) --------------------------------
     //
     // Decisioni/abilita.md sezione 3: con lo scudo nella mano libera, quando
