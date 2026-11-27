@@ -5309,6 +5309,126 @@ static class Regole
         return ok;
     }
 
+    // ---- 15a5. i Doni di Torak: il catalogo e la nascita ----------------------
+    //
+    // Decisione di Tommaso (decisioni/abilita.md sezioni 8 e 9, A14n1): col
+    // cristallo Dono di Torak l'oggetto portato dev'essere gia' Epico, e diventa
+    // il Dono del suo tipo se quel Dono e' libero e chi celebra non ne porta gia'
+    // uno; se no il dono e' vuoto. Il registro conta quante volte un Dono passa
+    // di mano. I dadi li fissa "tirorituale", che c'e' solo sul server delle prove.
+
+    public static bool DoniDiTorak(string token, string altroToken, string host, int port)
+    {
+        Console.WriteLine("--- doni di torak: nascita da un oggetto Epico, uno solo a testa, passaggi di mano contati");
+
+        using var s = new Sonda(token, host, port);
+        using var o = new Sonda(altroToken, host, port);
+        if (!s.AttendiPronta() || !o.AttendiPronta()) { Console.WriteLine("  FALLITA: le sonde non sono entrate in gioco"); return false; }
+
+        bool ok = true;
+        void Male(string perche) { Console.WriteLine($"  FALLITA: {perche}"); ok = false; }
+        void Pausa(double secondi) => s.Attendi(() => false, secondi);
+
+        const ulong Sito = 20_001;
+        const float AX = -222f, AZ = -224f;
+        s.Admin($"tp {AX.ToString(Inv)} {AZ.ToString(Inv)}");
+        if (!s.Attendi(() => Dist(s.X, s.Z, AX, AZ) < 3f, 10)) { Male("teletrasporto all'altarino non riuscito"); return false; }
+        if (!s.Attendi(() => s.UltimaPartita != null && !s.UltimaPartita.InFamine, 6))
+        { Male("il mondo di prova e' in carestia, il rituale non tirerebbe l'esito"); return false; }
+        s.Admin("clearinv");
+        o.Admin("clearinv");
+        Pausa(0.6);
+
+        string Stato(Sonda chi) => chi.ChiediAdmin("unico stato 1", "unico: ") ?? "(nessuna risposta)";
+        if (Stato(s) != "libero") { Male($"la Lama (Dono 1) non e' libera all'inizio: '{Stato(s)}'"); return false; }
+        if (s.ChiediAdmin("tirorituale dono caso", "tirorituale: ") == null) { Male("il comando tirorituale non risponde"); return false; }
+
+        byte Grado(ulong id) { lock (s.Zaino) return s.GradiIstanze.TryGetValue(id, out var g) ? g : (byte)255; }
+        ulong Dai(string cosa)
+        {
+            var r = s.ChiediAdmin($"dai {cosa}", "dai: ") ?? "";
+            int i = r.IndexOf("id=", StringComparison.Ordinal);
+            ulong id = i >= 0 && ulong.TryParse(r[(i + 3)..].Split(',')[0], out var v) ? v : 0;
+            if (id == 0) Male($"dai {cosa}: risposta '{r}'");
+            else s.Attendi(() => Grado(id) != 255, 5);
+            return id;
+        }
+        RitualResultMsg Rito(ulong oggetto, string cosa)
+        {
+            const CrystalType g = CrystalType.Precursor;
+            int c0 = s.Cristalli(g);
+            s.UltimoRituale = null;
+            s.Admin($"give Crystal 1 {g}");
+            s.Attendi(() => s.Cristalli(g) > c0, 5);
+            s.Rituale(Sito, g, oggetto);
+            if (!s.Attendi(() => s.UltimoRituale != null, 6)) { Male($"{cosa}: nessuna risposta al rituale"); return null; }
+            Pausa(0.5);
+            var r = s.UltimoRituale;
+            Console.WriteLine($"  {cosa}: accettato={r.Accepted} ({r.Refusal}), dono='{r.Boon}', unico='{r.UniqueName}'");
+            if (!r.Accepted) { Male($"{cosa}: rituale rifiutato"); return null; }
+            return r;
+        }
+        void Vuoto(ulong oggetto, byte gradoAtteso, string cosa)
+        {
+            var r = Rito(oggetto, cosa);
+            if (r == null) return;
+            if (!r.Boon.Contains("non trova niente")) Male($"{cosa}: atteso il dono vuoto");
+            if (Grado(oggetto) != gradoAtteso) Male($"{cosa}: l'oggetto e' cambiato di grado ({Grado(oggetto)})");
+        }
+
+        // 1. un arco Raro: non e' Epico, dono vuoto
+        ulong arco = Dai("Bow raro");
+        if (arco != 0) Vuoto(arco, (byte)Grade.Rare, "arco Raro col cristallo Dono di Torak");
+
+        // 2. una spada di pietra Epica: diventa la Lama dell'Ultima Alba, la
+        //    stessa spada, al grado massimo
+        ulong spada = Dai("StoneSword epico");
+        if (spada != 0)
+        {
+            var r = Rito(spada, "spada Epica, nasce il Dono");
+            if (r != null && r.UniqueName != "Lama dell'Ultima Alba") Male($"atteso il nome della Lama, visto '{r.UniqueName}'");
+            if (Grado(spada) != (byte)Grade.Torak) Male($"la spada doveva salire al grado massimo, e' a {Grado(spada)}");
+            if (!Stato(s).StartsWith("di ")) Male($"nel registro la Lama non e' di nessuno: '{Stato(s)}'");
+        }
+
+        // 3. con la Lama in mano, una lancia Epica: dono vuoto (un solo Dono a testa)
+        ulong lancia = Dai("IronSpear epico");
+        if (lancia != 0) Vuoto(lancia, (byte)Grade.Epic, "lancia Epica con la Lama gia' in mano");
+
+        // 4. passaggio di mano: la Lama a terra, l'altra sonda la raccoglie e
+        //    il contatore sale a 1
+        string diS = Stato(s);
+        var aTerra = s.ChiediAdmin("unico butta", "unico: ");
+        var pezzi = aTerra?.Split(' ');
+        if (pezzi == null || pezzi.Length < 5 || pezzi[0] != "a") { Male($"la Lama non e' stata buttata ('{aTerra}')"); }
+        else
+        {
+            float bx = float.Parse(pezzi[3], Inv), bz = float.Parse(pezzi[4], Inv);
+            o.Admin($"tp {bx.ToString(Inv)} {bz.ToString(Inv)}");
+            s.Attendi(() => Stato(s) != diS, 8);
+            string diO = Stato(s);
+            Console.WriteLine($"  registro: prima '{diS}', dopo la raccolta '{diO}'");
+            if (!diO.StartsWith("di ") || diO == diS || !diO.EndsWith(" passaggi 1"))
+                Male($"il passaggio di mano non e' contato: '{diO}'");
+            if (!diS.EndsWith(" passaggi 0")) Male($"appena nata la Lama doveva avere 0 passaggi: '{diS}'");
+
+            // 5. la Lama e' dell'altra: una seconda spada Epica, ora che la sonda
+            //    non porta Doni, da' un dono vuoto
+            ulong seconda = Dai("IronSword epico");
+            if (seconda != 0) Vuoto(seconda, (byte)Grade.Epic, "spada Epica con la Lama di un altro");
+        }
+
+        // Pulizia: la Lama torna libera e le prove dopo trovano il catalogo
+        // libero, la sonda senza dadi fissati e lo zaino vuoto.
+        o.Admin("clearinv");
+        s.Admin("clearinv");
+        s.ChiediAdmin("tirorituale caso caso caso", "tirorituale: ");
+        Pausa(0.6);
+        if (Stato(s) != "libero") Male($"dopo la pulizia la Lama non e' libera: '{Stato(s)}'");
+        if (ok) Console.WriteLine("  OK: il Dono nasce solo da un oggetto Epico, uno a testa, e i passaggi di mano si contano");
+        return ok;
+    }
+
     // ---- 15a4. il tiro nuovo: i conti -----------------------------------------
     //
     // Decisione di Tommaso (A14m2, decisioni/abilita.md sezione 8): ogni conto
