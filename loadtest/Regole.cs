@@ -8006,6 +8006,94 @@ static class Regole
         return ok;
     }
 
+    // ---- le abilita uniche nello stato dei Doni (A14o2) --------------------------
+    //
+    // Lo stesso messaggio UniquesState porta, con la chiave 1, le sei abilita
+    // uniche di classe: all'ingresso tutte e sei, e di nuovo a tutti quando il
+    // registro cambia (presa, passata di mano, tornata libera). "Tua" solo per
+    // chi la porta; chi la porta agli altri non si dice. Qui il registro lo
+    // muovono i comandi admin: il rituale e le morti li prova "abilita uniche".
+    public static bool StatoDelleUniche(string tokenA, string tokenB, string host, int port)
+    {
+        Console.WriteLine("--- stato delle uniche: il client sa quali abilita uniche sono libere, quale e' sua e quante volte sono passate di mano");
+        bool ok = true;
+        void Male(string m) { Console.WriteLine("  FALLITA: " + m); ok = false; }
+
+        using var a = new Sonda(tokenA, host, port);
+        using var b = new Sonda(tokenB, host, port);
+        if (!a.AttendiPronta() || !b.AttendiPronta())
+        { Console.WriteLine("  FALLITA: le sonde non sono entrate in gioco"); return false; }
+
+        bool Aspetta(Func<bool> cosa, double secondi) =>
+            a.Attendi(() => { b.Attendi(() => true, 0.01); return cosa(); }, secondi);
+        void Pausa(double secondi) => Aspetta(() => false, secondi);
+        static UniqueAbilityInfo Voce(Sonda s, AbilityId id) => s.Doni?.Abilities?.FirstOrDefault(u => u.Id == id);
+        static string Riga(UniqueAbilityInfo u) =>
+            u == null ? "(manca)" : $"{(u.Free ? "libera" : "presa")}{(u.Yours ? ", tua" : "")}, passaggi {u.TimesTaken}, livello {u.Level}";
+        const AbilityId Signore = AbilityId.WarriorWarlord;   // 1040
+
+        foreach (var s in new[] { a, b }) { s.Admin("abilita azzera"); s.Admin("effetto azzera"); }
+        a.ChiediAdmin("unica libera 1040", "unica: ");
+        Pausa(1.0);
+
+        // 1. lo stato c'e', con tutte e sei le uniche, e Signore della guerra
+        //    e' libera e di nessuno.
+        if (!Aspetta(() => a.Doni?.Abilities?.Length > 0 && b.Doni?.Abilities?.Length > 0, 5))
+        { Male("le abilita uniche non arrivano nello stato dei Doni"); return false; }
+        var nomi = a.Doni.Abilities.OrderBy(u => u.Id).Select(u => $"{(ushort)u.Id} {u.Name} ({u.Class})").ToArray();
+        Console.WriteLine($"  all'ingresso: {nomi.Length} uniche: {string.Join(", ", nomi)}");
+        if (nomi.Length != 6) Male($"le uniche devono essere sei, ne arrivano {nomi.Length}");
+        var s0 = Voce(a, Signore);
+        if (s0 == null || !s0.Free || s0.Yours || s0.Name != "Signore della guerra" || s0.Class != ClassId.Warrior)
+        { Male($"Signore della guerra deve esserci, libera, di nessuno, del Guerriero: {Riga(s0)} '{s0?.Name}' {s0?.Class}"); return false; }
+        if (s0.Level != 1) Male($"libera, il livello deve essere 1, e' {s0.Level}");
+        int passaggi0 = s0.TimesTaken;
+
+        // 2. A la prende: a tutti arriva che e' presa, "tua" solo ad A, il
+        //    contatore non sale.
+        int primaA = Volatile.Read(ref a.DoniRicevuti), primaB = Volatile.Read(ref b.DoniRicevuti);
+        var dato = a.ChiediAdmin("unica dai 1040", "unica: ");
+        if (dato == null || !dato.StartsWith("1040 ")) { Male($"Signore della guerra non data: '{dato}'"); return false; }
+        bool arrivato = Aspetta(() => Volatile.Read(ref a.DoniRicevuti) > primaA && Volatile.Read(ref b.DoniRicevuti) > primaB
+                                      && Voce(a, Signore)?.Free == false && Voce(b, Signore)?.Free == false, 4);
+        Console.WriteLine($"  A prende Signore della guerra: per A {Riga(Voce(a, Signore))}; per B {Riga(Voce(b, Signore))}");
+        if (!arrivato) Male("lo stato nuovo doveva arrivare a tutti e due");
+        else
+        {
+            if (Voce(a, Signore)?.Yours != true) Male("per A doveva essere sua");
+            if (Voce(b, Signore)?.Yours != false) Male("per B non e' sua");
+            if (Voce(a, Signore)?.TimesTaken != passaggi0) Male("presa da libera, il contatore non sale");
+        }
+
+        // 3. passa di mano: B se la prende. Il contatore sale di uno, e ora e'
+        //    di B.
+        b.ChiediAdmin("unica dai 1040", "unica: ");
+        bool passata = Aspetta(() => Voce(b, Signore)?.Yours == true && Voce(a, Signore)?.Yours == false, 4);
+        Console.WriteLine($"  B la prende ad A: per A {Riga(Voce(a, Signore))}; per B {Riga(Voce(b, Signore))}");
+        if (!passata) Male("doveva risultare di B e non piu' di A");
+        else if (Voce(a, Signore)?.TimesTaken != passaggi0 + 1 || Voce(b, Signore)?.TimesTaken != passaggi0 + 1)
+            Male($"passando di mano il contatore doveva salire a {passaggi0 + 1}");
+
+        // 4. torna libera: a tutti arriva libera, il contatore resta.
+        a.ChiediAdmin("unica libera 1040", "unica: ");
+        bool libera = Aspetta(() => Voce(a, Signore)?.Free == true && Voce(b, Signore)?.Free == true, 4);
+        Console.WriteLine($"  tornata libera: per A {Riga(Voce(a, Signore))}; per B {Riga(Voce(b, Signore))}");
+        if (!libera) Male("tornata libera, lo stato doveva dirlo a tutti e due");
+        else
+        {
+            if (Voce(b, Signore)?.Yours != false) Male("libera, non e' piu' di B");
+            if (Voce(a, Signore)?.TimesTaken != passaggi0 + 1) Male("tornando libera il contatore non si azzera");
+        }
+
+        // 5. i Doni oggetto ci sono ancora nello stesso messaggio.
+        if ((a.Doni?.Uniques?.Count(u => !u.Retired) ?? 0) != 14) Male("nello stesso messaggio devono restare i 14 Doni oggetto");
+
+        foreach (var s in new[] { a, b }) { s.Admin("abilita azzera"); s.Admin("effetto azzera"); }
+        Pausa(0.6);
+        if (ok) Console.WriteLine("  OK: le uniche arrivano nello stato dei Doni, all'ingresso e a ogni cambio, con la propria e il contatore");
+        return ok;
+    }
+
     // ---- passiva dello scudo e Pietraviva (A14h) --------------------------------
     //
     // Decisioni/abilita.md sezione 3: con lo scudo nella mano libera, quando
