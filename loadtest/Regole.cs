@@ -8094,6 +8094,215 @@ static class Regole
         return ok;
     }
 
+    /// <summary>
+    /// A14o3: gli effetti di Signore della guerra, Predatore supremo e
+    /// Fantasma. A porta l'unica (data col comando admin, una alla volta,
+    /// cambiando classe), fazione 1 con la spada di pietra; B e il nemico
+    /// (fazione 2, spada di pietra) a 1,5 m; C alleata di A, a mani vuote. Un
+    /// colpo di spada fa 22.
+    /// - Signore della guerra: A e C +25% danno e -25% danno subito, B niente;
+    ///   il colpo di B su A da 22 a 17; A a 5 di vita resta a 1 e non muore.
+    /// - Predatore supremo: l'attacco base di A da 22 a 33; B e rallentato del
+    ///   30% e segnato: una cura non lo cura, l'invisibilita non parte; finito
+    ///   il segno la cura torna.
+    /// - Fantasma: A invisibile per B anche camminando, +50% velocita, i mob
+    ///   non lo notano; il colpo lo rompe (22, niente in piu) e la velocita va
+    ///   via.
+    /// </summary>
+    public static bool UnicheA14o3(string tokenA, string tokenB, string tokenC, string host, int port)
+    {
+        Console.WriteLine("--- effetti delle uniche: Signore della guerra, Predatore supremo, Fantasma");
+        bool ok = true;
+        void Male(string m) { Console.WriteLine("  FALLITA: " + m); ok = false; }
+
+        using var a = new Sonda(tokenA, host, port);
+        using var b = new Sonda(tokenB, host, port);
+        using var c = new Sonda(tokenC, host, port);
+        if (!a.AttendiPronta() || !b.AttendiPronta() || !c.AttendiPronta())
+        { Console.WriteLine("  FALLITA: le sonde non sono entrate in gioco"); return false; }
+
+        const float PX = -150f, PZ = 250f;   // lo stesso punto delle prove delle armi
+        static byte[] P<T>(T v) => MessagePack.MessagePackSerializer.Serialize(v);
+        bool Aspetta(Func<bool> cosa, double secondi) =>
+            a.Attendi(() => { b.Attendi(() => true, 0.01); c.Attendi(() => true, 0.01); return cosa(); }, secondi);
+        void Pausa(double secondi) => Aspetta(() => false, secondi);
+        static string Visto(CommandResultMsg r) => r == null ? "nessuna risposta" : r.Success ? "riuscito" : "rifiutato " + r.ErrorCode;
+        float Vita(Sonda chi) => a.Stato(chi.Id).Vita;
+        void Tp(Sonda s, float x, float z)
+        {
+            s.Admin($"tp {x.ToString(Inv)} {z.ToString(Inv)}");
+            Aspetta(() => Dist(s.X, s.Z, x, z) < 0.5f, 6);
+            s.Cammina(0f, 0f, 0.1);
+        }
+        void Piena(params Sonda[] chi)
+        {
+            foreach (var s in chi) s.Admin("sethp 1000");
+            Aspetta(() => chi.All(s => Vita(s) >= 100f), 3);
+            Pausa(0.3);
+        }
+        string Effetto(string riga) { Pausa(0.15); return a.ChiediAdmin("effetto " + riga, "effetto: ") ?? "(nessuna risposta)"; }
+        string StatoDi(Sonda s) => Effetto(s == a ? "stato" : $"stato {s.Id}");
+        uint idComando = 1500;
+        CommandResultMsg Prova(AbilityId id, float yaw = 90f)
+        {
+            uint idSlot = idComando++, idUso = idComando++;
+            Pausa(0.15);
+            a.Comando(idSlot, CommandType.SetAbilitySlot, P(new SetAbilitySlotCommand
+                { Kind = AbilitySlotKind.ClassActive, Slot = 0, Ability = id }));
+            CommandResultMsg r = null;
+            Aspetta(() => (r = a.Esito(idSlot)) != null, 5);
+            if (r == null || !r.Success) Male($"{id} nello slot: {Visto(r)}");
+            Pausa(0.15); a.Admin("ricarica");
+            Pausa(0.15);
+            a.Comando(idUso, CommandType.UseAbility, P(new UseAbilityCommand { Ability = id, Yaw = yaw }));
+            r = null;
+            Aspetta(() => (r = a.Esito(idUso)) != null, 5);
+            Pausa(0.2);
+            return r;
+        }
+        void Atteso(string cosa, CommandResultMsg r, ErrorCode atteso)
+        {
+            bool giusto = r != null && (atteso == ErrorCode.None ? r.Success : !r.Success && r.ErrorCode == atteso);
+            Console.WriteLine($"  {cosa}: {Visto(r)}{(giusto ? "" : $" (atteso {(atteso == ErrorCode.None ? "riuscito" : atteso.ToString())})")}");
+            if (!giusto) Male($"{cosa}: atteso {(atteso == ErrorCode.None ? "riuscito" : "rifiutato " + atteso)}");
+        }
+        void Controlla(string cosa, float visto, float atteso)
+        {
+            Console.WriteLine($"  {cosa}: {visto} (atteso {atteso})");
+            if (visto != atteso) Male($"{cosa}: {visto} invece di {atteso}");
+        }
+        void Contiene(string cosa, string riga, string pezzo, bool deve = true)
+        {
+            Console.WriteLine($"  {cosa}: {riga}");
+            if (riga.Contains(pezzo) != deve) Male($"{cosa}: {(deve ? "manca" : "non doveva esserci")} '{pezzo}'");
+        }
+        // Un colpo di spada di B sul piu vicino (A): quanto perde A.
+        float ColpoDiB()
+        {
+            Piena(a);
+            float prima = Vita(a);
+            b.Colpisci(0.1);
+            Aspetta(() => Vita(a) < prima, 1.5);
+            Pausa(0.3);
+            return prima - Vita(a);
+        }
+        // Un attacco base di A sul piu vicino (B): quanto perde B.
+        float ColpoDiA()
+        {
+            Piena(b);
+            float prima = Vita(b);
+            a.Colpisci(0.1);
+            Aspetta(() => Vita(b) < prima, 1.5);
+            Pausa(0.4);
+            return prima - Vita(b);
+        }
+        // A prende la sua classe sbloccata e l'unica (presa a chiunque l'avesse).
+        void Unica(string classe, AbilityId id)
+        {
+            Pausa(0.15); Console.WriteLine($"  {a.ChiediAdmin("classe " + classe, "classe: ")}");
+            Pausa(0.15); a.ChiediAdmin("classe sblocca", "classe: ");
+            Pausa(0.15); Console.WriteLine($"  unica: {a.ChiediAdmin($"unica dai {(int)id}", "unica: ")}");
+            Pausa(0.6);
+        }
+
+        try
+        {
+            a.Admin("setfaction 1"); b.Admin("setfaction 2"); c.Admin("setfaction 1");
+            foreach (var s in new[] { a, b, c }) { s.Admin("clearinv"); s.Admin("abilita azzera"); s.Admin("effetto azzera"); }
+            c.Dotazione(ItemType.None, ItemType.None, SideItemType.None);
+            foreach (var s in new[] { a, b })
+            {
+                s.Admin("give StoneSword 1");
+                Aspetta(() => s.Istanze.Values.Any(v => v.Tipo == ItemType.StoneSword), 5);
+                s.Dotazione(ItemType.StoneSword, ItemType.None, SideItemType.None);
+                s.Posizione(0);
+            }
+            Tp(a, PX, PZ); Tp(b, PX + 1.5f, PZ); Tp(c, PX - 3f, PZ);
+            Piena(a, b, c);
+
+            // 1. Signore della guerra.
+            Unica("guerriero", AbilityId.WarriorWarlord);
+            Controlla("colpo di B su A senza niente", ColpoDiB(), 22f);
+            Atteso("Signore della guerra", Prova(AbilityId.WarriorWarlord), ErrorCode.None);
+            var sa = StatoDi(a);
+            Contiene("Signore della guerra, A", sa, "Damage +25%");
+            Contiene("Signore della guerra, A", sa, "danno subito -25%");
+            Contiene("Signore della guerra, A", sa, "uniche=signore");
+            var sc = StatoDi(c);
+            Contiene("Signore della guerra, C alleata", sc, "Damage +25%");
+            Contiene("Signore della guerra, C alleata", sc, "uniche=signore");
+            Contiene("Signore della guerra, B nemico", StatoDi(b), "Damage", deve: false);
+            Controlla("colpo di B su A col Signore della guerra", ColpoDiB(), 17f);
+            Atteso("Signore della guerra di nuovo", Prova(AbilityId.WarriorWarlord), ErrorCode.None);
+            a.Admin("sethp 5");
+            Aspetta(() => Vita(a) == 5f, 3);
+            b.Colpisci(0.1);
+            Aspetta(() => Vita(a) < 5f, 1.5);
+            Pausa(0.5);
+            var dopo = a.Stato(a.Id);
+            Console.WriteLine($"  B colpisce A a 5 di vita: vita {dopo.Vita}, a terra {dopo.ATerra}, morto {dopo.Morto}");
+            if (dopo.Vita != 1f || dopo.ATerra || dopo.Morto) Male("col Signore della guerra un colpo non deve portare A sotto 1");
+            Effetto("azzera"); Effetto($"azzera {b.Id}"); Effetto($"azzera {c.Id}");
+            Tp(c, PX - 30f, PZ);   // fuori dai piedi per le prove dopo
+            Piena(a);
+
+            // 2. Predatore supremo.
+            Unica("cacciatore", AbilityId.HunterApexPredator);
+            Controlla("colpo di A su B senza niente", ColpoDiA(), 22f);
+            Atteso("Predatore supremo", Prova(AbilityId.HunterApexPredator), ErrorCode.None);
+            Contiene("Predatore supremo, A", StatoDi(a), "uniche=predatore+50:30");
+            Controlla("colpo di A su B col Predatore supremo", ColpoDiA(), 33f);
+            float vb = Vita(b);
+            Effetto($"cura 30 1 {b.Id}");
+            Effetto($"invisibile 10 {b.Id}");
+            var sb = StatoDi(b);
+            Contiene("Predatore supremo, B colpito", sb, "rallentato 30%");
+            Contiene("Predatore supremo, B colpito", sb, "predato");
+            Contiene("Predatore supremo, B colpito", sb, "invisibile", deve: false);
+            Pausa(1.2);
+            Controlla("Predatore supremo, B segnato non si cura", Vita(b), vb);
+            if (!a.Vede(b.Id)) Male("B segnato dal Predatore supremo non deve diventare invisibile");
+            bool finito = Aspetta(() => !StatoDi(b).Contains("predato"), 5);
+            if (!finito) Male("il segno del Predatore supremo deve finire");
+            Effetto($"cura 10 1 {b.Id}");
+            Aspetta(() => Vita(b) > vb, 2.5);
+            Controlla("finito il segno, B si cura", Vita(b), Math.Min(100f, vb + 10f));
+            Effetto("azzera"); Effetto($"azzera {b.Id}");
+            Piena(a, b);
+
+            // 3. Fantasma.
+            Unica("esploratore", AbilityId.ExplorerGhost);
+            if (!Aspetta(() => b.Vede(a.Id), 3)) Male("B deve vedere A prima del Fantasma");
+            Atteso("Fantasma", Prova(AbilityId.ExplorerGhost), ErrorCode.None);
+            var sf = StatoDi(a);
+            Contiene("Fantasma, A", sf, "MoveSpeed +50%");
+            Contiene("Fantasma, A", sf, "uniche=fantasma");
+            Contiene("Fantasma, A", sf, "notato0");
+            bool sparito = Aspetta(() => !b.Vede(a.Id), 3);
+            a.Cammina(-1f, 0f, 0.3);
+            Pausa(0.3);
+            sparito &= !b.Vede(a.Id);
+            Console.WriteLine($"  Fantasma: per B A {(sparito ? "non arriva, anche camminando" : "arriva")}");
+            if (!sparito) Male("col Fantasma A non deve arrivare a B, nemmeno camminando");
+            Tp(a, PX, PZ);
+            Controlla("colpo di A che rompe il Fantasma", ColpoDiA(), 22f);
+            if (!Aspetta(() => b.Vede(a.Id), 3)) Male("colpendo, A deve tornare visibile");
+            var rotto = StatoDi(a);
+            Contiene("Fantasma rotto, A", rotto, "MoveSpeed", deve: false);
+            Contiene("Fantasma rotto, A", rotto, "uniche=", deve: false);
+        }
+        finally
+        {
+            foreach (var s in new[] { a, b, c }) { s.Admin("setfaction 1"); s.Admin("effetto azzera"); s.Admin("abilita azzera"); s.Admin("clearinv"); s.Admin("sethp 1000"); }
+            a.Dotazione(ItemType.None, ItemType.None, SideItemType.None);
+            b.Dotazione(ItemType.None, ItemType.None, SideItemType.None);
+            Pausa(0.5);
+        }
+
+        if (ok) Console.WriteLine("  OK: Signore della guerra, Predatore supremo e Fantasma fanno quello che dice il catalogo");
+        return ok;
+    }
+
     // ---- passiva dello scudo e Pietraviva (A14h) --------------------------------
     //
     // Decisioni/abilita.md sezione 3: con lo scudo nella mano libera, quando
