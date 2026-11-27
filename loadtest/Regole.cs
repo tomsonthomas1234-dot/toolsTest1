@@ -595,6 +595,34 @@ sealed class Sonda : IDisposable
         return best;
     }
 
+    /// <summary>
+    /// La piu vicina al punto fra quelle di quel tipo che non stanno in
+    /// "tranne". Serve a riconoscere la belva appena fatta nascere con
+    /// "spawn wolf": nasce a due metri dalla sonda, proprio dove una belva di
+    /// prima (morta, o rinata alla sua tana) puo stare ancora, e prendere la
+    /// piu vicina a volte dava quella vecchia. La nuova restava nel mondo di
+    /// prova, non tolta, e rubava i colpi alle prove dopo (backlog P6).
+    /// </summary>
+    public EntityState PiuVicina(EntityType tipo, float x, float z, ICollection<ulong> tranne)
+    {
+        EntityState best = null;
+        float bestD = float.MaxValue;
+        lock (Mondo)
+            foreach (var e in Mondo.Values)
+            {
+                if (e.Type != tipo || tranne.Contains(e.EntityId)) continue;
+                float d = Regole.Dist(e.X, e.Z, x, z);
+                if (d < bestD) { bestD = d; best = e; }
+            }
+        return best;
+    }
+
+    /// <summary>Gli id delle entita di quel tipo viste finora (backlog P6).</summary>
+    public HashSet<ulong> IdVisti(EntityType tipo)
+    {
+        lock (Mondo) return Mondo.Values.Where(e => e.Type == tipo).Select(e => e.EntityId).ToHashSet();
+    }
+
     public int Quanti(ItemType t)
     {
         lock (Zaino) return Zaino.TryGetValue((t, (byte)0), out int n) ? n : 0;
@@ -8620,9 +8648,10 @@ static class Regole
             Tp(b, PX + 40f, PZ);
             Tp(a, PX, PZ);
             Piena(a);
+            var lupiPrima = a.IdVisti(EntityType.Wolf);   // il nuovo e quello mai visto (P6)
             a.Admin("spawn wolf");
             EntityState lupo = null;
-            Aspetta(() => (lupo = a.PiuVicina(EntityType.Wolf, PX + 2f, PZ)) != null && Dist(lupo.X, lupo.Z, PX + 2f, PZ) < 1f, 5);
+            Aspetta(() => (lupo = a.PiuVicina(EntityType.Wolf, PX + 2f, PZ, lupiPrima)) != null && Dist(lupo.X, lupo.Z, PX + 2f, PZ) < 1f, 5);
             if (lupo == null || Dist(lupo.X, lupo.Z, PX + 2f, PZ) >= 1f) { Male("il lupo d'ufficio non e' comparso accanto ad A"); return false; }
             idLupo = lupo.EntityId;
             Atteso("Esca", Prova(AbilityId.HunterDecoy, yaw: 270f), ErrorCode.None);
@@ -9193,9 +9222,10 @@ static class Regole
             Tp(b, PX + 40f, PZ);
             Tp(a, PX, PZ);
             Piena(a);
+            var lupiPrima = a.IdVisti(EntityType.Wolf);   // il nuovo e quello mai visto (P6)
             a.Admin("spawn wolf");
             EntityState lupo = null;
-            Aspetta(() => (lupo = a.PiuVicina(EntityType.Wolf, PX + 2f, PZ)) != null && Dist(lupo.X, lupo.Z, PX + 2f, PZ) < 1f, 5);
+            Aspetta(() => (lupo = a.PiuVicina(EntityType.Wolf, PX + 2f, PZ, lupiPrima)) != null && Dist(lupo.X, lupo.Z, PX + 2f, PZ) < 1f, 5);
             if (lupo == null || Dist(lupo.X, lupo.Z, PX + 2f, PZ) >= 1f) { Male("il lupo d'ufficio non e' comparso accanto ad A"); return false; }
             idLupo = lupo.EntityId;
             Atteso("Sosia", Prova(AbilityId.ExplorerDouble), ErrorCode.None);
@@ -9450,14 +9480,17 @@ static class Regole
             return Dist(p0.X, p0.Z, p1.X, p1.Z);
         }
         // Un lupo accanto ad A, ucciso dal danno nel tempo di A: quante pelli prende A.
+        // Il lupo nuovo e quello con un id mai visto prima: il primo lupo, morto
+        // o rinato alla sua tana, sta nello stesso punto (backlog P6).
         var lupi = new List<ulong>();
         int PelliDaUnLupo()
         {
+            var lupiPrima = a.IdVisti(EntityType.Wolf);
             a.Admin("spawn wolf");
             EntityState lupo = null;
-            Aspetta(() => (lupo = a.PiuVicina(EntityType.Wolf, PX, PZ)) != null && !lupi.Contains(lupo.EntityId)
+            Aspetta(() => (lupo = a.PiuVicina(EntityType.Wolf, PX, PZ, lupiPrima)) != null
                           && Dist(lupo.X, lupo.Z, PX, PZ) < 4f, 5);
-            if (lupo == null || lupi.Contains(lupo.EntityId)) { Male("il lupo d'ufficio non e' comparso accanto ad A"); return -1; }
+            if (lupo == null || Dist(lupo.X, lupo.Z, PX, PZ) >= 4f) { Male("il lupo d'ufficio non e' comparso accanto ad A"); return -1; }
             lupi.Add(lupo.EntityId);
             Pausa(0.3);
             int prima = a.Quanti(ItemType.RawHide);
@@ -9559,6 +9592,13 @@ static class Regole
         finally
         {
             foreach (var id in lupi) a.Admin($"remove {id}");
+            // Anche un lupo nato ma non riconosciuto: qui restava vivo e le prove
+            // dopo, nello stesso punto, colpivano lui invece della sonda (P6).
+            List<ulong> rimasti;
+            lock (a.Mondo)
+                rimasti = a.Mondo.Values.Where(e => e.Type == EntityType.Wolf && !lupi.Contains(e.EntityId)
+                                                 && Dist(e.X, e.Z, PX, PZ) < 8f).Select(e => e.EntityId).ToList();
+            foreach (var id in rimasti) a.Admin($"remove {id}");
             foreach (var s in new[] { a, b }) { s.Admin("setfaction 1"); s.Admin("effetto azzera"); s.Admin("abilita azzera"); s.Admin("clearinv"); s.Admin("sethp 1000"); }
             a.Dotazione(ItemType.None, ItemType.None, SideItemType.None);
             b.Dotazione(ItemType.None, ItemType.None, SideItemType.None);
