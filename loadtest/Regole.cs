@@ -1847,6 +1847,27 @@ static class Regole
         Console.WriteLine($"  accanto al banco: cappucci={s.Quanti(ItemType.LeatherHood)} cuoio={s.Quanti(ItemType.Leather)}");
         if (!creato) Male("accanto al banco il cappuccio non e' stato creato, o il cuoio non e' stato consumato");
 
+        // Il pezzo creato arriva col suo id d'esemplare e intero, e si indossa
+        // subito, senza rientrare (A14r3a: e quello che fa il client dallo zaino).
+        ulong creatoId = 0; int creatoUsura = 0;
+        s.Attendi(() =>
+        {
+            lock (s.Zaino)
+                foreach (var kv in s.Istanze)
+                    if (kv.Value.Tipo == ItemType.LeatherHood) { creatoId = kv.Key; creatoUsura = kv.Value.Usura; return true; }
+            return false;
+        }, 5);
+        Console.WriteLine($"  cappuccio creato: id={creatoId} usura={creatoUsura}");
+        if (creatoId == 0) Male("il cappuccio creato al banco non e' arrivato col suo id d'esemplare");
+        else
+        {
+            if (creatoUsura != 70) Male($"il cappuccio creato ha usura {creatoUsura}, atteso intero (70)");
+            if (!Equip(creatoId)) Male("il cappuccio appena creato non si indossa");
+            else if (!s.Attendi(() => s.Indossati?.Worn.Length == 3 && s.Indossati.Worn[0].InstanceId == creatoId, 5))
+                Male($"il cappuccio creato non e' in testa: [{Indosso()}]");
+            if (!Equip(0, EquipSlot.Head)) Male("togliere il cappuccio creato e' stato rifiutato");
+        }
+
         // 3. esemplari col grado, dal comando di prova.
         ulong Dai(string riga, ItemType tipo, Grade grado)
         {
