@@ -8311,6 +8311,206 @@ static class Regole
         return ok;
     }
 
+    /// <summary>
+    /// A14o4: gli effetti di Migrazione, Silenzio del mondo finito e Cuore di
+    /// Torak. A porta l'unica (data col comando admin, una alla volta,
+    /// evolvendo il Mago), fazione 1 con la spada di pietra; B e il nemico
+    /// (fazione 2, spada di pietra) a 1,5 m; C alleata di A, a mani vuote, a
+    /// 3 m.
+    /// - Migrazione: A e C +50% velocita e immuni (il rallentamento che C
+    ///   aveva va via); A non si stordisce ne si immobilizza; B niente.
+    /// - Silenzio del mondo finito: B dentro e zittito e rallentato del 40%, la
+    ///   Parata non parte; C alleata no; B uscito torna libero; finito il
+    ///   silenzio la Parata di B parte.
+    /// - Cuore di Torak sul punto di A: B a 6 m dal centro non perde niente
+    ///   durante la carica, poi 88 (200 calando al 25% sul bordo di 8 m); C
+    ///   alleata niente. Con A stordito durante la carica non esplode.
+    /// </summary>
+    public static bool UnicheA14o4(string tokenA, string tokenB, string tokenC, string host, int port)
+    {
+        Console.WriteLine("--- effetti delle uniche: Migrazione, Silenzio del mondo finito, Cuore di Torak");
+        bool ok = true;
+        void Male(string m) { Console.WriteLine("  FALLITA: " + m); ok = false; }
+
+        using var a = new Sonda(tokenA, host, port);
+        using var b = new Sonda(tokenB, host, port);
+        using var c = new Sonda(tokenC, host, port);
+        if (!a.AttendiPronta() || !b.AttendiPronta() || !c.AttendiPronta())
+        { Console.WriteLine("  FALLITA: le sonde non sono entrate in gioco"); return false; }
+
+        const float PX = -150f, PZ = 250f;   // lo stesso punto delle prove delle armi
+        static byte[] P<T>(T v) => MessagePack.MessagePackSerializer.Serialize(v);
+        bool Aspetta(Func<bool> cosa, double secondi) =>
+            a.Attendi(() => { b.Attendi(() => true, 0.01); c.Attendi(() => true, 0.01); return cosa(); }, secondi);
+        void Pausa(double secondi) => Aspetta(() => false, secondi);
+        static string Visto(CommandResultMsg r) => r == null ? "nessuna risposta" : r.Success ? "riuscito" : "rifiutato " + r.ErrorCode;
+        float Vita(Sonda chi) => a.Stato(chi.Id).Vita;
+        void Tp(Sonda s, float x, float z)
+        {
+            s.Admin($"tp {x.ToString(Inv)} {z.ToString(Inv)}");
+            Aspetta(() => Dist(s.X, s.Z, x, z) < 0.5f, 6);
+            s.Cammina(0f, 0f, 0.1);
+        }
+        void Piena(params Sonda[] chi)
+        {
+            foreach (var s in chi) s.Admin("sethp 1000");
+            Aspetta(() => chi.All(s => Vita(s) >= 100f), 3);
+            Pausa(0.3);
+        }
+        string Effetto(string riga) { Pausa(0.15); return a.ChiediAdmin("effetto " + riga, "effetto: ") ?? "(nessuna risposta)"; }
+        string StatoDi(Sonda s) => Effetto(s == a ? "stato" : $"stato {s.Id}");
+        uint idComando = 1600;
+        CommandResultMsg Comanda(Sonda s, CommandType tipo, byte[] dati)
+        {
+            uint n = idComando++;
+            Pausa(0.15);
+            s.Comando(n, tipo, dati);
+            CommandResultMsg r = null;
+            Aspetta(() => (r = s.Esito(n)) != null, 5);
+            return r;
+        }
+        // L'unica di A nel primo slot attivo, ricariche azzerate, usata verso +X
+        // (dove sta B), col punto (tx, tz) se c'e.
+        CommandResultMsg Prova(AbilityId id, float tx = 0f, float tz = 0f, double dopo = 0.2)
+        {
+            var r = Comanda(a, CommandType.SetAbilitySlot, P(new SetAbilitySlotCommand
+                { Kind = AbilitySlotKind.ClassActive, Slot = 0, Ability = id }));
+            if (r == null || !r.Success) Male($"{id} nello slot: {Visto(r)}");
+            Pausa(0.15); a.Admin("ricarica");
+            r = Comanda(a, CommandType.UseAbility, P(new UseAbilityCommand { Ability = id, Yaw = 90f, TargetX = tx, TargetZ = tz }));
+            Pausa(dopo);
+            return r;
+        }
+        // La Parata di B (un'abilita d'arma qualunque, che non fa danno).
+        CommandResultMsg ParataDiB()
+        {
+            var r = Comanda(b, CommandType.SetAbilitySlot, P(new SetAbilitySlotCommand
+                { Kind = AbilitySlotKind.Weapon, Family = WeaponFamily.Sword, Slot = 0, Ability = AbilityId.SwordParry }));
+            if (r == null || !r.Success) Male($"Parata di B nello slot: {Visto(r)}");
+            Pausa(0.15); b.Admin("ricarica");
+            return Comanda(b, CommandType.UseAbility, P(new UseAbilityCommand { Ability = AbilityId.SwordParry, Yaw = 270f }));
+        }
+        void Atteso(string cosa, CommandResultMsg r, ErrorCode atteso)
+        {
+            bool giusto = r != null && (atteso == ErrorCode.None ? r.Success : !r.Success && r.ErrorCode == atteso);
+            Console.WriteLine($"  {cosa}: {Visto(r)}{(giusto ? "" : $" (atteso {(atteso == ErrorCode.None ? "riuscito" : atteso.ToString())})")}");
+            if (!giusto) Male($"{cosa}: atteso {(atteso == ErrorCode.None ? "riuscito" : "rifiutato " + atteso)}");
+        }
+        void Controlla(string cosa, float visto, float atteso)
+        {
+            Console.WriteLine($"  {cosa}: {visto} (atteso {atteso})");
+            if (visto != atteso) Male($"{cosa}: {visto} invece di {atteso}");
+        }
+        void Contiene(string cosa, string riga, string pezzo, bool deve = true)
+        {
+            Console.WriteLine($"  {cosa}: {riga}");
+            if (riga.Contains(pezzo) != deve) Male($"{cosa}: {(deve ? "manca" : "non doveva esserci")} '{pezzo}'");
+        }
+        // A evolve il Mago nella classe e prende l'unica; via le passive di base.
+        void Unica(string evoluzione, AbilityId id)
+        {
+            Pausa(0.15); a.ChiediAdmin("classe mago", "classe: ");
+            Pausa(0.15); a.ChiediAdmin("classe sblocca", "classe: ");
+            Pausa(0.15); Console.WriteLine($"  {a.ChiediAdmin("evolvi " + evoluzione, "evolvi: ")}");
+            Pausa(0.15); a.ChiediAdmin("classe sblocca", "classe: ");
+            Pausa(0.15); Console.WriteLine($"  unica: {a.ChiediAdmin($"unica dai {(int)id}", "unica: ")}");
+            Pausa(0.4);
+            foreach (var slot in new byte[] { 0, 1 })
+            {
+                var r = Comanda(a, CommandType.SetAbilitySlot, P(new SetAbilitySlotCommand
+                    { Kind = AbilitySlotKind.ClassPassive, Slot = slot, Ability = AbilityId.None }));
+                if (r == null || !r.Success) Male($"svuotare lo slot passivo {slot}: {Visto(r)}");
+            }
+            Pausa(0.3);
+        }
+        void Pulisci() { Effetto("azzera"); Effetto($"azzera {b.Id}"); Effetto($"azzera {c.Id}"); }
+
+        try
+        {
+            a.Admin("setfaction 1"); b.Admin("setfaction 2"); c.Admin("setfaction 1");
+            foreach (var s in new[] { a, b, c }) { s.Admin("clearinv"); s.Admin("abilita azzera"); s.Admin("effetto azzera"); }
+            c.Dotazione(ItemType.None, ItemType.None, SideItemType.None);
+            foreach (var s in new[] { a, b })
+            {
+                s.Admin("give StoneSword 1");
+                Aspetta(() => s.Istanze.Values.Any(v => v.Tipo == ItemType.StoneSword), 5);
+                s.Dotazione(ItemType.StoneSword, ItemType.None, SideItemType.None);
+                s.Posizione(0);
+            }
+            Tp(a, PX, PZ); Tp(b, PX + 1.5f, PZ); Tp(c, PX - 3f, PZ);
+            Piena(a, b, c);
+
+            // 1. Migrazione.
+            Unica("discepolo", AbilityId.RootedMigration);
+            Effetto($"rallenta 50 10 {c.Id}");
+            Contiene("C rallentata prima della Migrazione", StatoDi(c), "rallentato 50%");
+            Atteso("Migrazione", Prova(AbilityId.RootedMigration), ErrorCode.None);
+            var sa = StatoDi(a);
+            Contiene("Migrazione, A", sa, "MoveSpeed +50%");
+            Contiene("Migrazione, A", sa, "immune ");
+            Contiene("Migrazione, A", sa, "immune all'immobilita");
+            var sc = StatoDi(c);
+            Contiene("Migrazione, C alleata", sc, "MoveSpeed +50%");
+            Contiene("Migrazione, C alleata, via il rallentamento", sc, "rallentato", deve: false);
+            Contiene("Migrazione, B nemico", StatoDi(b), "MoveSpeed", deve: false);
+            Contiene("Migrazione, A stordito", Effetto("stordisci 2"), "non si stordisce");
+            Contiene("Migrazione, A immobile", Effetto("immobile 2"), "non si immobilizza");
+            Effetto("rallenta 50 2");
+            Contiene("Migrazione, A rallentato", StatoDi(a), "rallentato", deve: false);
+            Pulisci();
+
+            // 2. Silenzio del mondo finito.
+            Unica("accolito", AbilityId.EchoWorldSilence);
+            Atteso("Parata di B senza silenzio", ParataDiB(), ErrorCode.None);
+            Pulisci();
+            Atteso("Silenzio del mondo finito", Prova(AbilityId.EchoWorldSilence), ErrorCode.None);
+            Contiene("Silenzio, A", StatoDi(a), "uniche4=silenzio-40");
+            var sb = StatoDi(b);
+            Contiene("Silenzio, B dentro", sb, "zittito");
+            Contiene("Silenzio, B dentro", sb, "rallentato 40%");
+            Contiene("Silenzio, C alleata", StatoDi(c), "zittito", deve: false);
+            Atteso("Parata di B nel silenzio", ParataDiB(), ErrorCode.AbilityNotUsable);
+            Tp(b, PX + 15f, PZ);
+            Pausa(0.2);
+            Contiene("Silenzio, B uscito", StatoDi(b), "zittito", deve: false);
+            if (!Aspetta(() => !StatoDi(a).Contains("uniche4="), 6)) Male("il silenzio deve finire");
+            Tp(b, PX + 1.5f, PZ);
+            Contiene("Silenzio finito, B", StatoDi(b), "zittito", deve: false);
+            Atteso("Parata di B a silenzio finito", ParataDiB(), ErrorCode.None);
+            Pulisci();
+
+            // 3. Cuore di Torak sul punto di A: B a 6 m, C alleata a 3 m.
+            Unica("adepto", AbilityId.CrystalHeartOfTorak);
+            Tp(b, PX + 6f, PZ);
+            Piena(a, b, c);
+            float vb = Vita(b), vc = Vita(c);
+            Atteso("Cuore di Torak", Prova(AbilityId.CrystalHeartOfTorak, PX, PZ, dopo: 0.3), ErrorCode.None);
+            Contiene("Cuore di Torak, A carica", StatoDi(a), "uniche4=cuore");
+            Controlla("Cuore di Torak, B durante la carica", vb - Vita(b), 0f);
+            Aspetta(() => Vita(b) < vb, 3);
+            Pausa(0.4);
+            Controlla("Cuore di Torak, B a 6 m dal centro", vb - Vita(b), 88f);
+            Controlla("Cuore di Torak, C alleata", vc - Vita(c), 0f);
+            Contiene("Cuore di Torak esploso, A", StatoDi(a), "uniche4=", deve: false);
+            Piena(b);
+            vb = Vita(b);
+            Atteso("Cuore di Torak, poi A stordito", Prova(AbilityId.CrystalHeartOfTorak, PX, PZ, dopo: 0.0), ErrorCode.None);
+            Effetto("stordisci 3");
+            Pausa(2.5);
+            Controlla("Cuore di Torak perso, B", vb - Vita(b), 0f);
+        }
+        finally
+        {
+            foreach (var s in new[] { a, b, c }) { s.Admin("setfaction 1"); s.Admin("effetto azzera"); s.Admin("abilita azzera"); s.Admin("clearinv"); s.Admin("sethp 1000"); }
+            a.Dotazione(ItemType.None, ItemType.None, SideItemType.None);
+            b.Dotazione(ItemType.None, ItemType.None, SideItemType.None);
+            Pausa(0.5);
+        }
+
+        if (ok) Console.WriteLine("  OK: Migrazione, Silenzio del mondo finito e Cuore di Torak fanno quello che dice il catalogo");
+        return ok;
+    }
+
     // ---- passiva dello scudo e Pietraviva (A14h) --------------------------------
     //
     // Decisioni/abilita.md sezione 3: con lo scudo nella mano libera, quando
