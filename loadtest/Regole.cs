@@ -5285,15 +5285,23 @@ static class Regole
         }
 
         // 7. col solo cristallo: una Comune della classe principale; il Mago non
-        //    ha Rare, quindi un Raro da Mago e' un dono vuoto (lo sblocco
-        //    dell'Adepto e' A14p)
+        //    ha Rare: il primo dono Raro da Mago apre l'Adepto (A14p), il
+        //    secondo e' vuoto
         Tiro("dono", "caso");
         s.ChiediAdmin("classe mago", "classe: ");
         s.ChiediAdmin("classe sblocca", "classe: ");
         Pausa(0.4);
         UnaNuova(0, CrystalType.Common, "solo cristallo Comune da Mago",
                  a => AbilityIds.ClassOf(a) == ClassId.Mage && AbilityIds.GradeOf(a) == Grade.Common);
-        Vuoto(0, CrystalType.Rare, "solo cristallo Raro da Mago");
+        {
+            var prima = Sbloccate();
+            var r = Rito(0, CrystalType.Rare, "solo cristallo Raro da Mago, la prima volta");
+            if (r != null && !r.Boon.Contains("Adepto dei Cristalli")) Male("il primo dono Raro da Mago doveva aprire l'Adepto");
+            if (!s.Attendi(() => s.Abilita?.EvolutionsOpen?.Contains(ClassId.CrystalAdept) == true, 3))
+                Male("dopo il dono l'Adepto non risulta aperto nello stato");
+            if (Sbloccate().Count != prima.Count) Male("aprire l'Adepto non deve sbloccare abilita'");
+        }
+        Vuoto(0, CrystalType.Rare, "solo cristallo Raro da Mago, la seconda volta");
 
         // 8. solo il conto: niente dono, e il conto c'e'
         Tiro("conto", "caso");
@@ -12824,6 +12832,143 @@ static class Regole
         }
 
         if (ok) Console.WriteLine("  OK: la Fiamma persistente brucia 10 al secondo per 6 s chi ci sta dentro, e se ne accende una sola");
+        return ok;
+    }
+
+    /// <summary>
+    /// A14p: le evoluzioni del Mago. Il comando Evolve rifiuta senza Mago
+    /// principale, col Mago non sbloccato, con l'evoluzione non aperta, con una
+    /// classe che non e un'evoluzione. L'Accolito si apre a chi ha colpito un
+    /// Divoratore quando muore (A si, B che non l'ha colpito no); evolvendo, le
+    /// Comuni del Mago diventano altrettante Comuni dell'Accolito, arrivano le
+    /// sue base e la principale cambia. Il Discepolo si apre solo col comando
+    /// admin; ci si evolve tornando Mago, e si torna all'Accolito cambiando
+    /// classe. L'Adepto (dono del rituale Raro da Mago) e nella prova "il tiro
+    /// nuovo dei rituali: il dono".
+    /// </summary>
+    public static bool EvoluzioniDelMago(string tokenA, string tokenB, string host, int port)
+    {
+        Console.WriteLine("--- evoluzioni del mago: condizioni, Evolve, comuni convertite, ritorno");
+        bool ok = true;
+        void Male(string m) { Console.WriteLine("  FALLITA: " + m); ok = false; }
+
+        using var a = new Sonda(tokenA, host, port);
+        using var b = new Sonda(tokenB, host, port);
+        if (!a.AttendiPronta() || !b.AttendiPronta())
+        { Console.WriteLine("  FALLITA: le sonde non sono entrate in gioco"); return false; }
+
+        const float PX = -155f, PZ = 245f;   // lontano da tutto, come le altre prove delle abilita
+        static byte[] P<T>(T v) => MessagePack.MessagePackSerializer.Serialize(v);
+        bool Aspetta(Func<bool> cosa, double secondi) =>
+            a.Attendi(() => { b.Attendi(() => true, 0.01); return cosa(); }, secondi);
+        void Pausa(double secondi) => Aspetta(() => false, secondi);
+        void Tp(Sonda s, float x, float z)
+        {
+            s.Admin($"tp {x.ToString(Inv)} {z.ToString(Inv)}");
+            Aspetta(() => Dist(s.X, s.Z, x, z) < 0.5f, 6);
+            s.Cammina(0f, 0f, 0.1);
+        }
+        uint idComando = 140;
+        CommandResultMsg Manda(CommandType tipo, byte[] contenuto)
+        {
+            uint id = idComando++;
+            Pausa(0.15);
+            a.Comando(id, tipo, contenuto);
+            CommandResultMsg r = null;
+            Aspetta(() => (r = a.Esito(id)) != null, 5);
+            Pausa(0.3);   // lo stato delle abilita arriva subito dopo l'esito
+            return r;
+        }
+        void Atteso(string cosa, CommandResultMsg r, ErrorCode atteso)
+        {
+            string visto = r == null ? "nessuna risposta" : r.Success ? "riuscito" : $"rifiutato {r.ErrorCode}";
+            Console.WriteLine($"  {cosa}: {visto}");
+            bool va = r != null && (atteso == ErrorCode.None ? r.Success : !r.Success && r.ErrorCode == atteso);
+            if (!va) Male($"{cosa}: atteso {(atteso == ErrorCode.None ? "riuscito" : "rifiutato " + atteso)}");
+        }
+        CommandResultMsg Evolvi(ClassId c) => Manda(CommandType.Evolve, P(new EvolveCommand { Into = c }));
+        CommandResultMsg Scegli(ClassId c) => Manda(CommandType.ChooseClass, P(new ChooseClassCommand { Class = c }));
+        AbilityId[] Comuni(Sonda s, ClassId c) =>
+            (s.Abilita?.Unlocked ?? Array.Empty<AbilityProgress>())
+                .Select(u => u.Id).Where(id => AbilityIds.ClassOf(id) == c && AbilityIds.GradeOf(id) == Grade.Common).ToArray();
+        bool Aperta(Sonda s, ClassId c) => s.Abilita?.EvolutionsOpen?.Contains(c) == true;
+        bool Sbloccata(ClassId c) => a.Abilita?.Classes?.Any(x => x.Class == c && x.Unlocked) == true;
+
+        a.Admin("setfaction 1"); b.Admin("setfaction 2");
+        foreach (var s in new[] { a, b }) { s.Admin("clearinv"); s.Admin("abilita azzera"); s.Admin("effetto azzera"); }
+        a.Admin("echi uccidi");
+        Tp(a, PX, PZ); Tp(b, PX + 30f, PZ);
+        Pausa(0.5);
+
+        // 1. i rifiuti
+        Atteso("Evolve senza classe", Evolvi(ClassId.EchoAcolyte), ErrorCode.NotAllowed);
+        Atteso("principale Mago", Scegli(ClassId.Mage), ErrorCode.None);
+        Atteso("Evolve col Mago non sbloccato", Evolvi(ClassId.CrystalAdept), ErrorCode.NotAllowed);
+        Console.WriteLine($"  classe sblocca -> {a.ChiediAdmin("classe sblocca", "classe: ")}");
+        Atteso("Evolve in un'evoluzione non aperta", Evolvi(ClassId.EchoAcolyte), ErrorCode.NotAllowed);
+        Atteso("Evolve nel Guerriero", Evolvi(ClassId.Warrior), ErrorCode.InvalidCommand);
+
+        // 2. l'Accolito: A colpisce un Divoratore, che muore; B c'e ma non
+        //    l'ha colpito
+        a.Admin("echi evoca Epic");
+        Pausa(0.6);
+        var echi = a.ChiediAdmin("echi", "echi: ") ?? "";
+        Console.WriteLine($"  echi: {echi}");
+        if (!echi.Contains("divoratori 1")) Male("'echi evoca Epic' doveva chiamare un Divoratore");
+        a.Admin("echi colpisci");
+        Pausa(0.3);
+        if (Aperta(a, ClassId.EchoAcolyte)) Male("l'Accolito si e' aperto prima che il Divoratore morisse");
+        a.Admin("echi uccidi");
+        if (!Aspetta(() => Aperta(a, ClassId.EchoAcolyte), 4)) Male("alla morte del Divoratore l'Accolito non si e' aperto per A");
+        if (!Aspetta(() => a.HaLetto("puoi diventare Accolito"), 3)) Male("l'apertura dell'Accolito non e' stata detta in chat");
+        Pausa(0.3);
+        if (Aperta(b, ClassId.EchoAcolyte)) Male("l'Accolito si e' aperto anche per B, che non aveva colpito");
+        Console.WriteLine($"  evoluzioni aperte: A={string.Join(",", a.Abilita?.EvolutionsOpen ?? Array.Empty<ClassId>())} " +
+                          $"B={string.Join(",", b.Abilita?.EvolutionsOpen ?? Array.Empty<ClassId>())}");
+
+        // 3. evolvere: due Comuni del Mago diventano due Comuni dell'Accolito
+        Console.WriteLine($"  {a.ChiediAdmin("abilita sblocca 1310", "abilita sblocca: ")}");
+        Console.WriteLine($"  {a.ChiediAdmin("abilita sblocca 1360", "abilita sblocca: ")}");
+        Pausa(0.3);
+        Atteso("Evolve nell'Accolito", Evolvi(ClassId.EchoAcolyte), ErrorCode.None);
+        Aspetta(() => a.Abilita?.MainClass == ClassId.EchoAcolyte, 3);
+        var mago = Comuni(a, ClassId.Mage);
+        var accolito = Comuni(a, ClassId.EchoAcolyte);
+        Console.WriteLine($"  principale={a.Abilita?.MainClass} comuni del Mago={string.Join(",", mago.Select(x => (int)x))} " +
+                          $"comuni dell'Accolito={string.Join(",", accolito.Select(x => (int)x))}");
+        if (a.Abilita?.MainClass != ClassId.EchoAcolyte) Male("dopo Evolve la principale doveva essere l'Accolito");
+        if (!Sbloccata(ClassId.EchoAcolyte)) Male("dopo Evolve l'Accolito doveva essere sbloccato");
+        if (accolito.Length != 2) Male($"attese 2 Comuni dell'Accolito al posto di quelle del Mago, viste {accolito.Length}");
+        if (mago.Length != 2) Male("le Comuni del Mago dovevano restare sul Mago");
+        var basi = new[] { AbilityId.EchoAshTouch, AbilityId.EchoDarkSkin, AbilityId.EchoDarkTemper, AbilityId.EchoDeaf };
+        if (!basi.All(x => a.Abilita?.Unlocked.Any(u => u.Id == x) == true)) Male("mancano le base dell'Accolito");
+        if (!(a.Abilita?.ClassActiveSlots ?? Array.Empty<AbilityId>()).Contains(AbilityId.EchoAshTouch))
+            Male("le attive base dell'Accolito dovevano andare negli slot vuoti");
+        if (!Aspetta(() => a.HaLetto("diventa Accolito degli Echi"), 3)) Male("l'evoluzione non e' stata detta in chat");
+        Atteso("Evolve di nuovo, dall'Accolito", Evolvi(ClassId.EchoAcolyte), ErrorCode.NotAllowed);
+
+        // 4. il Discepolo: solo col comando admin; si evolve tornando Mago
+        Atteso("Evolve nel Discepolo, non aperto", Evolvi(ClassId.RootedDisciple), ErrorCode.NotAllowed);
+        var apri = a.ChiediAdmin("evoluzione apri discepolo", "evoluzione: ");
+        Console.WriteLine($"  evoluzione apri discepolo -> {apri}");
+        if (apri != "RootedDisciple aperta") Male("'evoluzione apri discepolo' doveva aprire il Discepolo");
+        Atteso("tornare Mago", Scegli(ClassId.Mage), ErrorCode.None);
+        Atteso("Evolve nel Discepolo", Evolvi(ClassId.RootedDisciple), ErrorCode.None);
+        var disc = Comuni(a, ClassId.RootedDisciple);
+        Console.WriteLine($"  principale={a.Abilita?.MainClass} comuni del Discepolo={string.Join(",", disc.Select(x => (int)x))}");
+        if (a.Abilita?.MainClass != ClassId.RootedDisciple) Male("dopo Evolve la principale doveva essere il Discepolo");
+        if (disc.Length != 2) Male($"attese 2 Comuni del Discepolo, viste {disc.Length}");
+        Atteso("tornare all'Accolito cambiando classe", Scegli(ClassId.EchoAcolyte), ErrorCode.None);
+        if (Comuni(a, ClassId.EchoAcolyte).Length != 2) Male("tornando all'Accolito le sue Comuni dovevano essere ancora quelle");
+        var riga = a.ChiediAdmin("evoluzione stato", "evoluzione: ");
+        Console.WriteLine($"  evoluzione stato -> {riga}");
+        if (riga != "aperte=RootedDisciple,EchoAcolyte") Male("'evoluzione stato' doveva dire Discepolo e Accolito");
+
+        // Le prove dopo trovano le sonde come prima.
+        a.Admin("echi uccidi");
+        foreach (var s in new[] { a, b }) { s.Admin("abilita azzera"); s.Admin("effetto azzera"); s.Admin("clearinv"); }
+        Pausa(0.5);
+        if (ok) Console.WriteLine("  OK: le evoluzioni si aprono con la loro condizione e si raggiungono solo dal Mago");
         return ok;
     }
 
