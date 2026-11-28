@@ -6550,6 +6550,164 @@ static class Regole
         return ok;
     }
 
+    // ---- 15b3b. il sonno del Custode sui guaritori --------------------------------
+    //
+    // Backlog B8 (decisioni/boss.md): ogni 40 secondi il Custode blocca per 30
+    // le abilita' di chi ha curato negli ultimi 10. Qui A e' il Discepolo dei
+    // Radicati (Linfa), B un alleato ferito, tutti e due dentro il santuario.
+    // Il sonno si chiede d'ufficio ("custode sonno"): senza cure salta, dopo
+    // una Linfa prende A e non B, A non usa piu' abilita', chi dorme gia' non
+    // si riaddormenta, e una cura di piu' di 10 secondi fa non conta.
+
+    public static bool SonnoDelCustode(string tokenA, string tokenB, string host, int port)
+    {
+        Console.WriteLine("--- sonno del Custode: chi ha curato negli ultimi 10 secondi perde le abilita' per 30, chi non cura no");
+        bool ok = true;
+        void Male(string m) { Console.WriteLine("  FALLITA: " + m); ok = false; }
+
+        using var a = new Sonda(tokenA, host, port);
+        using var b = new Sonda(tokenB, host, port);
+        if (!a.AttendiPronta() || !b.AttendiPronta()) { Console.WriteLine("  FALLITA: le sonde non sono entrate in gioco"); return false; }
+
+        static byte[] P<T>(T v) => MessagePack.MessagePackSerializer.Serialize(v);
+        bool Aspetta(Func<bool> cosa, double secondi) =>
+            a.Attendi(() => { b.Attendi(() => true, 0.01); return cosa(); }, secondi);
+        void Pausa(double secondi) => Aspetta(() => false, secondi);
+        static string Visto(CommandResultMsg r) => r == null ? "nessuna risposta" : r.Success ? "riuscito" : "rifiutato " + r.ErrorCode;
+        string Effetti(Sonda s) { Pausa(0.15); return a.ChiediAdmin(s == a ? "effetto stato" : $"effetto stato {s.Id}", "effetto: ") ?? "(nessuna risposta)"; }
+        uint idComando = 940;
+        CommandResultMsg Comanda(CommandType tipo, byte[] dati)
+        {
+            uint n = idComando++;
+            Pausa(0.15);
+            a.Comando(n, tipo, dati);
+            CommandResultMsg r = null;
+            Aspetta(() => (r = a.Esito(n)) != null, 5);
+            return r;
+        }
+        // Linfa nel primo slot attivo, ricariche azzerate, su B.
+        CommandResultMsg Linfa()
+        {
+            var r = Comanda(CommandType.SetAbilitySlot, P(new SetAbilitySlotCommand
+                { Kind = AbilitySlotKind.ClassActive, Slot = 0, Ability = AbilityId.RootedSap }));
+            if (r == null || !r.Success) Male($"Linfa nello slot: {Visto(r)}");
+            Pausa(0.15); a.Admin("ricarica");
+            r = Comanda(CommandType.UseAbility, P(new UseAbilityCommand
+                { Ability = AbilityId.RootedSap, Yaw = 90f, TargetEntityId = b.Id }));
+            Pausa(0.2);
+            return r;
+        }
+        // Tutte e due in piedi; B ferito, perche' la Linfa abbia da curare.
+        void InPiedi(int vitaB = 100)
+        {
+            foreach (var s in new[] { a, b }) { s.Admin("aterra rialza"); s.Admin("sethp 100"); }
+            if (vitaB < 100) b.Admin($"sethp {vitaB}");
+            Aspetta(() => a.Stato(b.Id).Vita <= vitaB && !a.Stato(a.Id).ATerra, 2);
+        }
+        // I secondi di "zittito Ns" nella riga degli effetti, -1 se non c'e'.
+        static float Zittito(string riga)
+        {
+            int i = riga.IndexOf("zittito ", StringComparison.Ordinal);
+            if (i < 0) return -1f;
+            int f = riga.IndexOf('s', i + 8);
+            return f > i && float.TryParse(riga[(i + 8)..f], System.Globalization.NumberStyles.Float, Inv, out var v) ? v : -1f;
+        }
+
+        float aXZ = CentroXZ + 5f * Diag;   // 5 m dal centro
+        float bXZ = CentroXZ - 5f * Diag;   // 5 m dall'altra parte: 10 m da A, dentro la Linfa (15)
+        try
+        {
+            a.Admin("setfaction 1"); b.Admin("setfaction 1");
+            foreach (var s in new[] { a, b })
+            {
+                s.Admin("clearinv"); s.Admin("abilita azzera"); s.Admin("effetto azzera");
+                s.Dotazione(ItemType.None, ItemType.None, SideItemType.None);
+                s.Posizione(0);
+            }
+            Pausa(0.15); Console.WriteLine($"  {a.ChiediAdmin("classe mago", "classe: ")}");
+            Pausa(0.15); Console.WriteLine($"  {a.ChiediAdmin("evolvi discepolo", "evolvi: ")}");
+            Pausa(0.15); a.Admin("abilita sblocca discepolo");
+            Pausa(0.3);
+
+            a.Admin("santuario angolo 0");
+            a.Admin("santuario riposo");
+            a.Admin("setvitality 0.2");
+            a.Admin("custode dormi");
+            Pausa(1.5);   // il secondo del santuario: lo sposta al centro
+            MettiIn(a, aXZ, aXZ);
+            MettiIn(b, bXZ, bXZ);
+            Pausa(0.5);
+            if (!Dentro(a) || !Dentro(b)) Male("le sonde non sono dentro il santuario");
+
+            // --- al risveglio: nessun sonno, il primo fra 40 secondi
+            var sv = StatoCustode(a, "sveglia 2");
+            Console.WriteLine($"  svegliato: sonni {Sonda.Numero(sv, "sonni")}, prossimo sonno {Sonda.Numero(sv, "prossimo sonno")} s");
+            if (sv.GetValueOrDefault("stato") != "sveglio" || Sonda.Numero(sv, "sonni") != 0 || Sonda.Numero(sv, "prossimo sonno") < 38)
+                Male("al risveglio il Custode doveva avere nessun sonno e il prossimo fra 40 secondi");
+
+            // --- nessuno ha curato: il sonno salta
+            InPiedi();
+            var s0 = StatoCustode(a, "sonno");
+            Console.WriteLine($"  sonno senza cure: sonni {Sonda.Numero(s0, "sonni")}, ultimo {IdNumero(s0, "ultimo sonno")}, A {Effetti(a)}");
+            if (Sonda.Numero(s0, "sonni") != 0 || IdNumero(s0, "ultimo sonno") != 0) Male("senza cure il Custode ha addormentato qualcuno");
+            if (Sonda.Numero(s0, "prossimo sonno") < 38) Male("dopo un sonno saltato il prossimo doveva essere fra 40 secondi");
+
+            // --- A cura B con la Linfa: il sonno prende A, non B
+            InPiedi(50);
+            var r = Linfa();
+            Console.WriteLine($"  Linfa su B: {Visto(r)}");
+            if (r == null || !r.Success) Male("la Linfa di A su B non e' partita");
+            var s1 = StatoCustode(a, "sonno");
+            string fxA = Effetti(a), fxB = Effetti(b);
+            Console.WriteLine($"  sonno dopo la Linfa: sonni {Sonda.Numero(s1, "sonni")}, ultimo {IdNumero(s1, "ultimo sonno")} (A e' {a.Id}); A {fxA}; B {fxB}");
+            if (Sonda.Numero(s1, "sonni") != 1 || IdNumero(s1, "ultimo sonno") != a.Id) Male("il sonno non ha preso chi aveva appena curato");
+            float zA = Zittito(fxA);
+            if (zA < 28f || zA > 30f) Male($"A doveva essere senza abilita' per 30 secondi, invece {zA}");
+            if (Zittito(fxB) >= 0f) Male("il sonno ha preso anche B, che non aveva curato");
+
+            // --- addormentato, A non usa abilita'
+            InPiedi(50);
+            r = Linfa();
+            Console.WriteLine($"  Linfa di A addormentato: {Visto(r)}");
+            if (r == null || r.Success || r.ErrorCode != ErrorCode.AbilityNotUsable) Male("addormentato, A usa ancora le abilita'");
+
+            // --- chi dorme gia' non si riaddormenta: il sonno salta
+            var s2 = StatoCustode(a, "sonno");
+            Console.WriteLine($"  sonno con A che dorme gia': sonni {Sonda.Numero(s2, "sonni")}");
+            if (Sonda.Numero(s2, "sonni") != 1) Male("il Custode ha riaddormentato chi dormiva gia'");
+
+            // --- una cura di piu' di 10 secondi fa non conta: A sveglio, nessuna
+            // cura per 11 secondi, poi il sonno salta.
+            InPiedi(50);
+            r = Linfa();   // A dorme: non parte, e non conta come cura
+            a.Admin("effetto azzera");
+            InPiedi();
+            Console.WriteLine($"  svegliato d'ufficio: A {Effetti(a)}");
+            var fine = DateTime.UtcNow.AddSeconds(11);
+            while (DateTime.UtcNow < fine) { InPiedi(); Pausa(0.5); }
+            var s3 = StatoCustode(a, "sonno");
+            Console.WriteLine($"  sonno 11 s dopo l'ultima cura: sonni {Sonda.Numero(s3, "sonni")}, A {Effetti(a)}");
+            if (Sonda.Numero(s3, "sonni") != 1 || Zittito(Effetti(a)) >= 0f) Male("una cura di piu' di 10 secondi fa ha fatto addormentare A");
+
+            // --- tornato a dormire, il conto riparte da zero
+            var dorme = StatoCustode(a, "dormi");
+            if (Sonda.Numero(dorme, "sonni") != 0 || IdNumero(dorme, "ultimo sonno") != 0) Male("addormentato, il Custode ricorda ancora i sonni");
+        }
+        finally
+        {
+            a.Admin("custode dormi");
+            a.Admin("setvitality 1");
+            foreach (var s in new[] { a, b })
+            {
+                s.Admin("aterra rialza"); s.Admin("effetto azzera"); s.Admin("abilita azzera"); s.Admin("clearinv");
+                s.Admin("tp 30 30"); s.Admin("sethp 1000");
+            }
+            Pausa(0.5);
+        }
+        if (ok) Console.WriteLine("  OK: il Custode addormenta chi ha appena curato, per 30 secondi, e lascia stare chi non cura");
+        return ok;
+    }
+
     // ---- 15b4. il bottino del Custode ---------------------------------------------
     //
     // Backlog B6 (decisioni/boss.md): battuto, il Custode lascia a terra dentro
