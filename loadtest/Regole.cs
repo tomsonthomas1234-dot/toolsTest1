@@ -5351,6 +5351,14 @@ static class Regole
 
         string Stato(Sonda chi) => chi.ChiediAdmin("unico stato 1", "unico: ") ?? "(nessuna risposta)";
         if (Stato(s) != "libero") { Male($"la Lama (Dono 1) non e' libera all'inizio: '{Stato(s)}'"); return false; }
+        // Il contatore dei passaggi non si azzera quando il Dono torna libero
+        // (A14n1): se una prova di prima ha fatto passare di mano la Lama
+        // ("avvisi sugli unici" ne prende uno a caso), qui non parte da 0.
+        // Si legge dallo stato dei Doni (A14n4) e si conta da li' (P7).
+        if (!s.Attendi(() => s.Doni?.Uniques?.Any(u => u.Id == 1) == true, 5))
+        { Male("lo stato dei Doni non e' arrivato: non so da quanti passaggi parte la Lama"); return false; }
+        int passaggi0 = s.Doni.Uniques.First(u => u.Id == 1).TimesTaken;
+        Console.WriteLine($"  la Lama libera parte da {passaggi0} passaggi");
         if (s.ChiediAdmin("tirorituale dono caso", "tirorituale: ") == null) { Male("il comando tirorituale non risponde"); return false; }
 
         byte Grado(ulong id) { lock (s.Zaino) return s.GradiIstanze.TryGetValue(id, out var g) ? g : (byte)255; }
@@ -5418,9 +5426,9 @@ static class Regole
             s.Attendi(() => Stato(s) != diS, 8);
             string diO = Stato(s);
             Console.WriteLine($"  registro: prima '{diS}', dopo la raccolta '{diO}'");
-            if (!diO.StartsWith("di ") || diO == diS || !diO.EndsWith(" passaggi 1"))
-                Male($"il passaggio di mano non e' contato: '{diO}'");
-            if (!diS.EndsWith(" passaggi 0")) Male($"appena nata la Lama doveva avere 0 passaggi: '{diS}'");
+            if (!diO.StartsWith("di ") || diO == diS || !diO.EndsWith($" passaggi {passaggi0 + 1}"))
+                Male($"il passaggio di mano non e' contato: '{diO}' (attesi {passaggi0 + 1} passaggi)");
+            if (!diS.EndsWith($" passaggi {passaggi0}")) Male($"nascendo il contatore della Lama doveva restare a {passaggi0}: '{diS}'");
 
             // 5. la Lama e' dell'altra: una seconda spada Epica, ora che la sonda
             //    non porta Doni, da' un dono vuoto
