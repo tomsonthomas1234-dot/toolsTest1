@@ -191,6 +191,7 @@ if (modoRegole)
         ("abilita uniche",          () => Regole.AbilitaUniche(tokens[1], tokens[0], tokens[4], host, port)),
         ("stato delle uniche",      () => Regole.StatoDelleUniche(tokens[1], tokens[0], host, port)),
         ("effetti delle uniche",    () => Regole.UnicheA14o3(tokens[1], tokens[0], tokens[4], host, port)),
+        ("altre uniche",            () => Regole.UnicheA14o4(tokens[1], tokens[0], tokens[4], host, port)),
         ("passiva dello scudo",     () => Regole.PassivaDelloScudo(tokens[1], host, port)),
         ("classi",                  () => Regole.Classi(tokens[1], tokens[0], host, port)),
         ("guerriero",               () => Regole.Guerriero(tokens[1], tokens[0], tokens[4], host, port)),
